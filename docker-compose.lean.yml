@@ -1,0 +1,28 @@
+# Lean stack — api + web only. Expects DATABASE_URL, REDIS_URL, and MINIO_*
+# in .env to point at services hosted elsewhere (VPS, managed cloud, etc.).
+# No local postgres/redis/minio containers are started.
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      HOST: 0.0.0.0
+    ports:
+      - "3001:3001"
+
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      NODE_ENV: production
+    ports:
+      - "3000:3000"
+    depends_on:
+      - api

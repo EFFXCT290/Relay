@@ -1,0 +1,229 @@
+// Relay — unified schema (v1.0 + v1.1 addendum)
+// Source of truth: Documentation/API_DOCUMENTATION.md + RELAY_API_ADDENDUM_v1.1.md
+// v1.1 supersedes v1.0 for: Media model (quality/status), Read receipts, Last seen.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+//  Identity
+// ────────────────────────────────────────────────────────────────────────────
+
+model User {
+  id           String   @id @default(uuid())
+  username     String   @unique @db.VarChar(30)
+  passwordHash String
+  passwordSalt String   @db.Char(64) // 32 bytes hex
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  sentMessages  Message[]        @relation("SentMessages")
+  conversations Participant[]
+  notifications Notification[]
+  accessLogs    MediaAccessLog[]
+  reads         MessageRead[]
+  reactions     Reaction[]
+  presence      UserPresence?
+
+  @@index([username])
+}
+
+model UserPresence {
+  userId     String   @id
+  lastSeenAt DateTime @updatedAt
+  isOnline   Boolean  @default(false)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+//  Conversations & messages
+// ────────────────────────────────────────────────────────────────────────────
+
+model Conversation {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  participants Participant[]
+  messages     Message[]
+}
+
+model Participant {
+  id             String    @id @default(uuid())
+  userId         String
+  conversationId String
+  joinedAt       DateTime  @default(now())
+  acceptedAt     DateTime?
+
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, conversationId])
+  @@index([conversationId])
+}
+
+model Message {
+  id             String      @id @default(uuid())
+  conversationId String
+  senderId       String
+  type           MessageType
+  body           String?
+  replyToId      String?
+  isEdited       Boolean     @default(false)
+  editedAt       DateTime?
+  isDeleted      Boolean     @default(false)
+  deletedAt      DateTime?
+  deliveredAt    DateTime?
+  viewConfig     Json?       // { viewLimit: 1-5 | null, viewCount: 0 }
+  createdAt      DateTime    @default(now())
+
+  conversation Conversation  @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  sender       User          @relation("SentMessages", fields: [senderId], references: [id])
+  replyTo      Message?      @relation("Replies", fields: [replyToId], references: [id])
+  replies      Message[]     @relation("Replies")
+  media        Media[]
+  viewEvents   ViewEvent[]
+  reads        MessageRead[]
+  reactions    Reaction[]
+
+  @@index([conversationId, createdAt])
+  @@index([senderId])
+}
+
+model Reaction {
+  id        String   @id @default(uuid())
+  messageId String
+  userId    String
+  emoji     String   @db.VarChar(16)
+  createdAt DateTime @default(now())
+
+  message Message @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id])
+
+  @@unique([messageId, userId])   // one reaction per user per message; second tap toggles
+  @@index([messageId])
+}
+
+enum MessageType {
+  TEXT
+  IMAGE
+  VIDEO
+  AUDIO
+}
+
+model MessageRead {
+  id        String   @id @default(uuid())
+  messageId String
+  readerId  String
+  readAt    DateTime @default(now())
+
+  message Message @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  reader  User    @relation(fields: [readerId], references: [id])
+
+  @@unique([messageId, readerId])
+  @@index([messageId])
+  @@index([readerId])
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+//  Media (v1.1 — quality + status, one file per record)
+// ────────────────────────────────────────────────────────────────────────────
+
+model Media {
+  id         String       @id @default(uuid())
+  messageId  String
+  minioKey   String       @unique // media/{uuid}/file.{ext}
+  quality    MediaQuality
+  mimeType   String
+  sizeBytes  BigInt?      // null while PROCESSING
+  status     MediaStatus  @default(READY)
+  durationMs Int?
+  width      Int?
+  height     Int?
+  createdAt  DateTime     @default(now())
+
+  message    Message          @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  accessLogs MediaAccessLog[]
+}
+
+enum MediaQuality {
+  ORIGINAL   // stored exactly as received — no processing
+  COMPRESSED // FFmpeg-processed before storage
+}
+
+enum MediaStatus {
+  PROCESSING
+  READY
+  FAILED
+}
+
+model ViewEvent {
+  id         String   @id @default(uuid())
+  messageId  String
+  viewerId   String
+  viewedAt   DateTime @default(now())
+  viewNumber Int
+
+  message Message @relation(fields: [messageId], references: [id], onDelete: Cascade)
+
+  @@index([messageId, viewerId])
+}
+
+model MediaAccessLog {
+  id         String      @id @default(uuid())
+  mediaId    String
+  userId     String
+  action     MediaAction
+  detectedAt DateTime    @default(now())
+  metadata   Json?
+
+  media Media @relation(fields: [mediaId], references: [id], onDelete: Cascade)
+  user  User  @relation(fields: [userId], references: [id])
+
+  @@index([mediaId])
+  @@index([userId])
+}
+
+enum MediaAction {
+  VIEW
+  SCREENSHOT_ATTEMPT
+  RECORD_ATTEMPT
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+//  Notifications & auth blocklist
+// ────────────────────────────────────────────────────────────────────────────
+
+model Notification {
+  id        String           @id @default(uuid())
+  userId    String
+  type      NotificationType
+  payload   Json
+  isRead    Boolean          @default(false)
+  createdAt DateTime         @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, isRead])
+}
+
+enum NotificationType {
+  SYSTEM_ALERT
+  MESSAGE_RECEIVED
+  VIEW_COUNT_UPDATE
+  MEDIA_EXPIRED
+}
+
+model JtiBlocklist {
+  jti       String   @id
+  expiresAt DateTime
+
+  @@index([expiresAt])
+}

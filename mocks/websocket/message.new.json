@@ -1,0 +1,20 @@
+{
+  "event": "message:new",
+  "data": {
+    "message": {
+      "messageId": "mEEEEEEEE-EEEE-EEEE-EEEE-EEEEEEEEEEEE",
+      "conversationId": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+      "senderId": "22222222-2222-2222-2222-222222222222",
+      "senderUsername": "mira",
+      "type": "TEXT",
+      "body": "on my way",
+      "replyTo": null,
+      "isEdited": false,
+      "editedAt": null,
+      "isDeleted": false,
+      "viewConfig": null,
+      "media": [],
+      "createdAt": "2026-05-17T09:44:00.000Z"
+    }
+  }
+}

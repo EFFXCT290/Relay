@@ -1,0 +1,90 @@
+{
+  "messages": [
+    {
+      "messageId": "m99999999-9999-9999-9999-999999999999",
+      "conversationId": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+      "senderId": "11111111-1111-1111-1111-111111111111",
+      "senderUsername": "nora",
+      "type": "VIDEO",
+      "body": null,
+      "quality": "original",
+      "replyTo": null,
+      "isEdited": false,
+      "editedAt": null,
+      "isDeleted": false,
+      "viewConfig": { "viewLimit": 3, "viewCount": 1, "hasExpired": false },
+      "readBy": [
+        { "userId": "22222222-2222-2222-2222-222222222222", "readAt": "2026-05-17T09:42:00.000Z" }
+      ],
+      "media": [
+        {
+          "mediaId": "med11111-1111-1111-1111-111111111111",
+          "mimeType": "video/mp4",
+          "width": 1080,
+          "height": 1920,
+          "durationMs": 18000
+        }
+      ],
+      "reactions": { "❤️": 1 },
+      "createdAt": "2026-05-17T09:41:30.000Z"
+    },
+    {
+      "messageId": "m99999999-9999-9999-9999-999999999998",
+      "conversationId": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+      "senderId": "22222222-2222-2222-2222-222222222222",
+      "senderUsername": "mira",
+      "type": "TEXT",
+      "body": "photos from last night — only seeing these once 👀",
+      "replyTo": {
+        "messageId": "m99999999-9999-9999-9999-999999999997",
+        "preview": "yeah just got off work, what's up",
+        "type": "TEXT"
+      },
+      "isEdited": false,
+      "editedAt": null,
+      "isDeleted": false,
+      "viewConfig": null,
+      "readBy": [],
+      "media": [],
+      "reactions": {},
+      "createdAt": "2026-05-17T09:39:45.000Z"
+    },
+    {
+      "messageId": "m99999999-9999-9999-9999-999999999997",
+      "conversationId": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+      "senderId": "11111111-1111-1111-1111-111111111111",
+      "senderUsername": "nora",
+      "type": "TEXT",
+      "body": "yeah just got off work, what's up",
+      "replyTo": null,
+      "isEdited": false,
+      "editedAt": null,
+      "isDeleted": false,
+      "viewConfig": null,
+      "readBy": [
+        { "userId": "22222222-2222-2222-2222-222222222222", "readAt": "2026-05-17T09:39:30.000Z" }
+      ],
+      "media": [],
+      "reactions": {},
+      "createdAt": "2026-05-17T09:39:00.000Z"
+    },
+    {
+      "messageId": "m99999999-9999-9999-9999-999999999996",
+      "conversationId": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+      "senderId": "22222222-2222-2222-2222-222222222222",
+      "senderUsername": "mira",
+      "type": "TEXT",
+      "body": "hey, you around? need to send you something quick",
+      "replyTo": null,
+      "isEdited": false,
+      "editedAt": null,
+      "isDeleted": false,
+      "viewConfig": null,
+      "readBy": [],
+      "media": [],
+      "reactions": {},
+      "createdAt": "2026-05-17T09:38:00.000Z"
+    }
+  ],
+  "nextCursor": null
+}

@@ -1,0 +1,7 @@
+{
+  "type": "http://localhost:3001/errors/unauthorized",
+  "title": "Unauthorized",
+  "status": 401,
+  "detail": "Invalid credentials.",
+  "instance": "/api/auth/login"
+}

@@ -1,0 +1,19 @@
+{
+  "event": "notification:new",
+  "data": {
+    "notification": {
+      "notificationId": "nAAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA",
+      "type": "SYSTEM_ALERT",
+      "isRead": false,
+      "payload": {
+        "capturedBy": { "userId": "44444444-4444-4444-4444-444444444444", "username": "jules" },
+        "eventType": "SCREENSHOT_ATTEMPT",
+        "trigger": "visibilitychange",
+        "timestamp": "2026-05-17T09:43:12.000Z",
+        "mediaId": "med22222-2222-2222-2222-222222222222",
+        "thumbnailUrl": "https://example.invalid/thumb-jules-capture.jpg"
+      },
+      "createdAt": "2026-05-17T09:43:12.000Z"
+    }
+  }
+}

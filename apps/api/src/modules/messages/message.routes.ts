@@ -1,0 +1,420 @@
+import type { FastifyPluginAsyncTypebox } from "@fastify/type-provider-typebox";
+import { Type } from "@sinclair/typebox";
+import { ProblemError } from "../../backend-core/http/errors.js";
+import { MessageSchema } from "@relay/contracts";
+import {
+  emitMessageDeleted,
+  emitMessageEdited,
+  emitMessageNew,
+  emitMessageNewToUser,
+  emitMessageReaction,
+} from "./message.socket.js";
+
+// Guards that the caller is a participant of conversationId. Returns the
+// conversation row when authorized; throws ProblemError otherwise.
+async function assertParticipant(
+  fastify: import("fastify").FastifyInstance,
+  callerId: string,
+  conversationId: string,
+) {
+  const conv = await fastify.prisma.conversation.findUnique({
+    where: { id: conversationId },
+    include: { participants: { select: { userId: true } } },
+  });
+  if (!conv) throw new ProblemError("not_found", "Conversation not found.");
+  if (!conv.participants.some((p) => p.userId === callerId)) {
+    throw new ProblemError("forbidden", "You are not a participant.");
+  }
+  return conv;
+}
+
+const messageRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
+  // ── GET /api/conversations/:id/messages ───────────────────────────────────
+  fastify.get(
+    "/conversations/:conversationId/messages",
+    {
+      preHandler: [fastify.authenticate],
+      schema: {
+        params: Type.Object({ conversationId: Type.String({ format: "uuid" }) }),
+        querystring: Type.Object({
+          cursor: Type.Optional(Type.String({ format: "uuid" })),
+          limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100, default: 30 })),
+        }),
+        response: {
+          200: Type.Object({
+            messages: Type.Array(MessageSchema),
+            nextCursor: Type.Union([Type.String({ format: "uuid" }), Type.Null()]),
+          }),
+        },
+      },
+    },
+    async (request) => {
+      const callerId = request.userId!;
+      const { conversationId } = request.params;
+      const { cursor, limit = 30 } = request.query;
+      await assertParticipant(fastify, callerId, conversationId);
+
+      const rows = await fastify.prisma.message.findMany({
+        where: { conversationId },
+        include: {
+          sender: { select: { id: true, username: true } },
+          replyTo: { select: { id: true, body: true, type: true } },
+          reactions: { select: { emoji: true, userId: true } },
+          reads: { select: { readerId: true, readAt: true } },
+        },
+        orderBy: { createdAt: "desc" },
+        take: limit + 1,
+        ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
+      });
+
+      const hasMore = rows.length > limit;
+      const slice = hasMore ? rows.slice(0, -1) : rows;
+      const nextCursor = hasMore ? slice[slice.length - 1]?.id ?? null : null;
+
+      return {
+        messages: slice.map((m) => {
+          const counts: Record<string, number> = {};
+          let mine: string | null = null;
+          for (const r of m.reactions) {
+            counts[r.emoji] = (counts[r.emoji] ?? 0) + 1;
+            if (r.userId === callerId) mine = r.emoji;
+          }
+          return {
+            messageId: m.id,
+            conversationId: m.conversationId,
+            senderId: m.senderId,
+            senderUsername: m.sender.username,
+            type: m.type,
+            body: m.isDeleted ? null : m.body,
+            replyTo: m.replyTo
+              ? {
+                  messageId: m.replyTo.id,
+                  preview: m.replyTo.body ? m.replyTo.body.slice(0, 80) : null,
+                  type: m.replyTo.type,
+                }
+              : null,
+            isEdited: m.isEdited,
+            editedAt: m.editedAt ? m.editedAt.toISOString() : null,
+            isDeleted: m.isDeleted,
+            reactions: counts,
+            myReaction: mine,
+            readBy: m.reads.map((r) => ({
+              userId: r.readerId,
+              readAt: r.readAt.toISOString(),
+            })),
+            deliveredAt: m.deliveredAt ? m.deliveredAt.toISOString() : null,
+            createdAt: m.createdAt.toISOString(),
+          };
+        }),
+        nextCursor,
+      };
+    },
+  );
+
+  // ── POST /api/conversations/:id/messages (text only — Phase 1) ────────────
+  fastify.post(
+    "/conversations/:conversationId/messages",
+    {
+      preHandler: [fastify.authenticate],
+      schema: {
+        params: Type.Object({ conversationId: Type.String({ format: "uuid" }) }),
+        body: Type.Object({
+          body: Type.String({ minLength: 1, maxLength: 4000 }),
+          replyToId: Type.Optional(Type.Union([Type.String({ format: "uuid" }), Type.Null()])),
+        }),
+        response: {
+          201: Type.Object({
+            messageId: Type.String({ format: "uuid" }),
+            conversationId: Type.String({ format: "uuid" }),
+            senderId: Type.String({ format: "uuid" }),
+            type: Type.Literal("TEXT"),
+            body: Type.String(),
+            replyTo: Type.Union([Type.Null(), Type.Object({ messageId: Type.String(), preview: Type.Union([Type.String(), Type.Null()]), type: Type.String() })]),
+            reactions: Type.Record(Type.String(), Type.Integer()),
+            myReaction: Type.Union([Type.String(), Type.Null()]),
+            readBy: Type.Array(
+              Type.Object({
+                userId: Type.String({ format: "uuid" }),
+                readAt: Type.String({ format: "date-time" }),
+              }),
+            ),
+            deliveredAt: Type.Union([Type.String({ format: "date-time" }), Type.Null()]),
+            createdAt: Type.String({ format: "date-time" }),
+          }),
+        },
+      },
+      config: {
+        rateLimit: { max: 60, timeWindow: "1 minute" },
+      },
+    },
+    async (request, reply) => {
+      const callerId = request.userId!;
+      const { conversationId } = request.params;
+      const { body, replyToId } = request.body;
+      await assertParticipant(fastify, callerId, conversationId);
+
+      if (replyToId) {
+        const parent = await fastify.prisma.message.findUnique({
+          where: { id: replyToId },
+          select: { conversationId: true, body: true, type: true, id: true },
+        });
+        if (!parent || parent.conversationId !== conversationId) {
+          throw new ProblemError("bad_request", "replyToId is not in this conversation.");
+        }
+      }
+
+      // Determine recipients up front so we can fold "is the other side online?"
+      // into the create — anyone in their user:{id} room counts as delivered.
+      const participants = await fastify.prisma.participant.findMany({
+        where: { conversationId },
+        select: { userId: true },
+      });
+      const otherIds = participants
+        .map((p) => p.userId)
+        .filter((uid) => uid !== callerId);
+      const allRecipientsOnline =
+        otherIds.length > 0 &&
+        otherIds.every(
+          (uid) => (fastify.io.sockets.adapter.rooms.get(`user:${uid}`)?.size ?? 0) > 0,
+        );
+      const deliveredAt = allRecipientsOnline ? new Date() : null;
+
+      const created = await fastify.prisma.$transaction(async (tx) => {
+        const msg = await tx.message.create({
+          data: {
+            conversationId,
+            senderId: callerId,
+            type: "TEXT",
+            body,
+            ...(replyToId ? { replyToId } : {}),
+            ...(deliveredAt ? { deliveredAt } : {}),
+          },
+          include: {
+            replyTo: { select: { id: true, body: true, type: true } },
+            sender:  { select: { username: true } },
+          },
+        });
+        // Bump the conversation so inbox ordering stays correct.
+        await tx.conversation.update({
+          where: { id: conversationId },
+          data: { updatedAt: new Date() },
+        });
+        return msg;
+      });
+
+      const httpPayload = {
+        messageId: created.id,
+        conversationId: created.conversationId,
+        senderId: created.senderId,
+        type: "TEXT" as const,
+        body: created.body!,
+        replyTo: created.replyTo
+          ? {
+              messageId: created.replyTo.id,
+              preview: created.replyTo.body ? created.replyTo.body.slice(0, 80) : null,
+              type: created.replyTo.type,
+            }
+          : null,
+        reactions: {} as Record<string, number>,
+        myReaction: null as string | null,
+        readBy: [] as { userId: string; readAt: string }[],
+        deliveredAt: created.deliveredAt ? created.deliveredAt.toISOString() : null,
+        createdAt: created.createdAt.toISOString(),
+      };
+
+      // Broadcast carries the full Message shape — the HTTP response is a
+      // narrower subset (no senderUsername/isEdited/etc. since the caller is
+      // the sender and just-created messages can't yet be edited or deleted).
+      const broadcastMessage = {
+        ...httpPayload,
+        senderUsername: created.sender.username,
+        isEdited:  false,
+        editedAt:  null,
+        isDeleted: false,
+      };
+
+      emitMessageNew(fastify.io, conversationId, { message: broadcastMessage });
+      for (const p of participants) {
+        emitMessageNewToUser(fastify.io, p.userId, { message: broadcastMessage });
+      }
+
+      return reply.code(201).send(httpPayload);
+    },
+  );
+
+  // ── PATCH /api/messages/:messageId (edit text) ────────────────────────────
+  fastify.patch(
+    "/messages/:messageId",
+    {
+      preHandler: [fastify.authenticate],
+      schema: {
+        params: Type.Object({ messageId: Type.String({ format: "uuid" }) }),
+        body: Type.Object({ body: Type.String({ minLength: 1, maxLength: 4000 }) }),
+        response: {
+          200: Type.Object({
+            messageId: Type.String({ format: "uuid" }),
+            body: Type.String(),
+            isEdited: Type.Literal(true),
+            editedAt: Type.String({ format: "date-time" }),
+          }),
+        },
+      },
+    },
+    async (request) => {
+      const callerId = request.userId!;
+      const msg = await fastify.prisma.message.findUnique({
+        where: { id: request.params.messageId },
+      });
+      if (!msg) throw new ProblemError("not_found", "Message not found.");
+      if (msg.senderId !== callerId) throw new ProblemError("forbidden", "Not your message.");
+      if (msg.type !== "TEXT") {
+        throw new ProblemError("validation_error", "Only text messages can be edited.");
+      }
+      if (msg.isDeleted) {
+        throw new ProblemError("validation_error", "Cannot edit a deleted message.");
+      }
+
+      const editedAt = new Date();
+      const updated = await fastify.prisma.message.update({
+        where: { id: msg.id },
+        data: { body: request.body.body, isEdited: true, editedAt },
+      });
+
+      emitMessageEdited(fastify.io, msg.conversationId, {
+        messageId: updated.id,
+        body: updated.body!,
+        editedAt: editedAt.toISOString(),
+      });
+
+      return {
+        messageId: updated.id,
+        body: updated.body!,
+        isEdited: true as const,
+        editedAt: editedAt.toISOString(),
+      };
+    },
+  );
+
+  // ── POST /api/messages/:messageId/react ───────────────────────────────────
+  // Instagram-style single-reaction-per-user: re-posting the SAME emoji
+  // removes it (toggle), posting a different emoji replaces the prior one.
+  fastify.post(
+    "/messages/:messageId/react",
+    {
+      preHandler: [fastify.authenticate],
+      schema: {
+        params: Type.Object({ messageId: Type.String({ format: "uuid" }) }),
+        body: Type.Object({
+          emoji: Type.String({ minLength: 1, maxLength: 16 }),
+        }),
+        response: {
+          200: Type.Object({
+            messageId: Type.String({ format: "uuid" }),
+            reactions: Type.Record(Type.String(), Type.Integer()),
+            myReaction: Type.Union([Type.String(), Type.Null()]),
+          }),
+        },
+      },
+    },
+    async (request) => {
+      const callerId = request.userId!;
+      const { messageId } = request.params;
+      const { emoji } = request.body;
+
+      const msg = await fastify.prisma.message.findUnique({
+        where: { id: messageId },
+        select: { conversationId: true, isDeleted: true },
+      });
+      if (!msg) throw new ProblemError("not_found", "Message not found.");
+      if (msg.isDeleted) {
+        throw new ProblemError("validation_error", "Cannot react to a deleted message.");
+      }
+
+      // Caller must be a participant of the conversation.
+      const member = await fastify.prisma.participant.findUnique({
+        where: { userId_conversationId: { userId: callerId, conversationId: msg.conversationId } },
+        select: { userId: true },
+      });
+      if (!member) throw new ProblemError("forbidden", "You are not a participant.");
+
+      const existing = await fastify.prisma.reaction.findUnique({
+        where: { messageId_userId: { messageId, userId: callerId } },
+      });
+
+      if (existing?.emoji === emoji) {
+        // Toggle off — same emoji tapped again.
+        await fastify.prisma.reaction.delete({ where: { id: existing.id } });
+      } else if (existing) {
+        // Replace with a different emoji.
+        await fastify.prisma.reaction.update({
+          where: { id: existing.id },
+          data: { emoji },
+        });
+      } else {
+        await fastify.prisma.reaction.create({
+          data: { messageId, userId: callerId, emoji },
+        });
+      }
+
+      const [all, mine] = await Promise.all([
+        fastify.prisma.reaction.groupBy({
+          by: ["emoji"],
+          where: { messageId },
+          _count: { emoji: true },
+        }),
+        fastify.prisma.reaction.findUnique({
+          where: { messageId_userId: { messageId, userId: callerId } },
+          select: { emoji: true },
+        }),
+      ]);
+
+      const reactions = Object.fromEntries(all.map((r) => [r.emoji, r._count.emoji]));
+      const payload = {
+        messageId,
+        reactions,
+        myReaction: mine?.emoji ?? null,
+      };
+
+      emitMessageReaction(fastify.io, msg.conversationId, {
+        messageId: payload.messageId,
+        reactions: payload.reactions,
+        actorId:   callerId,
+      });
+
+      return payload;
+    },
+  );
+
+  // ── DELETE /api/messages/:messageId (soft delete) ─────────────────────────
+  fastify.delete(
+    "/messages/:messageId",
+    {
+      preHandler: [fastify.authenticate],
+      schema: {
+        params: Type.Object({ messageId: Type.String({ format: "uuid" }) }),
+      },
+    },
+    async (request, reply) => {
+      const callerId = request.userId!;
+      const msg = await fastify.prisma.message.findUnique({
+        where: { id: request.params.messageId },
+      });
+      if (!msg) throw new ProblemError("not_found", "Message not found.");
+      if (msg.senderId !== callerId) throw new ProblemError("forbidden", "Not your message.");
+
+      await fastify.prisma.message.update({
+        where: { id: msg.id },
+        data: { isDeleted: true, deletedAt: new Date() },
+      });
+
+      emitMessageDeleted(fastify.io, msg.conversationId, {
+        messageId:      msg.id,
+        conversationId: msg.conversationId,
+      });
+
+      return reply.code(204).send();
+    },
+  );
+};
+
+export default messageRoutes;

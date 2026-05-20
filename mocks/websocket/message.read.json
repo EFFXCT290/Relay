@@ -1,0 +1,12 @@
+{
+  "event": "message:read",
+  "data": {
+    "conversationId": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+    "readBy": "22222222-2222-2222-2222-222222222222",
+    "messageIds": [
+      "m99999999-9999-9999-9999-999999999999",
+      "m99999999-9999-9999-9999-999999999997"
+    ],
+    "readAt": "2026-05-17T09:42:00.000Z"
+  }
+}

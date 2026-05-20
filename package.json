@@ -1,0 +1,26 @@
+{
+  "name": "relay",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Relay — secure direct messaging",
+  "packageManager": "pnpm@9.12.0",
+  "engines": {
+    "node": ">=22.0.0",
+    "pnpm": ">=9.0.0"
+  },
+  "scripts": {
+    "dev": "pnpm -r --parallel run dev",
+    "dev:api": "pnpm --filter @relay/api run dev",
+    "dev:web": "pnpm --filter @relay/web run dev",
+    "build": "pnpm -r run build",
+    "lint": "pnpm -r run lint",
+    "typecheck": "pnpm -r run typecheck",
+    "prisma:generate": "pnpm --filter @relay/api run prisma:generate",
+    "prisma:migrate": "pnpm --filter @relay/api run prisma:migrate",
+    "prisma:deploy": "pnpm --filter @relay/api run prisma:deploy",
+    "prisma:studio": "pnpm --filter @relay/api run prisma:studio",
+    "infra:up": "docker compose up -d",
+    "infra:down": "docker compose down",
+    "infra:lean": "docker compose -f docker-compose.lean.yml up -d"
+  }
+}

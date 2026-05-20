@@ -1,0 +1,7 @@
+{
+  "type": "http://localhost:3001/errors/conflict",
+  "title": "Conflict",
+  "status": 409,
+  "detail": "Username is already taken.",
+  "instance": "/api/auth/register"
+}

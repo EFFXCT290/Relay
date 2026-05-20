@@ -1,0 +1,56 @@
+{
+  "notifications": [
+    {
+      "notificationId": "nAAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA",
+      "type": "SYSTEM_ALERT",
+      "isRead": false,
+      "payload": {
+        "capturedBy": { "userId": "44444444-4444-4444-4444-444444444444", "username": "jules" },
+        "eventType": "SCREENSHOT_ATTEMPT",
+        "trigger": "visibilitychange",
+        "timestamp": "2026-05-17T09:43:12.000Z",
+        "mediaId": "med22222-2222-2222-2222-222222222222",
+        "thumbnailUrl": "https://example.invalid/thumb-jules-capture.jpg",
+        "userAgent": "Mozilla/5.0 (iPhone; CPU iPhone OS 18_2 like Mac OS X) Safari/605.1.15",
+        "platform": "iOS"
+      },
+      "createdAt": "2026-05-17T09:43:12.000Z"
+    },
+    {
+      "notificationId": "nBBBBBBBB-BBBB-BBBB-BBBB-BBBBBBBBBBBB",
+      "type": "VIEW_COUNT_UPDATE",
+      "isRead": false,
+      "payload": {
+        "viewer": { "userId": "22222222-2222-2222-2222-222222222222", "username": "mira" },
+        "messageId": "m99999999-9999-9999-9999-999999999999",
+        "viewsUsed": 2,
+        "viewsAllowed": 3
+      },
+      "createdAt": "2026-05-17T09:42:00.000Z"
+    },
+    {
+      "notificationId": "nCCCCCCCC-CCCC-CCCC-CCCC-CCCCCCCCCCCC",
+      "type": "MEDIA_EXPIRED",
+      "isRead": true,
+      "payload": {
+        "recipient": { "userId": "55555555-5555-5555-5555-555555555555", "username": "kai" },
+        "messageId": "m88888888-8888-8888-8888-888888888888",
+        "expiredAt": "2026-05-17T08:21:00.000Z"
+      },
+      "createdAt": "2026-05-17T08:21:00.000Z"
+    },
+    {
+      "notificationId": "nDDDDDDDD-DDDD-DDDD-DDDD-DDDDDDDDDDDD",
+      "type": "MESSAGE_RECEIVED",
+      "isRead": true,
+      "payload": {
+        "from": { "userId": "33333333-3333-3333-3333-333333333333", "username": "alex" },
+        "preview": "hey are you free later?",
+        "messageId": "m77777777-7777-7777-7777-777777777777"
+      },
+      "createdAt": "2026-05-17T07:55:00.000Z"
+    }
+  ],
+  "unreadCount": 2,
+  "nextCursor": null
+}

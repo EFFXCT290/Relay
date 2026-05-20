@@ -1,0 +1,8 @@
+{
+  "event": "presence:update",
+  "data": {
+    "userId": "22222222-2222-2222-2222-222222222222",
+    "isOnline": true,
+    "lastSeenAt": "2026-05-17T09:40:00.000Z"
+  }
+}

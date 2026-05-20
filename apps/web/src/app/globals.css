@@ -1,0 +1,108 @@
+@import "tailwindcss";
+
+/* ──────────────────────────────────────────────────────────────────────────
+ * Relay design tokens — kept in sync with /design/tokens.json
+ * Dark-canonical; light mode swaps the @theme variables under .light
+ * ────────────────────────────────────────────────────────────────────────── */
+
+@theme {
+  /* Type families */
+  --font-display: "Manrope", system-ui, sans-serif;
+  --font-body: "Inter", system-ui, sans-serif;
+  --font-mono: "Geist Mono", ui-monospace, SFMono-Regular, monospace;
+
+  /* Brand */
+  --color-signal: oklch(63.5% 0.193 256);   /* #3B82F6 */
+  --color-signal-hover: oklch(55.1% 0.213 256); /* #2563EB */
+  --color-read-receipt: oklch(89% 0.046 245);   /* #BFDBFE */
+
+  /* Status */
+  --color-online: oklch(72.4% 0.197 144);    /* #22C55E */
+  --color-warning: oklch(78.7% 0.157 70);    /* #F59E0B */
+  --color-alert: oklch(64.4% 0.214 25);      /* #EF4444 */
+
+  /* Dark canonical surfaces */
+  --color-bg: #0A0A0B;
+  --color-panel: #141416;
+  --color-raised: #1C1C20;
+  --color-hairline: rgba(255, 255, 255, 0.07);
+  --color-hairline-strong: rgba(255, 255, 255, 0.12);
+
+  /* Text */
+  --color-text: #F4F4F5;
+  --color-text-secondary: #A1A1AA;
+  --color-text-muted: #52525B;
+
+  /* Bubbles */
+  --color-bubble-sent: var(--color-signal);
+  --color-bubble-sent-text: #FFFFFF;
+  --color-bubble-received: var(--color-raised);
+
+  /* Radii */
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 20px;
+  --radius-bubble: 28px;
+  --radius-pill: 999px;
+}
+
+/* Light-mode overrides — applied when .light is on <html> */
+.light {
+  --color-bg: #FFFFFF;
+  --color-panel: #F4F4F5;
+  --color-raised: #FAFAFA;
+  --color-hairline: rgba(10, 10, 11, 0.08);
+  --color-hairline-strong: rgba(10, 10, 11, 0.14);
+
+  --color-text: #0A0A0B;
+  --color-text-secondary: #52525B;
+  --color-text-muted: #A1A1AA;
+
+  --color-bubble-received: var(--color-panel);
+}
+
+/* Base reset */
+html,
+body {
+  background-color: var(--color-bg);
+  color: var(--color-text);
+  font-family: var(--font-body);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+::selection {
+  background: var(--color-signal);
+  color: var(--color-bubble-sent-text);
+}
+
+/* Focus ring — signal blue with a soft glow */
+:where(button, a, input, textarea, [role="button"], [tabindex]):focus-visible {
+  outline: 2px solid var(--color-signal);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+/* Pulsing dot used in eyebrows and live indicators */
+@keyframes relay-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 var(--color-signal); opacity: 1; }
+  70%      { box-shadow: 0 0 0 6px transparent; opacity: 0.6; }
+}
+.relay-pulse {
+  animation: relay-pulse 1.6s ease-out infinite;
+}
+
+/* Typing dots */
+@keyframes relay-typing {
+  0%, 60%, 100% { opacity: 0.45; transform: translateY(0); }
+  30%           { opacity: 1; transform: translateY(-1.5px); }
+}
+.relay-typing-dot:nth-child(1) { animation: relay-typing 1.2s infinite; }
+.relay-typing-dot:nth-child(2) { animation: relay-typing 1.2s infinite 0.15s; }
+.relay-typing-dot:nth-child(3) { animation: relay-typing 1.2s infinite 0.30s; }
+
+/* Typing bubble entrance */
+@keyframes relay-typing-in {
+  from { opacity: 0; transform: translateY(6px) scale(0.96); }
+  to   { opacity: 0.9; transform: translateY(0) scale(1); }
+}
