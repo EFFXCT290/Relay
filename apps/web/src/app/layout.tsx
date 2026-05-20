@@ -42,6 +42,9 @@ export const viewport: Viewport = {
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en" className={`${manrope.variable} ${inter.variable} ${geistMono.variable}`}>
+      <head>
+        <script src="/runtime-env.js" />
+      </head>
       <body>{children}</body>
     </html>
   );

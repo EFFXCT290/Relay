@@ -1,6 +1,7 @@
 "use client";
 
 import { io, type Socket } from "socket.io-client";
+import { getWsUrl } from "./runtime-env";
 
 let socket: Socket | null = null;
 
@@ -13,7 +14,7 @@ let socket: Socket | null = null;
 // observe live message:new events because of this race.
 export function getSocket(): Socket {
   if (socket) return socket;
-  socket = io(process.env.NEXT_PUBLIC_WS_URL ?? "http://localhost:3001", {
+  socket = io(getWsUrl(), {
     withCredentials: true,
     transports: ["websocket", "polling"],
     autoConnect: true,

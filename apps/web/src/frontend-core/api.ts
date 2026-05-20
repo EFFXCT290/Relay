@@ -2,6 +2,8 @@
 // Sends HTTPOnly auth cookies via `credentials: "include"`.
 // Throws ApiError (RFC 9457 shape) on non-2xx so callers can switch on status.
 
+import { getApiUrl } from "./runtime-env";
+
 export type Problem = {
   type: string;
   title: string;
@@ -21,8 +23,6 @@ export class ApiError extends Error {
   }
 }
 
-const BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3001";
-
 type RequestOptions = {
   method?: "GET" | "POST" | "PATCH" | "DELETE";
   body?: unknown;
@@ -30,7 +30,7 @@ type RequestOptions = {
 };
 
 export async function api<T>(path: string, opts: RequestOptions = {}): Promise<T> {
-  const url = `${BASE}${path}`;
+  const url = `${getApiUrl()}${path}`;
   // Only set Content-Type when there's actually a body to send. Fastify
   // rejects requests that advertise application/json with an empty body
   // (FST_ERR_CTP_EMPTY_JSON_BODY → 400 surfaced as 500), which silently
