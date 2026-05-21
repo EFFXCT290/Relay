@@ -29,23 +29,26 @@ type RequestOptions = {
   signal?: AbortSignal;
 };
 
-export async function api<T>(path: string, opts: RequestOptions = {}): Promise<T> {
-  const url = `${getApiUrl()}${path}`;
-  // Only set Content-Type when there's actually a body to send. Fastify
-  // rejects requests that advertise application/json with an empty body
-  // (FST_ERR_CTP_EMPTY_JSON_BODY → 400 surfaced as 500), which silently
-  // broke every body-less POST including /read, /accept, DELETE.
-  const init: RequestInit = {
+async function fetchOnce(url: string, init: RequestInit): Promise<Response> {
+  return fetch(url, init);
+}
+
+function buildInit(opts: RequestOptions): RequestInit {
+  return {
     method: opts.method ?? "GET",
     credentials: "include",
+    // Only set Content-Type when there's actually a body to send. Fastify
+    // rejects requests that advertise application/json with an empty body
+    // (FST_ERR_CTP_EMPTY_JSON_BODY → 400 surfaced as 500), which silently
+    // broke every body-less POST including /read, /accept, DELETE.
     ...(opts.body !== undefined
       ? { headers: { "Content-Type": "application/json" }, body: JSON.stringify(opts.body) }
       : {}),
     ...(opts.signal ? { signal: opts.signal } : {}),
   };
+}
 
-  const res = await fetch(url, init);
-
+async function parseResponse<T>(res: Response): Promise<T> {
   if (res.status === 204) return undefined as T;
 
   const text = await res.text();
@@ -62,4 +65,34 @@ export async function api<T>(path: string, opts: RequestOptions = {}): Promise<T
   }
 
   return data as T;
+}
+
+async function silentRefresh(base: string): Promise<boolean> {
+  try {
+    const res = await fetch(`${base}/api/auth/refresh`, {
+      method: "POST",
+      credentials: "include",
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+export async function api<T>(path: string, opts: RequestOptions = {}): Promise<T> {
+  const base = getApiUrl();
+  const url = `${base}${path}`;
+  const init = buildInit(opts);
+
+  const res = await fetchOnce(url, init);
+
+  if (res.status === 401 && path !== "/api/auth/refresh") {
+    const refreshed = await silentRefresh(base);
+    if (refreshed) {
+      const retryRes = await fetchOnce(url, init);
+      return parseResponse<T>(retryRes);
+    }
+  }
+
+  return parseResponse<T>(res);
 }
