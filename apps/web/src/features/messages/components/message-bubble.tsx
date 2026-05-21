@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { ArrowLeft, Check, CheckCheck, CornerUpLeft, Plus, Smile } from "lucide-react";
 import { cn } from "@/frontend-core/utils";
 import { Avatar } from "@/shared/components/avatar";
@@ -407,8 +408,11 @@ function LongPressMenu({
 
   return (
     <>
-      {/* Full-screen backdrop — tap outside to dismiss */}
-      <div className="fixed inset-0 z-40 bg-black/50 backdrop-blur-[2px]" onClick={onClose} />
+      {/* Backdrop portaled to body so backdrop-filter doesn't blur the lifted message */}
+      {createPortal(
+        <div className="fixed inset-0 z-40 bg-black/50 backdrop-blur-[2px]" onClick={onClose} />,
+        document.body,
+      )}
 
       {/* Emoji reaction bar — floats above the bubble */}
       <div
