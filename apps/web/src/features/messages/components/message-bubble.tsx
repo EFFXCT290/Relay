@@ -44,16 +44,55 @@ export function MessageBubble({
   const touchStartRef = useRef<{ x: number; y: number } | null>(null);
   const swipingRef = useRef(false);
   const repliedRef = useRef(false);
-  // Trackpad (wheel) swipe state
+  // Trackpad (wheel) swipe — kept in refs so the effect closure is stable
   const wheelAccumRef = useRef(0);
   const wheelTimerRef = useRef<number | null>(null);
   const wheelRepliedRef = useRef(false);
+  const containerRef = useRef<HTMLDivElement>(null);
+  // Stable refs so the native listener never needs to re-register
+  const onReplyRef = useRef(onReply);
+  const messageRef = useRef(message);
+  useEffect(() => { onReplyRef.current = onReply; });
+  useEffect(() => { messageRef.current = message; });
 
+  // Non-passive wheel listener — must be native so preventDefault() actually works
+  // and stops the browser's back/forward swipe navigation.
   useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const handler = (e: WheelEvent) => {
+      if (Math.abs(e.deltaX) < Math.abs(e.deltaY) * 0.6) return;
+      const isRightSwipe = isMacOS ? e.deltaX < 0 : e.deltaX > 0;
+      if (!isRightSwipe) {
+        if (wheelAccumRef.current > 0) {
+          wheelAccumRef.current = 0;
+          setSwipeX(0);
+        }
+        return;
+      }
+      e.preventDefault();
+      wheelAccumRef.current = Math.min(
+        wheelAccumRef.current + Math.abs(e.deltaX),
+        SWIPE_THRESHOLD + 14,
+      );
+      setSwipeX(wheelAccumRef.current);
+      if (!wheelRepliedRef.current && wheelAccumRef.current >= SWIPE_THRESHOLD) {
+        wheelRepliedRef.current = true;
+      }
+      if (wheelTimerRef.current !== null) window.clearTimeout(wheelTimerRef.current);
+      wheelTimerRef.current = window.setTimeout(() => {
+        if (wheelRepliedRef.current) onReplyRef.current?.(messageRef.current);
+        setSwipeX(0);
+        wheelAccumRef.current = 0;
+        wheelRepliedRef.current = false;
+      }, 160);
+    };
+    el.addEventListener("wheel", handler, { passive: false });
     return () => {
+      el.removeEventListener("wheel", handler);
       if (wheelTimerRef.current !== null) window.clearTimeout(wheelTimerRef.current);
     };
-  }, []);
+  }, []); // stable — reads latest values through refs
 
   if (message.isDeleted) {
     return (
@@ -123,37 +162,9 @@ export function MessageBubble({
     repliedRef.current = false;
   };
 
-  // Two-finger trackpad swipe (wheel deltaX) — desktop equivalent of touch swipe.
-  const handleWheel = (e: React.WheelEvent) => {
-    // Ignore mostly-vertical scrolls so normal page scrolling is unaffected.
-    if (Math.abs(e.deltaX) < Math.abs(e.deltaY) * 0.6) return;
-    // Right-swipe means deltaX < 0 on macOS natural scrolling, > 0 everywhere else.
-    const isRightSwipe = isMacOS ? e.deltaX < 0 : e.deltaX > 0;
-    if (!isRightSwipe) {
-      if (wheelAccumRef.current > 0) {
-        wheelAccumRef.current = 0;
-        setSwipeX(0);
-      }
-      return;
-    }
-    e.stopPropagation();
-    wheelAccumRef.current = Math.min(wheelAccumRef.current + Math.abs(e.deltaX), SWIPE_THRESHOLD + 14);
-    setSwipeX(wheelAccumRef.current);
-    if (!wheelRepliedRef.current && wheelAccumRef.current >= SWIPE_THRESHOLD) {
-      wheelRepliedRef.current = true;
-    }
-    // Commit reply once the finger lifts (no new wheel events for 160 ms).
-    if (wheelTimerRef.current !== null) window.clearTimeout(wheelTimerRef.current);
-    wheelTimerRef.current = window.setTimeout(() => {
-      if (wheelRepliedRef.current) onReply?.(message);
-      setSwipeX(0);
-      wheelAccumRef.current = 0;
-      wheelRepliedRef.current = false;
-    }, 160);
-  };
-
   return (
     <div
+      ref={containerRef}
       className={cn(
         "group relative flex max-w-[280px] flex-col gap-1 lg:max-w-[420px]",
         isMine ? "self-end items-end" : "self-start items-start",
@@ -165,7 +176,6 @@ export function MessageBubble({
       onTouchStart={handleTouchStart}
       onTouchMove={handleTouchMove}
       onTouchEnd={handleTouchEnd}
-      onWheel={handleWheel}
     >
       {pickerOpen && (
         <ReactionPicker
