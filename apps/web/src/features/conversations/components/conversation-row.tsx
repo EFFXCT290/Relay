@@ -63,12 +63,20 @@ export function ConversationRow({ conversation }: { conversation: ConversationLi
               Capture
             </span>
           )}
+          {!captureAlert && participant.isOnline && (
+            <span
+              className="shrink-0 text-[10px]"
+              style={{ color: "var(--color-online)", fontFamily: mono }}
+            >
+              Active now
+            </span>
+          )}
           {!captureAlert && participant.isOnline === false && participant.lastSeenAt && (
             <span
               className="shrink-0 text-[10px] text-[var(--color-text-muted)]"
               style={{ fontFamily: mono }}
             >
-              last seen {relativeShort(participant.lastSeenAt)}
+              {relativeShort(participant.lastSeenAt)}
             </span>
           )}
         </div>
@@ -167,11 +175,15 @@ function TypingPreview() {
 }
 
 function relativeShort(iso: string): string {
-  const ms = Date.now() - new Date(iso).getTime();
-  const mins = Math.floor(ms / 60_000);
-  if (mins < 60) return `${mins}m ago`;
-  const hours = Math.floor(mins / 60);
-  if (hours < 24) return `${hours}h ago`;
-  const days = Math.floor(hours / 24);
-  return `${days}d ago`;
+  const d = new Date(iso);
+  const now = new Date();
+  const mins = Math.floor((now.getTime() - d.getTime()) / 60_000);
+  if (mins < 1) return "last seen just now";
+  if (mins < 60) return `last seen ${mins}m ago`;
+  const time = d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit", hour12: true });
+  const yesterday = new Date(now);
+  yesterday.setDate(yesterday.getDate() - 1);
+  if (d.toDateString() === now.toDateString()) return `last seen today at ${time}`;
+  if (d.toDateString() === yesterday.toDateString()) return `last seen yesterday at ${time}`;
+  return `last seen ${d.toLocaleDateString([], { month: "short", day: "numeric" })}`;
 }

@@ -135,16 +135,40 @@ export default function ConversationsPage() {
       }
     };
 
+    const applyPresence = (
+      list: ConversationListItem[],
+      userId: string,
+      patch: Partial<ConversationListItem["participant"]>,
+    ) => list.map((c) =>
+      c.participant.userId === userId
+        ? { ...c, participant: { ...c.participant, ...patch } }
+        : c,
+    );
+
+    const onPresenceOnline = (payload: { userId: string }) => {
+      setConversations((p) => p ? applyPresence(p, payload.userId, { isOnline: true }) : p);
+      setRequests((p) => p ? applyPresence(p, payload.userId, { isOnline: true }) : p);
+    };
+
+    const onPresenceOffline = (payload: { userId: string; lastSeen: string }) => {
+      setConversations((p) => p ? applyPresence(p, payload.userId, { isOnline: false, lastSeenAt: payload.lastSeen }) : p);
+      setRequests((p) => p ? applyPresence(p, payload.userId, { isOnline: false, lastSeenAt: payload.lastSeen }) : p);
+    };
+
     socket.on("conversation:request", onRequest);
     socket.on("conversation:accepted", onAccepted);
     socket.on("conversation:deleted", onDeleted);
     socket.on("message:new", onMessageNew);
+    socket.on("presence:online", onPresenceOnline);
+    socket.on("presence:offline", onPresenceOffline);
 
     return () => {
       socket.off("conversation:request", onRequest);
       socket.off("conversation:accepted", onAccepted);
       socket.off("conversation:deleted", onDeleted);
       socket.off("message:new", onMessageNew);
+      socket.off("presence:online", onPresenceOnline);
+      socket.off("presence:offline", onPresenceOffline);
     };
   }, []);
 

@@ -253,6 +253,33 @@ export default function ChatThreadPage() {
     };
   }, [conversationId]);
 
+  // Real-time presence — update partner's online/offline state as it changes.
+  useEffect(() => {
+    if (!detail) return;
+    const socket = getSocket();
+    const partnerId = detail.participant.userId;
+    const onOnline = (payload: { userId: string }) => {
+      if (payload.userId !== partnerId) return;
+      setDetail((prev) =>
+        prev ? { ...prev, participant: { ...prev.participant, isOnline: true } } : prev,
+      );
+    };
+    const onOffline = (payload: { userId: string; lastSeen: string }) => {
+      if (payload.userId !== partnerId) return;
+      setDetail((prev) =>
+        prev
+          ? { ...prev, participant: { ...prev.participant, isOnline: false, lastSeenAt: payload.lastSeen } }
+          : prev,
+      );
+    };
+    socket.on("presence:online", onOnline);
+    socket.on("presence:offline", onOffline);
+    return () => {
+      socket.off("presence:online", onOnline);
+      socket.off("presence:offline", onOffline);
+    };
+  }, [detail?.participant.userId]);
+
   // Mark-read also fires whenever the tab becomes visible again. Without this,
   // a message that arrives in a backgrounded tab never gets marked read —
   // sender stays stuck on ✓✓ delivered, never sees blue.
@@ -465,10 +492,10 @@ export default function ChatThreadPage() {
                   }}
                 >
                   {detail.participant.isOnline
-                    ? "online · end-to-end"
+                    ? "Active now"
                     : detail.participant.lastSeenAt
-                      ? `last seen ${shortRel(detail.participant.lastSeenAt)}`
-                      : "end-to-end"}
+                      ? lastSeenText(detail.participant.lastSeenAt)
+                      : "Offline"}
                 </span>
               </div>
             </>
@@ -661,12 +688,16 @@ function dayLabel(iso: string): string {
   return d.toLocaleDateString([], { weekday: "long", month: "short", day: "numeric" });
 }
 
-function shortRel(iso: string): string {
-  const ms = Date.now() - new Date(iso).getTime();
-  const mins = Math.floor(ms / 60_000);
-  if (mins < 60) return `${mins}m ago`;
-  const hours = Math.floor(mins / 60);
-  if (hours < 24) return `${hours}h ago`;
-  const days = Math.floor(hours / 24);
-  return `${days}d ago`;
+function lastSeenText(iso: string): string {
+  const d = new Date(iso);
+  const now = new Date();
+  const mins = Math.floor((now.getTime() - d.getTime()) / 60_000);
+  if (mins < 1) return "last seen just now";
+  if (mins < 60) return `last seen ${mins}m ago`;
+  const time = d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit", hour12: true });
+  const yesterday = new Date(now);
+  yesterday.setDate(yesterday.getDate() - 1);
+  if (d.toDateString() === now.toDateString()) return `last seen today at ${time}`;
+  if (d.toDateString() === yesterday.toDateString()) return `last seen yesterday at ${time}`;
+  return `last seen ${d.toLocaleDateString([], { month: "short", day: "numeric" })} at ${time}`;
 }
