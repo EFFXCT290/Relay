@@ -169,6 +169,7 @@ export function MessageBubble({
       className={cn(
         "group relative flex max-w-[280px] flex-col gap-1 lg:max-w-[420px] select-none",
         isMine ? "self-end items-end" : "self-start items-start",
+        longMenuOpen && "z-50",
       )}
       style={{ WebkitTouchCallout: "none" } as React.CSSProperties}
       onContextMenu={(e) => {
