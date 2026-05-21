@@ -52,9 +52,12 @@ export default function ChatThreadPage() {
   // when it lands (the join/leave churn dropped events on first mount). Read it
   // through a ref so handlers always see the current value.
   const meIdRef = useRef<string | null>(null);
-  useEffect(() => {
-    meIdRef.current = meId;
-  }, [meId]);
+  useEffect(() => { meIdRef.current = meId; }, [meId]);
+
+  // Same pattern as meIdRef — detail resolves async, but WS handlers must
+  // not re-subscribe when it lands (churn drops events). Read through a ref.
+  const partnerIdRef = useRef<string | null>(null);
+  useEffect(() => { partnerIdRef.current = detail?.participant.userId ?? null; }, [detail]);
 
   // Initial loads — me, detail, history — fired in parallel.
   useEffect(() => {
@@ -233,6 +236,22 @@ export default function ChatThreadPage() {
       setPartnerTyping(payload.isTyping);
     };
 
+    const onPresenceOnline = (payload: { userId: string }) => {
+      if (payload.userId !== partnerIdRef.current) return;
+      setDetail((prev) =>
+        prev ? { ...prev, participant: { ...prev.participant, isOnline: true } } : prev,
+      );
+    };
+
+    const onPresenceOffline = (payload: { userId: string; lastSeen: string }) => {
+      if (payload.userId !== partnerIdRef.current) return;
+      setDetail((prev) =>
+        prev
+          ? { ...prev, participant: { ...prev.participant, isOnline: false, lastSeenAt: payload.lastSeen } }
+          : prev,
+      );
+    };
+
     socket.on("message:new", onMessageNew);
     socket.on("message:edited", onMessageEdited);
     socket.on("message:deleted", onMessageDeleted);
@@ -240,6 +259,8 @@ export default function ChatThreadPage() {
     socket.on("message:read", onMessageRead);
     socket.on("message:delivered", onMessageDelivered);
     socket.on("typing:update", onTypingUpdate);
+    socket.on("presence:online", onPresenceOnline);
+    socket.on("presence:offline", onPresenceOffline);
 
     return () => {
       socket.emit("conversation:leave", { conversationId });
@@ -250,35 +271,10 @@ export default function ChatThreadPage() {
       socket.off("message:read", onMessageRead);
       socket.off("message:delivered", onMessageDelivered);
       socket.off("typing:update", onTypingUpdate);
+      socket.off("presence:online", onPresenceOnline);
+      socket.off("presence:offline", onPresenceOffline);
     };
   }, [conversationId]);
-
-  // Real-time presence — update partner's online/offline state as it changes.
-  useEffect(() => {
-    if (!detail) return;
-    const socket = getSocket();
-    const partnerId = detail.participant.userId;
-    const onOnline = (payload: { userId: string }) => {
-      if (payload.userId !== partnerId) return;
-      setDetail((prev) =>
-        prev ? { ...prev, participant: { ...prev.participant, isOnline: true } } : prev,
-      );
-    };
-    const onOffline = (payload: { userId: string; lastSeen: string }) => {
-      if (payload.userId !== partnerId) return;
-      setDetail((prev) =>
-        prev
-          ? { ...prev, participant: { ...prev.participant, isOnline: false, lastSeenAt: payload.lastSeen } }
-          : prev,
-      );
-    };
-    socket.on("presence:online", onOnline);
-    socket.on("presence:offline", onOffline);
-    return () => {
-      socket.off("presence:online", onOnline);
-      socket.off("presence:offline", onOffline);
-    };
-  }, [detail?.participant.userId]);
 
   // Mark-read also fires whenever the tab becomes visible again. Without this,
   // a message that arrives in a backgrounded tab never gets marked read —
