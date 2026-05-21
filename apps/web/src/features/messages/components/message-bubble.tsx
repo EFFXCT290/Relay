@@ -39,7 +39,6 @@ export function MessageBubble({
   onDelete,
 }: Props) {
   const [pickerOpen, setPickerOpen] = useState(false);
-  const [menuOpen, setMenuOpen] = useState(false);
   const [longMenuOpen, setLongMenuOpen] = useState(false);
   const [swipeX, setSwipeX] = useState(0);
   const longPressTimer = useRef<number | null>(null);
@@ -168,12 +167,13 @@ export function MessageBubble({
     <div
       ref={containerRef}
       className={cn(
-        "group relative flex max-w-[280px] flex-col gap-1 lg:max-w-[420px]",
+        "group relative flex max-w-[280px] flex-col gap-1 lg:max-w-[420px] select-none",
         isMine ? "self-end items-end" : "self-start items-start",
       )}
+      style={{ WebkitTouchCallout: "none" } as React.CSSProperties}
       onContextMenu={(e) => {
         e.preventDefault();
-        setMenuOpen(true);
+        setLongMenuOpen(true);
       }}
       onTouchStart={handleTouchStart}
       onTouchMove={handleTouchMove}
@@ -188,29 +188,6 @@ export function MessageBubble({
             setPickerOpen(false);
           }}
           onClose={() => setPickerOpen(false)}
-        />
-      )}
-      {menuOpen && (
-        <ContextMenu
-          isMine={isMine}
-          side={side}
-          onPickReaction={() => {
-            setMenuOpen(false);
-            setPickerOpen(true);
-          }}
-          onReply={() => {
-            setMenuOpen(false);
-            onReply?.(message);
-          }}
-          onEdit={() => {
-            setMenuOpen(false);
-            onEdit?.(message);
-          }}
-          onDelete={() => {
-            setMenuOpen(false);
-            onDelete?.(message);
-          }}
-          onClose={() => setMenuOpen(false)}
         />
       )}
       {longMenuOpen && (
@@ -520,48 +497,6 @@ function LongPressMenu({
   );
 }
 
-// ──────────────────────────────────────────────────────────────────────────
-//  Context menu — right-click on desktop only
-// ──────────────────────────────────────────────────────────────────────────
-
-function ContextMenu({
-  isMine,
-  side,
-  onPickReaction,
-  onReply,
-  onEdit,
-  onDelete,
-  onClose,
-}: {
-  isMine: boolean;
-  side: "left" | "right";
-  onPickReaction: () => void;
-  onReply: () => void;
-  onEdit: () => void;
-  onDelete: () => void;
-  onClose: () => void;
-}) {
-  const ref = useMenuClose(onClose);
-  return (
-    <div
-      ref={ref}
-      role="menu"
-      className={cn(
-        "absolute z-30 mt-2 flex w-[180px] flex-col overflow-hidden rounded-2xl border bg-[var(--color-raised)] shadow-[0_12px_32px_rgba(0,0,0,0.55)]",
-        side === "right" ? "right-0 top-full" : "left-0 top-full",
-      )}
-      style={{ borderColor: "var(--color-hairline-strong)" }}
-    >
-      <MenuItem label="React" onClick={onPickReaction} />
-      <MenuItem label="Reply" onClick={onReply} />
-      {isMine && <MenuItem label="Edit" onClick={onEdit} />}
-      {isMine && (
-        <MenuItem label="Delete" onClick={onDelete} variant="danger" />
-      )}
-    </div>
-  );
-}
-
 function MenuItem({
   label,
   onClick,
@@ -585,28 +520,6 @@ function MenuItem({
   );
 }
 
-function useMenuClose(onClose: () => void) {
-  const ref = useRef<HTMLDivElement | null>(null);
-  useEffect(() => {
-    // Defer one tick so the same click that opened the menu doesn't close it.
-    const t = setTimeout(() => {
-      document.addEventListener("mousedown", handler);
-      document.addEventListener("keydown", esc);
-    }, 0);
-    const handler = (e: MouseEvent) => {
-      if (!ref.current?.contains(e.target as Node)) onClose();
-    };
-    const esc = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    return () => {
-      clearTimeout(t);
-      document.removeEventListener("mousedown", handler);
-      document.removeEventListener("keydown", esc);
-    };
-  }, [onClose]);
-  return ref;
-}
 
 function formatHHMM(iso: string): string {
   const d = new Date(iso);
