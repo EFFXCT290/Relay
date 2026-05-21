@@ -98,7 +98,7 @@ export function MessageBubble({
 
   if (message.isDeleted) {
     return (
-      <div className={cn("flex max-w-[280px]", isMine ? "self-end" : "self-start")}>
+      <div className={cn("flex max-w-[280px] lg:max-w-[460px] xl:max-w-[580px]", isMine ? "self-end" : "self-start")}>
         <div
           className={cn(
             "rounded-[22px] px-3.5 py-2.5 text-sm italic",
@@ -168,7 +168,7 @@ export function MessageBubble({
     <div
       ref={containerRef}
       className={cn(
-        "group relative flex max-w-[280px] flex-col gap-1 lg:max-w-[420px] select-none",
+        "group relative flex max-w-[280px] flex-col gap-1 lg:max-w-[460px] xl:max-w-[580px] select-none",
         isMine ? "self-end items-end" : "self-start items-start",
         longMenuOpen && "z-50",
       )}
