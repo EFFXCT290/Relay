@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Check, CheckCheck, CornerUpLeft, Smile } from "lucide-react";
+import { ArrowLeft, Check, CheckCheck, CornerUpLeft, Plus, Smile } from "lucide-react";
 import { cn } from "@/frontend-core/utils";
 import { Avatar } from "@/shared/components/avatar";
 import { ReactionChips, ReactionPicker } from "./reaction-picker";
@@ -8,6 +8,7 @@ import type { Message } from "@relay/contracts";
 export type { Message };  // re-export so existing consumers still resolve through this module
 
 const mono = "var(--font-mono)";
+const QUICK_EMOJI = ["❤️", "😂", "😮", "😢", "🔥", "👍"];
 const SWIPE_THRESHOLD = 60;
 
 // macOS natural scrolling sends negative deltaX for a rightward finger swipe.
@@ -39,6 +40,7 @@ export function MessageBubble({
 }: Props) {
   const [pickerOpen, setPickerOpen] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
+  const [longMenuOpen, setLongMenuOpen] = useState(false);
   const [swipeX, setSwipeX] = useState(0);
   const longPressTimer = useRef<number | null>(null);
   const touchStartRef = useRef<{ x: number; y: number } | null>(null);
@@ -124,7 +126,7 @@ export function MessageBubble({
     swipingRef.current = false;
     repliedRef.current = false;
     longPressTimer.current = window.setTimeout(() => {
-      if (!swipingRef.current) setMenuOpen(true);
+      if (!swipingRef.current) setLongMenuOpen(true);
     }, 500);
   };
 
@@ -209,6 +211,30 @@ export function MessageBubble({
             onDelete?.(message);
           }}
           onClose={() => setMenuOpen(false)}
+        />
+      )}
+      {longMenuOpen && (
+        <LongPressMenu
+          isMine={isMine}
+          side={side}
+          current={message.myReaction}
+          onPick={(emoji) => {
+            onReact?.(message.messageId, emoji);
+            setLongMenuOpen(false);
+          }}
+          onReply={() => {
+            setLongMenuOpen(false);
+            onReply?.(message);
+          }}
+          onEdit={() => {
+            setLongMenuOpen(false);
+            onEdit?.(message);
+          }}
+          onDelete={() => {
+            setLongMenuOpen(false);
+            onDelete?.(message);
+          }}
+          onClose={() => setLongMenuOpen(false)}
         />
       )}
 
@@ -354,7 +380,148 @@ export function MessageBubble({
 }
 
 // ──────────────────────────────────────────────────────────────────────────
-//  Context menu — right-click on desktop, long-press on mobile
+//  Instagram-style long-press overlay: emoji bar above + context below
+// ──────────────────────────────────────────────────────────────────────────
+
+function LongPressMenu({
+  isMine,
+  side,
+  current,
+  onPick,
+  onReply,
+  onEdit,
+  onDelete,
+  onClose,
+}: {
+  isMine: boolean;
+  side: "left" | "right";
+  current: string | null;
+  onPick: (emoji: string) => void;
+  onReply: () => void;
+  onEdit: () => void;
+  onDelete: () => void;
+  onClose: () => void;
+}) {
+  const [emojiMode, setEmojiMode] = useState<"quick" | "any">("quick");
+  const [emojiValue, setEmojiValue] = useState("");
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (emojiMode === "any") inputRef.current?.focus();
+  }, [emojiMode]);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        if (emojiMode === "any") setEmojiMode("quick");
+        else onClose();
+      }
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [emojiMode, onClose]);
+
+  const submitAny = () => {
+    const v = emojiValue.trim();
+    if (!v) return;
+    onPick(v);
+  };
+
+  return (
+    <>
+      {/* Full-screen backdrop — tap outside to dismiss */}
+      <div className="fixed inset-0 z-40 bg-black/50 backdrop-blur-[2px]" onClick={onClose} />
+
+      {/* Emoji reaction bar — floats above the bubble */}
+      <div
+        className={cn(
+          "absolute -top-14 z-50 flex items-center gap-1 rounded-full border bg-[var(--color-raised)] px-1.5 py-1 shadow-[0_8px_24px_rgba(0,0,0,0.55)]",
+          side === "right" ? "right-2" : "left-2",
+        )}
+        style={{ borderColor: "var(--color-hairline-strong)" }}
+      >
+        {emojiMode === "quick" ? (
+          <>
+            {QUICK_EMOJI.map((e) => (
+              <button
+                key={e}
+                type="button"
+                onClick={() => { onPick(e); }}
+                aria-label={`React with ${e}`}
+                className={cn(
+                  "flex h-8 w-8 items-center justify-center rounded-full text-[18px] leading-none transition-transform hover:scale-125",
+                  e === current && "bg-white/[0.10] scale-110",
+                )}
+              >
+                {e}
+              </button>
+            ))}
+            <span className="mx-0.5 h-5 w-px self-center" style={{ background: "var(--color-hairline-strong)" }} aria-hidden />
+            <button
+              type="button"
+              onClick={() => setEmojiMode("any")}
+              aria-label="Pick any emoji"
+              className="flex h-8 w-8 items-center justify-center rounded-full text-[var(--color-text-secondary)] hover:bg-white/[0.06] hover:text-[var(--color-text)]"
+            >
+              <Plus className="h-4 w-4" />
+            </button>
+          </>
+        ) : (
+          <>
+            <button
+              type="button"
+              onClick={() => setEmojiMode("quick")}
+              aria-label="Back"
+              className="flex h-8 w-8 items-center justify-center rounded-full text-[var(--color-text-secondary)] hover:bg-white/[0.06] hover:text-[var(--color-text)]"
+            >
+              <ArrowLeft className="h-4 w-4" />
+            </button>
+            <input
+              ref={inputRef}
+              type="text"
+              inputMode="text"
+              autoComplete="off"
+              autoCorrect="off"
+              spellCheck={false}
+              value={emojiValue}
+              placeholder="any emoji"
+              onChange={(e) => setEmojiValue(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); submitAny(); } }}
+              maxLength={16}
+              className="h-8 w-32 bg-transparent px-1 text-[16px] text-[var(--color-text)] placeholder:text-[var(--color-text-muted)] focus:outline-none"
+              style={{ fontFamily: "var(--font-body)" }}
+            />
+            <button
+              type="button"
+              onClick={submitAny}
+              disabled={!emojiValue.trim()}
+              className="flex h-8 min-w-[40px] items-center justify-center rounded-full px-2 text-[12px] font-semibold text-white transition-opacity disabled:opacity-40"
+              style={{ background: "var(--color-signal)" }}
+            >
+              Use
+            </button>
+          </>
+        )}
+      </div>
+
+      {/* Context actions — below the bubble */}
+      <div
+        className={cn(
+          "absolute top-full z-50 mt-2 flex w-[180px] flex-col overflow-hidden rounded-2xl border bg-[var(--color-raised)] shadow-[0_12px_32px_rgba(0,0,0,0.55)]",
+          side === "right" ? "right-0" : "left-0",
+        )}
+        style={{ borderColor: "var(--color-hairline-strong)" }}
+      >
+        <MenuItem label="Reply" onClick={onReply} />
+        {isMine && <MenuItem label="Edit" onClick={onEdit} />}
+        {isMine && <MenuItem label="Delete" onClick={onDelete} variant="danger" />}
+      </div>
+    </>
+  );
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+//  Context menu — right-click on desktop only
 // ──────────────────────────────────────────────────────────────────────────
 
 function ContextMenu({
