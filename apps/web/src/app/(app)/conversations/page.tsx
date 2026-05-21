@@ -155,12 +155,23 @@ export default function ConversationsPage() {
       setRequests((p) => p ? applyPresence(p, payload.userId, { isOnline: false, lastSeenAt: payload.lastSeen }) : p);
     };
 
+    const onTypingUpdate = (payload: { conversationId: string; userId: string; isTyping: boolean }) => {
+      setConversations((prev) =>
+        prev?.map((c) =>
+          c.conversationId === payload.conversationId && c.participant.userId === payload.userId
+            ? { ...c, isTyping: payload.isTyping }
+            : c,
+        ) ?? prev,
+      );
+    };
+
     socket.on("conversation:request", onRequest);
     socket.on("conversation:accepted", onAccepted);
     socket.on("conversation:deleted", onDeleted);
     socket.on("message:new", onMessageNew);
     socket.on("presence:online", onPresenceOnline);
     socket.on("presence:offline", onPresenceOffline);
+    socket.on("typing:update", onTypingUpdate);
 
     return () => {
       socket.off("conversation:request", onRequest);
@@ -169,8 +180,22 @@ export default function ConversationsPage() {
       socket.off("message:new", onMessageNew);
       socket.off("presence:online", onPresenceOnline);
       socket.off("presence:offline", onPresenceOffline);
+      socket.off("typing:update", onTypingUpdate);
     };
   }, []);
+
+  // Join every conversation room so typing:update events reach this page.
+  // Re-runs only when the number of conversations changes (new accept/delete),
+  // not on every reorder from incoming messages.
+  useEffect(() => {
+    const ids = conversations?.map((c) => c.conversationId) ?? [];
+    if (ids.length === 0) return;
+    const socket = getSocket();
+    ids.forEach((id) => socket.emit("conversation:join", { conversationId: id }));
+    return () => {
+      ids.forEach((id) => socket.emit("conversation:leave", { conversationId: id }));
+    };
+  }, [conversations?.length]);
 
   const handleAccept = async (conversationId: string) => {
     try {
