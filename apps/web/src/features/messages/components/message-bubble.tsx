@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Check, CheckCheck, Smile } from "lucide-react";
+import { Check, CheckCheck, CornerUpLeft, Smile } from "lucide-react";
 import { cn } from "@/frontend-core/utils";
 import { Avatar } from "@/shared/components/avatar";
 import { ReactionChips, ReactionPicker } from "./reaction-picker";
@@ -8,6 +8,7 @@ import type { Message } from "@relay/contracts";
 export type { Message };  // re-export so existing consumers still resolve through this module
 
 const mono = "var(--font-mono)";
+const SWIPE_THRESHOLD = 60;
 
 type Props = {
   message: Message;
@@ -34,6 +35,22 @@ export function MessageBubble({
 }: Props) {
   const [pickerOpen, setPickerOpen] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
+  const [swipeX, setSwipeX] = useState(0);
+  const longPressTimer = useRef<number | null>(null);
+  const touchStartRef = useRef<{ x: number; y: number } | null>(null);
+  const swipingRef = useRef(false);
+  const repliedRef = useRef(false);
+  // Trackpad (wheel) swipe state
+  const wheelAccumRef = useRef(0);
+  const wheelTimerRef = useRef<number | null>(null);
+  const wheelRepliedRef = useRef(false);
+
+  useEffect(() => {
+    return () => {
+      if (wheelTimerRef.current !== null) window.clearTimeout(wheelTimerRef.current);
+    };
+  }, []);
+
   if (message.isDeleted) {
     return (
       <div className={cn("flex max-w-[280px]", isMine ? "self-end" : "self-start")}>
@@ -55,7 +72,80 @@ export function MessageBubble({
   }
 
   const side = isMine ? "right" : "left";
-  const longPressTimer = useRef<number | null>(null);
+  const swipeProgress = Math.min(swipeX / SWIPE_THRESHOLD, 1);
+
+  const handleTouchStart = (e: React.TouchEvent) => {
+    const t = e.touches.item(0);
+    if (!t) return;
+    touchStartRef.current = { x: t.clientX, y: t.clientY };
+    swipingRef.current = false;
+    repliedRef.current = false;
+    longPressTimer.current = window.setTimeout(() => {
+      if (!swipingRef.current) setMenuOpen(true);
+    }, 500);
+  };
+
+  const handleTouchMove = (e: React.TouchEvent) => {
+    if (!touchStartRef.current) return;
+    const t = e.touches.item(0);
+    if (!t) return;
+    const dx = t.clientX - touchStartRef.current.x;
+    const dy = t.clientY - touchStartRef.current.y;
+    if (dx > 10 && Math.abs(dx) > Math.abs(dy) * 1.2) {
+      swipingRef.current = true;
+      if (longPressTimer.current !== null) {
+        window.clearTimeout(longPressTimer.current);
+        longPressTimer.current = null;
+      }
+      e.preventDefault();
+      const clamped = Math.min(dx, SWIPE_THRESHOLD + 14);
+      setSwipeX(clamped);
+      if (!repliedRef.current && clamped >= SWIPE_THRESHOLD) {
+        repliedRef.current = true;
+        navigator.vibrate?.(8);
+      }
+    }
+  };
+
+  const handleTouchEnd = () => {
+    if (longPressTimer.current !== null) {
+      window.clearTimeout(longPressTimer.current);
+      longPressTimer.current = null;
+    }
+    if (repliedRef.current) onReply?.(message);
+    setSwipeX(0);
+    touchStartRef.current = null;
+    swipingRef.current = false;
+    repliedRef.current = false;
+  };
+
+  // Two-finger trackpad swipe (wheel deltaX) — desktop equivalent of touch swipe.
+  const handleWheel = (e: React.WheelEvent) => {
+    // Ignore mostly-vertical scrolls so normal page scrolling is unaffected.
+    if (Math.abs(e.deltaX) < Math.abs(e.deltaY) * 0.6) return;
+    // Only handle rightward swipe.
+    if (e.deltaX <= 0) {
+      if (wheelAccumRef.current > 0) {
+        wheelAccumRef.current = 0;
+        setSwipeX(0);
+      }
+      return;
+    }
+    e.stopPropagation();
+    wheelAccumRef.current = Math.min(wheelAccumRef.current + e.deltaX, SWIPE_THRESHOLD + 14);
+    setSwipeX(wheelAccumRef.current);
+    if (!wheelRepliedRef.current && wheelAccumRef.current >= SWIPE_THRESHOLD) {
+      wheelRepliedRef.current = true;
+    }
+    // Commit reply once the finger lifts (no new wheel events for 160 ms).
+    if (wheelTimerRef.current !== null) window.clearTimeout(wheelTimerRef.current);
+    wheelTimerRef.current = window.setTimeout(() => {
+      if (wheelRepliedRef.current) onReply?.(message);
+      setSwipeX(0);
+      wheelAccumRef.current = 0;
+      wheelRepliedRef.current = false;
+    }, 160);
+  };
 
   return (
     <div
@@ -67,15 +157,10 @@ export function MessageBubble({
         e.preventDefault();
         setMenuOpen(true);
       }}
-      onTouchStart={() => {
-        longPressTimer.current = window.setTimeout(() => setMenuOpen(true), 500);
-      }}
-      onTouchEnd={() => {
-        if (longPressTimer.current !== null) {
-          window.clearTimeout(longPressTimer.current);
-          longPressTimer.current = null;
-        }
-      }}
+      onTouchStart={handleTouchStart}
+      onTouchMove={handleTouchMove}
+      onTouchEnd={handleTouchEnd}
+      onWheel={handleWheel}
     >
       {pickerOpen && (
         <ReactionPicker
@@ -112,102 +197,142 @@ export function MessageBubble({
         />
       )}
 
-      {message.replyTo && (
-        <div
-          className="ml-2 mr-2 max-w-[240px] rounded-[8px_8px_8px_4px] border-l-2 px-3 py-1.5"
-          style={{
-            background: "rgba(255,255,255,0.04)",
-            borderColor: "var(--color-signal)",
-            marginBottom: -4,
-          }}
-        >
-          <div className="text-[11px] font-semibold" style={{ color: "var(--color-signal)" }}>
-            {isMine ? `@${message.senderUsername}` : "Replying"}
-          </div>
-          <div className="truncate text-xs leading-4 text-[var(--color-text-secondary)]">
-            {message.replyTo.preview ?? message.replyTo.type.toLowerCase()}
-          </div>
-        </div>
-      )}
-
-      <div className="relative flex items-end gap-1.5">
-        {/* Quick-react smiley on hover — desktop affordance for what long-press does on mobile. */}
-        {isMine && (
-          <button
-            type="button"
-            onClick={() => setPickerOpen(true)}
-            aria-label="React"
-            className="invisible flex h-7 w-7 items-center justify-center rounded-full bg-[var(--color-raised)] text-[var(--color-text-secondary)] opacity-0 transition-opacity hover:text-[var(--color-text)] group-hover:visible group-hover:opacity-100"
-          >
-            <Smile className="h-3.5 w-3.5" />
-          </button>
-        )}
-        <div
-          className={cn(
-            "rounded-[22px] px-3.5 py-2.5 text-[15px] leading-[21px]",
-            isMine ? "rounded-br-[6px]" : "rounded-bl-[6px]",
-          )}
-          style={{
-            background: isMine ? "var(--color-bubble-sent)" : "var(--color-bubble-received)",
-            color: isMine ? "var(--color-bubble-sent-text)" : "var(--color-text)",
-            border: isMine ? undefined : "1px solid rgba(255,255,255,0.04)",
-            whiteSpace: "pre-wrap",
-            wordBreak: "break-word",
-          }}
-        >
-          {message.body}
-        </div>
-        {!isMine && (
-          <button
-            type="button"
-            onClick={() => setPickerOpen(true)}
-            aria-label="React"
-            className="invisible flex h-7 w-7 items-center justify-center rounded-full bg-[var(--color-raised)] text-[var(--color-text-secondary)] opacity-0 transition-opacity hover:text-[var(--color-text)] group-hover:visible group-hover:opacity-100"
-          >
-            <Smile className="h-3.5 w-3.5" />
-          </button>
-        )}
+      {/* Swipe-to-reply icon — fades in as user drags right, stays fixed while bubble translates */}
+      <div
+        className="pointer-events-none absolute inset-y-0 flex items-center"
+        style={{
+          left: -36,
+          opacity: swipeProgress,
+          transform: `translateX(${swipeProgress * 8}px)`,
+        }}
+      >
+        <CornerUpLeft className="h-5 w-5" style={{ color: "var(--color-signal)" }} />
       </div>
 
-      <ReactionChips
-        reactions={message.reactions}
-        myReaction={message.myReaction}
-        align={side}
-        onToggle={(e) => onReact?.(message.messageId, e)}
-      />
-
-      <div className="flex items-center gap-1.5 px-1">
-        {message.isEdited && (
-          <span
-            className="text-[10px] text-[var(--color-text-muted)]"
-            style={{ fontFamily: mono }}
-          >
-            edited
-          </span>
-        )}
-        {isMine && showReadReceipt && (
-          <span
-            className="flex items-center gap-1"
+      {/* Translatable content — slides right during swipe, snaps back on release */}
+      <div
+        className={cn("flex flex-col gap-1", isMine ? "items-end" : "items-start")}
+        style={{
+          transform: `translateX(${swipeX}px)`,
+          transition: swipeX === 0 ? "transform 0.28s cubic-bezier(0.25,1,0.32,1)" : "none",
+        }}
+      >
+        {message.replyTo && (
+          <div
+            className="ml-2 mr-2 max-w-[240px] rounded-[8px_8px_8px_4px] border-l-2 px-3 py-1.5"
             style={{
-              color: readAt
-                ? "var(--color-read-receipt)"
-                : "var(--color-text-muted)",
+              background: "rgba(255,255,255,0.04)",
+              borderColor: "var(--color-signal)",
+              marginBottom: -4,
             }}
           >
-            {readAt || deliveredAt ? (
-              <CheckCheck className="h-3 w-3" />
-            ) : (
-              <Check className="h-3 w-3" />
-            )}
-            <span className="text-[10px]" style={{ fontFamily: mono }}>
-              {readAt
-                ? `Read ${formatHHMM(readAt)}`
-                : deliveredAt
-                  ? "Delivered"
-                  : "Sent"}
-            </span>
-          </span>
+            <div className="text-[11px] font-semibold" style={{ color: "var(--color-signal)" }}>
+              {isMine ? `@${message.senderUsername}` : "Replying"}
+            </div>
+            <div className="truncate text-xs leading-4 text-[var(--color-text-secondary)]">
+              {message.replyTo.preview ?? message.replyTo.type.toLowerCase()}
+            </div>
+          </div>
         )}
+
+        <div className="relative flex items-end gap-1.5">
+          {isMine && (
+            <>
+              <button
+                type="button"
+                onClick={() => onReply?.(message)}
+                aria-label="Reply"
+                className="invisible flex h-7 w-7 items-center justify-center rounded-full bg-[var(--color-raised)] text-[var(--color-text-secondary)] opacity-0 transition-opacity hover:text-[var(--color-text)] group-hover:visible group-hover:opacity-100"
+              >
+                <CornerUpLeft className="h-3.5 w-3.5" />
+              </button>
+              <button
+                type="button"
+                onClick={() => setPickerOpen(true)}
+                aria-label="React"
+                className="invisible flex h-7 w-7 items-center justify-center rounded-full bg-[var(--color-raised)] text-[var(--color-text-secondary)] opacity-0 transition-opacity hover:text-[var(--color-text)] group-hover:visible group-hover:opacity-100"
+              >
+                <Smile className="h-3.5 w-3.5" />
+              </button>
+            </>
+          )}
+          <div
+            className={cn(
+              "rounded-[22px] px-3.5 py-2.5 text-[15px] leading-[21px]",
+              isMine ? "rounded-br-[6px]" : "rounded-bl-[6px]",
+            )}
+            style={{
+              background: isMine ? "var(--color-bubble-sent)" : "var(--color-bubble-received)",
+              color: isMine ? "var(--color-bubble-sent-text)" : "var(--color-text)",
+              border: isMine ? undefined : "1px solid rgba(255,255,255,0.04)",
+              whiteSpace: "pre-wrap",
+              wordBreak: "break-word",
+            }}
+          >
+            {message.body}
+          </div>
+          {!isMine && (
+            <>
+              <button
+                type="button"
+                onClick={() => setPickerOpen(true)}
+                aria-label="React"
+                className="invisible flex h-7 w-7 items-center justify-center rounded-full bg-[var(--color-raised)] text-[var(--color-text-secondary)] opacity-0 transition-opacity hover:text-[var(--color-text)] group-hover:visible group-hover:opacity-100"
+              >
+                <Smile className="h-3.5 w-3.5" />
+              </button>
+              <button
+                type="button"
+                onClick={() => onReply?.(message)}
+                aria-label="Reply"
+                className="invisible flex h-7 w-7 items-center justify-center rounded-full bg-[var(--color-raised)] text-[var(--color-text-secondary)] opacity-0 transition-opacity hover:text-[var(--color-text)] group-hover:visible group-hover:opacity-100"
+              >
+                <CornerUpLeft className="h-3.5 w-3.5" />
+              </button>
+            </>
+          )}
+        </div>
+
+        <ReactionChips
+          reactions={message.reactions}
+          myReaction={message.myReaction}
+          align={side}
+          onToggle={(e) => onReact?.(message.messageId, e)}
+        />
+
+        <div className="flex items-center gap-1.5 px-1">
+          {message.isEdited && (
+            <span
+              className="text-[10px] text-[var(--color-text-muted)]"
+              style={{ fontFamily: mono }}
+            >
+              edited
+            </span>
+          )}
+          {isMine && showReadReceipt && (
+            <span
+              className="flex items-center gap-1"
+              style={{
+                color: readAt
+                  ? "var(--color-read-receipt)"
+                  : "var(--color-text-muted)",
+              }}
+            >
+              {readAt || deliveredAt ? (
+                <CheckCheck className="h-3 w-3" />
+              ) : (
+                <Check className="h-3 w-3" />
+              )}
+              <span className="text-[10px]" style={{ fontFamily: mono }}>
+                {readAt
+                  ? `Read ${formatHHMM(readAt)}`
+                  : deliveredAt
+                    ? "Delivered"
+                    : "Sent"}
+              </span>
+            </span>
+          )}
+        </div>
       </div>
     </div>
   );

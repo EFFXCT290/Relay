@@ -486,7 +486,7 @@ export default function ChatThreadPage() {
       </header>
 
       {/* Message scroll */}
-      <div ref={scrollRef} className="flex-1 overflow-y-auto">
+      <div ref={scrollRef} className="flex-1 overflow-y-auto" style={{ touchAction: "pan-y" }}>
         <div className="mx-auto flex max-w-[760px] flex-col gap-2 px-4 py-4">
           {grouped === null ? (
             <div className="flex items-center justify-center py-12">
