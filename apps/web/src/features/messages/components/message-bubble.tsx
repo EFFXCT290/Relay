@@ -10,6 +10,10 @@ export type { Message };  // re-export so existing consumers still resolve throu
 const mono = "var(--font-mono)";
 const SWIPE_THRESHOLD = 60;
 
+// macOS natural scrolling sends negative deltaX for a rightward finger swipe.
+// Windows / Linux send positive deltaX for the same gesture.
+const isMacOS = typeof navigator !== "undefined" && /Mac/.test(navigator.userAgent);
+
 type Props = {
   message: Message;
   isMine: boolean;
@@ -123,8 +127,9 @@ export function MessageBubble({
   const handleWheel = (e: React.WheelEvent) => {
     // Ignore mostly-vertical scrolls so normal page scrolling is unaffected.
     if (Math.abs(e.deltaX) < Math.abs(e.deltaY) * 0.6) return;
-    // Only handle rightward swipe.
-    if (e.deltaX <= 0) {
+    // Right-swipe means deltaX < 0 on macOS natural scrolling, > 0 everywhere else.
+    const isRightSwipe = isMacOS ? e.deltaX < 0 : e.deltaX > 0;
+    if (!isRightSwipe) {
       if (wheelAccumRef.current > 0) {
         wheelAccumRef.current = 0;
         setSwipeX(0);
@@ -132,7 +137,7 @@ export function MessageBubble({
       return;
     }
     e.stopPropagation();
-    wheelAccumRef.current = Math.min(wheelAccumRef.current + e.deltaX, SWIPE_THRESHOLD + 14);
+    wheelAccumRef.current = Math.min(wheelAccumRef.current + Math.abs(e.deltaX), SWIPE_THRESHOLD + 14);
     setSwipeX(wheelAccumRef.current);
     if (!wheelRepliedRef.current && wheelAccumRef.current >= SWIPE_THRESHOLD) {
       wheelRepliedRef.current = true;
