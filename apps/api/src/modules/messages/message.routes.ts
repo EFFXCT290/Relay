@@ -5,10 +5,14 @@ import { MessageSchema } from "@relay/contracts";
 import {
   emitMessageDeleted,
   emitMessageEdited,
+  emitMessageEmbedUpdate,
+  emitMessageEmbedUpdateToUser,
   emitMessageNew,
   emitMessageNewToUser,
   emitMessageReaction,
 } from "./message.socket.js";
+import { extractUrls } from "./utils/extract-urls.js";
+import { fetchEmbed } from "./services/embed.service.js";
 
 // Guards that the caller is a participant of conversationId. Returns the
 // conversation row when authorized; throws ProblemError otherwise.
@@ -61,6 +65,7 @@ const messageRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
           replyTo: { select: { id: true, body: true, type: true } },
           reactions: { select: { emoji: true, userId: true } },
           reads: { select: { readerId: true, readAt: true } },
+          embed: true,
         },
         orderBy: { createdAt: "desc" },
         take: limit + 1,
@@ -104,6 +109,17 @@ const messageRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
             })),
             deliveredAt: m.deliveredAt ? m.deliveredAt.toISOString() : null,
             createdAt: m.createdAt.toISOString(),
+            embed: m.embed
+              ? {
+                  url:         m.embed.url,
+                  title:       m.embed.title,
+                  description: m.embed.description,
+                  imageUrl:    m.embed.imageUrl,
+                  siteName:    m.embed.siteName,
+                  faviconUrl:  m.embed.faviconUrl,
+                  provider:    m.embed.provider,
+                }
+              : null,
           };
         }),
         nextCursor,
@@ -237,6 +253,56 @@ const messageRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
       for (const p of participants) {
         emitMessageNewToUser(fastify.io, p.userId, { message: broadcastMessage });
       }
+
+      // Async embed fetch — does not block the HTTP response.
+      void (async () => {
+        try {
+          const urls = extractUrls(body);
+          const firstUrl = urls[0];
+          fastify.log.info({ firstUrl, body }, "[embed] extractUrls result");
+          if (!firstUrl) return;
+          const embedData = await fetchEmbed(firstUrl);
+          fastify.log.info({ embedData, firstUrl }, "[embed] fetchEmbed result");
+          if (!embedData) return;
+          try {
+            await fastify.prisma.messageEmbed.create({
+              data: {
+                messageId:   created.id,
+                url:         embedData.url,
+                title:       embedData.title,
+                description: embedData.description,
+                imageUrl:    embedData.imageUrl,
+                siteName:    embedData.siteName,
+                faviconUrl:  embedData.faviconUrl,
+                type:        embedData.type,
+                provider:    embedData.provider,
+              },
+            });
+          } catch (dbErr) {
+            fastify.log.warn({ dbErr }, "[embed] DB insert failed (likely duplicate), skipping emit");
+            return;
+          }
+          const embedEvent = {
+            messageId: created.id,
+            embed: {
+              url:         embedData.url,
+              title:       embedData.title,
+              description: embedData.description,
+              imageUrl:    embedData.imageUrl,
+              siteName:    embedData.siteName,
+              faviconUrl:  embedData.faviconUrl,
+              provider:    embedData.provider,
+            },
+          };
+          fastify.log.info({ messageId: created.id, conversationId }, "[embed] emitting message:embed:update");
+          emitMessageEmbedUpdate(fastify.io, conversationId, embedEvent);
+          for (const p of participants) {
+            emitMessageEmbedUpdateToUser(fastify.io, p.userId, embedEvent);
+          }
+        } catch (err) {
+          fastify.log.error({ err }, "[embed] unhandled error in embed IIFE");
+        }
+      })();
 
       return reply.code(201).send(httpPayload);
     },

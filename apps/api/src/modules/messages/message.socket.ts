@@ -7,6 +7,7 @@ import {
   type MessageDeliveredEvent,
   type MessageEditInbound,
   type MessageEditedEvent,
+  type MessageEmbedUpdateEvent,
   type MessageNewEvent,
   type MessageReactionEvent,
   type MessageReactionInbound,
@@ -102,4 +103,12 @@ export function emitMessageRead(io: IOServer, recipientUserId: string, event: Me
 
 export function emitMessageDelivered(io: IOServer, senderUserId: string, event: MessageDeliveredEvent) {
   io.to(`user:${senderUserId}`).emit(MESSAGE_EVENTS.DELIVERED, event);
+}
+
+export function emitMessageEmbedUpdate(io: IOServer, conversationId: string, event: MessageEmbedUpdateEvent) {
+  io.to(`conversation:${conversationId}`).emit(MESSAGE_EVENTS.EMBED_UPDATE, event);
+}
+
+export function emitMessageEmbedUpdateToUser(io: IOServer, userId: string, event: MessageEmbedUpdateEvent) {
+  io.to(`user:${userId}`).emit(MESSAGE_EVENTS.EMBED_UPDATE, event);
 }

@@ -23,6 +23,17 @@ export const ReadReceiptSchema = Type.Object({
   readAt: Type.String({ format: "date-time" }),
 });
 
+export const MessageEmbedSchema = Type.Object({
+  url:         Type.String(),
+  title:       Type.Union([Type.String(), Type.Null()]),
+  description: Type.Union([Type.String(), Type.Null()]),
+  imageUrl:    Type.Union([Type.String(), Type.Null()]),
+  siteName:    Type.Union([Type.String(), Type.Null()]),
+  faviconUrl:  Type.Union([Type.String(), Type.Null()]),
+  provider:    Type.Optional(Type.Union([Type.String(), Type.Null()])),
+});
+export type MessageEmbed = Static<typeof MessageEmbedSchema>;
+
 export const MessageSchema = Type.Object({
   messageId:      Type.String({ format: "uuid" }),
   conversationId: Type.String({ format: "uuid" }),
@@ -39,6 +50,7 @@ export const MessageSchema = Type.Object({
   readBy:         Type.Array(ReadReceiptSchema),
   deliveredAt:    Type.Union([Type.String({ format: "date-time" }), Type.Null()]),
   createdAt:      Type.String({ format: "date-time" }),
+  embed:          Type.Optional(Type.Union([Type.Null(), MessageEmbedSchema])),
 });
 export type Message = Static<typeof MessageSchema>;
 
@@ -65,16 +77,17 @@ export type EditMessagePayload = Static<typeof EditMessagePayloadSchema>;
 // direction (the *Event types below split them).
 export const MESSAGE_EVENTS = {
   // Inbound
-  SEND:      "message:send",
-  EDIT:      "message:edit",
-  DELETE:    "message:delete",
-  REACTION:  "message:reaction",
-  READ:      "message:read",
+  SEND:         "message:send",
+  EDIT:         "message:edit",
+  DELETE:       "message:delete",
+  REACTION:     "message:reaction",
+  READ:         "message:read",
   // Outbound
-  NEW:       "message:new",
-  EDITED:    "message:edited",
-  DELETED:   "message:deleted",
-  DELIVERED: "message:delivered",
+  NEW:          "message:new",
+  EDITED:       "message:edited",
+  DELETED:      "message:deleted",
+  DELIVERED:    "message:delivered",
+  EMBED_UPDATE: "message:embed:update",
 } as const;
 export type MessageEventName = (typeof MESSAGE_EVENTS)[keyof typeof MESSAGE_EVENTS];
 
@@ -102,4 +115,8 @@ export type MessageReadEvent       = {
   messageIds:     string[];
   readAt:         string;
   deliveredAt?:   string | null;
+};
+export type MessageEmbedUpdateEvent = {
+  messageId: string;
+  embed:     MessageEmbed;
 };

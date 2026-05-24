@@ -4,6 +4,7 @@ import { ArrowLeft, Check, CheckCheck, CornerUpLeft, Plus, Smile } from "lucide-
 import { cn } from "@/frontend-core/utils";
 import { Avatar } from "@/shared/components/avatar";
 import { ReactionChips, ReactionPicker } from "./reaction-picker";
+import { EmbedCard } from "./embeds";
 import type { Message } from "@relay/contracts";
 
 export type { Message };  // re-export so existing consumers still resolve through this module
@@ -276,20 +277,26 @@ export function MessageBubble({
               </button>
             </>
           )}
-          <div
-            className={cn(
-              "rounded-[22px] px-3.5 py-2.5 text-[15px] leading-[21px]",
-              isMine ? "rounded-br-[6px]" : "rounded-bl-[6px]",
+          <div className={cn("flex flex-col gap-1", isMine ? "items-end" : "items-start")}>
+            {message.embed && <EmbedCard embed={message.embed} isMine={isMine} />}
+            {/* Hide the bubble when the entire body is just the URL — show only the embed card */}
+            {!(message.embed && message.body?.trim() === message.embed.url) && (
+              <div
+                className={cn(
+                  "rounded-[22px] px-3.5 py-2.5 text-[15px] leading-[21px]",
+                  isMine ? "rounded-br-[6px]" : "rounded-bl-[6px]",
+                )}
+                style={{
+                  background: isMine ? "var(--color-bubble-sent)" : "var(--color-bubble-received)",
+                  color: isMine ? "var(--color-bubble-sent-text)" : "var(--color-text)",
+                  border: isMine ? undefined : "1px solid rgba(255,255,255,0.04)",
+                  whiteSpace: "pre-wrap",
+                  wordBreak: "break-word",
+                }}
+              >
+                {message.body}
+              </div>
             )}
-            style={{
-              background: isMine ? "var(--color-bubble-sent)" : "var(--color-bubble-received)",
-              color: isMine ? "var(--color-bubble-sent-text)" : "var(--color-text)",
-              border: isMine ? undefined : "1px solid rgba(255,255,255,0.04)",
-              whiteSpace: "pre-wrap",
-              wordBreak: "break-word",
-            }}
-          >
-            {message.body}
           </div>
           {!isMine && (
             <>

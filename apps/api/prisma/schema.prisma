@@ -92,9 +92,26 @@ model Message {
   viewEvents   ViewEvent[]
   reads        MessageRead[]
   reactions    Reaction[]
+  embed        MessageEmbed?
 
   @@index([conversationId, createdAt])
   @@index([senderId])
+}
+
+model MessageEmbed {
+  id          String   @id @default(uuid())
+  messageId   String   @unique
+  url         String
+  title       String?
+  description String?
+  imageUrl    String?
+  siteName    String?
+  faviconUrl  String?
+  type        String?
+  provider    String?
+  createdAt   DateTime @default(now())
+
+  message Message @relation(fields: [messageId], references: [id], onDelete: Cascade)
 }
 
 model Reaction {

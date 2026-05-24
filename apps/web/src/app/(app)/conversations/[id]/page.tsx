@@ -252,12 +252,25 @@ export default function ChatThreadPage() {
       );
     };
 
+    const onMessageEmbedUpdate = (payload: {
+      messageId: string;
+      embed: Message["embed"];
+    }) => {
+      setMessages(
+        (prev) =>
+          prev?.map((m) =>
+            m.messageId === payload.messageId ? { ...m, embed: payload.embed } : m,
+          ) ?? null,
+      );
+    };
+
     socket.on("message:new", onMessageNew);
     socket.on("message:edited", onMessageEdited);
     socket.on("message:deleted", onMessageDeleted);
     socket.on("message:reaction", onMessageReaction);
     socket.on("message:read", onMessageRead);
     socket.on("message:delivered", onMessageDelivered);
+    socket.on("message:embed:update", onMessageEmbedUpdate);
     socket.on("typing:update", onTypingUpdate);
     socket.on("presence:online", onPresenceOnline);
     socket.on("presence:offline", onPresenceOffline);
@@ -270,6 +283,7 @@ export default function ChatThreadPage() {
       socket.off("message:reaction", onMessageReaction);
       socket.off("message:read", onMessageRead);
       socket.off("message:delivered", onMessageDelivered);
+      socket.off("message:embed:update", onMessageEmbedUpdate);
       socket.off("typing:update", onTypingUpdate);
       socket.off("presence:online", onPresenceOnline);
       socket.off("presence:offline", onPresenceOffline);
