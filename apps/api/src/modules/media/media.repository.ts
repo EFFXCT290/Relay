@@ -5,13 +5,16 @@ import type { PrismaClient } from "@prisma/client";
 export function createMediaRepository(db: PrismaClient) {
   return {
     createMedia: (data: {
-      id:         string;
-      uploaderId: string;
-      storageKey: string;
-      mimeType:   string;
-      sizeBytes:  number;
-      width:      number | null;
-      height:     number | null;
+      id:             string;
+      uploaderId:     string;
+      storageKey:     string;
+      blurStorageKey: string | null;
+      mimeType:       string;
+      sizeBytes:      number;
+      width:          number | null;
+      height:         number | null;
+      blurWidth:      number | null;
+      blurHeight:     number | null;
     }) => db.media.create({ data }),
 
     createAttachment: (data: {

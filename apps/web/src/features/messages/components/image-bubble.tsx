@@ -26,6 +26,7 @@ export function ImageBubble({ attachment, isMine }: Props) {
   const [error,  setError]  = useState(false);
 
   const { width, height } = clampDimensions(attachment.media.width, attachment.media.height);
+  const blurUrl = attachment.media.blurUrl;
 
   return (
     <div
@@ -35,19 +36,33 @@ export function ImageBubble({ attachment, isMine }: Props) {
       )}
       style={{ width, height: loaded ? undefined : height }}
     >
+      {/* Placeholder layer: blur image if we have one, else a pulsing block.
+          Always painted underneath; the original fades in on top of it. */}
       {!loaded && !error && (
-        <div
-          className="absolute inset-0 animate-pulse"
-          style={{ background: "var(--color-raised)", width, height }}
-        />
+        blurUrl ? (
+          <img
+            src={blurUrl}
+            alt=""
+            aria-hidden
+            className="absolute inset-0 h-full w-full scale-110 object-cover blur-md"
+            style={{ width, height }}
+          />
+        ) : (
+          <div
+            className="absolute inset-0 animate-pulse"
+            style={{ background: "var(--color-raised)", width, height }}
+          />
+        )
       )}
       {!error ? (
         <img
           src={attachment.media.url}
           alt=""
           width={width}
-          className="block h-auto w-full object-cover"
-          style={{ display: loaded ? "block" : "none" }}
+          className={cn(
+            "block h-auto w-full object-cover transition-opacity duration-300",
+            loaded ? "opacity-100" : "opacity-0",
+          )}
           onLoad={() => setLoaded(true)}
           onError={() => setError(true)}
         />

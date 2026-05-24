@@ -16,12 +16,15 @@ export const MessageAttachmentSchema = Type.Object({
   id:   Type.String(),
   type: Type.Literal("image"),
   media: Type.Object({
-    id:        Type.String(),
-    url:       Type.String(),
-    width:     Type.Optional(Type.Union([Type.Number(), Type.Null()])),
-    height:    Type.Optional(Type.Union([Type.Number(), Type.Null()])),
-    mimeType:  Type.String(),
-    sizeBytes: Type.Number(),
+    id:         Type.String(),
+    url:        Type.String(),
+    blurUrl:    Type.Optional(Type.Union([Type.String(), Type.Null()])),
+    width:      Type.Optional(Type.Union([Type.Number(), Type.Null()])),
+    height:     Type.Optional(Type.Union([Type.Number(), Type.Null()])),
+    blurWidth:  Type.Optional(Type.Union([Type.Number(), Type.Null()])),
+    blurHeight: Type.Optional(Type.Union([Type.Number(), Type.Null()])),
+    mimeType:   Type.String(),
+    sizeBytes:  Type.Number(),
   }),
 });
 export type MessageAttachment = Static<typeof MessageAttachmentSchema>;
