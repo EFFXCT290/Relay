@@ -34,6 +34,15 @@ export const env = {
   JWT_REFRESH_EXPIRY: int("JWT_REFRESH_EXPIRY", 604800),
 
   COOKIE_SECRET: required("COOKIE_SECRET"),
+
+  MINIO_ENDPOINT:          optional("MINIO_ENDPOINT", "localhost"),
+  MINIO_PORT:              int("MINIO_PORT", 9000),
+  MINIO_USE_SSL:           (process.env["MINIO_USE_SSL"] ?? "false") === "true",
+  MINIO_ACCESS_KEY:        optional("MINIO_ACCESS_KEY", "minioadmin"),
+  MINIO_SECRET_KEY:        optional("MINIO_SECRET_KEY", "minioadmin"),
+  MINIO_BUCKET:            optional("MINIO_BUCKET_MEDIA", "relay-media"),
+  MEDIA_MAX_SIZE_MB:       int("MEDIA_MAX_SIZE_MB", 50),
+  MEDIA_SIGNED_URL_EXPIRY: int("MEDIA_SIGNED_URL_EXPIRY", 3600),
 } as const;
 
 export const isProd = env.NODE_ENV === "production";

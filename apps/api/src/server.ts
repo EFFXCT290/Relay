@@ -4,6 +4,7 @@ import Fastify, { type FastifyError } from "fastify";
 import cookie from "@fastify/cookie";
 import cors from "@fastify/cors";
 import helmet from "@fastify/helmet";
+import multipart from "@fastify/multipart";
 import rateLimit from "@fastify/rate-limit";
 import sensible from "@fastify/sensible";
 import {
@@ -18,8 +19,10 @@ import prismaPlugin from "./plugins/prisma.js";
 import redisPlugin from "./plugins/redis.js";
 import authPlugin from "./plugins/auth.js";
 import socketPlugin from "./plugins/socket.js";
+import minioPlugin from "./plugins/minio.js";
 
 import healthRoutes from "./modules/health/health.routes.js";
+import mediaRoutes from "./modules/media/media.routes.js";
 import authRoutes from "./modules/auth/auth.routes.js";
 import userRoutes from "./modules/users/user.routes.js";
 import conversationRoutes from "./modules/conversations/conversation.routes.js";
@@ -66,6 +69,10 @@ export async function buildServer() {
   await app.register(redisPlugin);
   await app.register(authPlugin);
   await app.register(socketPlugin);
+  await app.register(minioPlugin);
+  await app.register(multipart, {
+    limits: { fileSize: env.MEDIA_MAX_SIZE_MB * 1024 * 1024 },
+  });
 
   // ── Global error handler — RFC 9457 Problem Details ──────────────────────
   // TypeBox provider widens the err type to unknown; narrow here so we can
@@ -93,7 +100,8 @@ export async function buildServer() {
 
   // ── Routes ───────────────────────────────────────────────────────────────
   await app.register(healthRoutes, { prefix: "/api" });
-  await app.register(authRoutes, { prefix: "/api" });
+  await app.register(mediaRoutes,  { prefix: "/api" });
+  await app.register(authRoutes,   { prefix: "/api" });
   await app.register(userRoutes, { prefix: "/api" });
   await app.register(conversationRoutes, { prefix: "/api" });
   await app.register(messageRoutes, { prefix: "/api" });

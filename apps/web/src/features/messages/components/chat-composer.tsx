@@ -9,6 +9,7 @@ type Props = {
   onSend: (body: string, replyToId?: string | null) => Promise<void> | void;
   onUpdate?: (messageId: string, body: string) => Promise<void> | void;
   onTypingChange?: (isTyping: boolean) => void;
+  onSendImage?: (file: File) => void;
   /** When set, composer renders in reply mode with the parent preview above. */
   replyTo?: Message | null;
   onCancelReply?: () => void;
@@ -24,6 +25,7 @@ export function ChatComposer({
   onSend,
   onUpdate,
   onTypingChange,
+  onSendImage,
   replyTo,
   onCancelReply,
   editing,
@@ -33,6 +35,7 @@ export function ChatComposer({
   const [value, setValue] = useState("");
   const [busy, setBusy] = useState(false);
   const taRef = useRef<HTMLTextAreaElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   // Typing emit policy:
   //   - Emit typing:start ONCE when typing begins, then suppress repeats for
   //     TYPING_DEBOUNCE_MS. After that window any further keystroke re-emits
@@ -167,11 +170,23 @@ export function ChatComposer({
             disabled={busy || disabled}
             aria-label="Message"
           />
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="image/jpeg,image/png,image/webp"
+            className="hidden"
+            onChange={(e) => {
+              const file = e.target.files?.[0];
+              if (file) onSendImage?.(file);
+              e.target.value = "";
+            }}
+          />
           <button
             type="button"
-            aria-label="Camera (not yet wired)"
-            disabled
-            className="mb-1 text-[var(--color-text-secondary)] disabled:opacity-40"
+            aria-label="Send image"
+            disabled={!onSendImage || busy || disabled}
+            onClick={() => fileInputRef.current?.click()}
+            className="mb-1 text-[var(--color-text-secondary)] transition-opacity disabled:opacity-40 hover:text-[var(--color-text)]"
           >
             <Camera className="h-[18px] w-[18px]" />
           </button>

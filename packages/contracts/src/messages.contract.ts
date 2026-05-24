@@ -1,5 +1,6 @@
 // CONTRACT CATEGORY: domain
 import { Type, type Static } from "@sinclair/typebox";
+import { MessageAttachmentSchema } from "./media.contract.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // SAFEGUARD 1 — Source of truth for the Messages domain. Owns HTTP I/O schemas
@@ -51,6 +52,7 @@ export const MessageSchema = Type.Object({
   deliveredAt:    Type.Union([Type.String({ format: "date-time" }), Type.Null()]),
   createdAt:      Type.String({ format: "date-time" }),
   embed:          Type.Optional(Type.Union([Type.Null(), MessageEmbedSchema])),
+  attachments:    Type.Optional(Type.Array(MessageAttachmentSchema)),
 });
 export type Message = Static<typeof MessageSchema>;
 

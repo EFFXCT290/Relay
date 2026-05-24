@@ -1,5 +1,6 @@
 import type { FastifyPluginAsyncTypebox } from "@fastify/type-provider-typebox";
 import { Type } from "@sinclair/typebox";
+import { randomUUID } from "node:crypto";
 import { ProblemError } from "../../backend-core/http/errors.js";
 import { MessageSchema } from "@relay/contracts";
 import {
@@ -61,11 +62,12 @@ const messageRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
       const rows = await fastify.prisma.message.findMany({
         where: { conversationId },
         include: {
-          sender: { select: { id: true, username: true } },
-          replyTo: { select: { id: true, body: true, type: true } },
-          reactions: { select: { emoji: true, userId: true } },
-          reads: { select: { readerId: true, readAt: true } },
-          embed: true,
+          sender:      { select: { id: true, username: true } },
+          replyTo:     { select: { id: true, body: true, type: true } },
+          reactions:   { select: { emoji: true, userId: true } },
+          reads:       { select: { readerId: true, readAt: true } },
+          embed:       true,
+          attachments: { include: { media: true } },
         },
         orderBy: { createdAt: "desc" },
         take: limit + 1,
@@ -76,54 +78,67 @@ const messageRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
       const slice = hasMore ? rows.slice(0, -1) : rows;
       const nextCursor = hasMore ? slice[slice.length - 1]?.id ?? null : null;
 
-      return {
-        messages: slice.map((m) => {
-          const counts: Record<string, number> = {};
-          let mine: string | null = null;
-          for (const r of m.reactions) {
-            counts[r.emoji] = (counts[r.emoji] ?? 0) + 1;
-            if (r.userId === callerId) mine = r.emoji;
-          }
-          return {
-            messageId: m.id,
-            conversationId: m.conversationId,
-            senderId: m.senderId,
-            senderUsername: m.sender.username,
-            type: m.type,
-            body: m.isDeleted ? null : m.body,
-            replyTo: m.replyTo
-              ? {
-                  messageId: m.replyTo.id,
-                  preview: m.replyTo.body ? m.replyTo.body.slice(0, 80) : null,
-                  type: m.replyTo.type,
-                }
-              : null,
-            isEdited: m.isEdited,
-            editedAt: m.editedAt ? m.editedAt.toISOString() : null,
-            isDeleted: m.isDeleted,
-            reactions: counts,
-            myReaction: mine,
-            readBy: m.reads.map((r) => ({
-              userId: r.readerId,
-              readAt: r.readAt.toISOString(),
-            })),
-            deliveredAt: m.deliveredAt ? m.deliveredAt.toISOString() : null,
-            createdAt: m.createdAt.toISOString(),
-            embed: m.embed
-              ? {
-                  url:         m.embed.url,
-                  title:       m.embed.title,
-                  description: m.embed.description,
-                  imageUrl:    m.embed.imageUrl,
-                  siteName:    m.embed.siteName,
-                  faviconUrl:  m.embed.faviconUrl,
-                  provider:    m.embed.provider,
-                }
-              : null,
-          };
-        }),
-        nextCursor,
-      };
+      const messages = await Promise.all(slice.map(async (m) => {
+        const counts: Record<string, number> = {};
+        let mine: string | null = null;
+        for (const r of m.reactions) {
+          counts[r.emoji] = (counts[r.emoji] ?? 0) + 1;
+          if (r.userId === callerId) mine = r.emoji;
+        }
+
+        const attachments = await Promise.all(
+          (m.attachments ?? []).map(async (att) => ({
+            id:   att.id,
+            type: "image" as const,
+            media: {
+              id:        att.media.id,
+              url:       await fastify.getMediaUrl(att.media.storageKey),
+              width:     att.media.width,
+              height:    att.media.height,
+              mimeType:  att.media.mimeType,
+              sizeBytes: att.media.sizeBytes,
+            },
+          })),
+        );
+
+        return {
+          messageId:      m.id,
+          conversationId: m.conversationId,
+          senderId:       m.senderId,
+          senderUsername: m.sender.username,
+          type:           m.type,
+          body:           m.isDeleted ? null : m.body,
+          replyTo: m.replyTo
+            ? {
+                messageId: m.replyTo.id,
+                preview:   m.replyTo.body ? m.replyTo.body.slice(0, 80) : null,
+                type:      m.replyTo.type,
+              }
+            : null,
+          isEdited:    m.isEdited,
+          editedAt:    m.editedAt ? m.editedAt.toISOString() : null,
+          isDeleted:   m.isDeleted,
+          reactions:   counts,
+          myReaction:  mine,
+          readBy:      m.reads.map((r) => ({ userId: r.readerId, readAt: r.readAt.toISOString() })),
+          deliveredAt: m.deliveredAt ? m.deliveredAt.toISOString() : null,
+          createdAt:   m.createdAt.toISOString(),
+          embed: m.embed
+            ? {
+                url:         m.embed.url,
+                title:       m.embed.title,
+                description: m.embed.description,
+                imageUrl:    m.embed.imageUrl,
+                siteName:    m.embed.siteName,
+                faviconUrl:  m.embed.faviconUrl,
+                provider:    m.embed.provider,
+              }
+            : null,
+          ...(attachments.length > 0 ? { attachments } : {}),
+        };
+      }));
+
+      return { messages, nextCursor };
     },
   );
 
@@ -303,6 +318,159 @@ const messageRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
           fastify.log.error({ err }, "[embed] unhandled error in embed IIFE");
         }
       })();
+
+      return reply.code(201).send(httpPayload);
+    },
+  );
+
+  // ── POST /api/conversations/:id/messages/media ───────────────────────────
+  fastify.post(
+    "/conversations/:conversationId/messages/media",
+    {
+      preHandler: [fastify.authenticate],
+      schema: {
+        params: Type.Object({ conversationId: Type.String({ format: "uuid" }) }),
+        body: Type.Object({
+          mediaId:   Type.String(),
+          replyToId: Type.Optional(Type.Union([Type.String({ format: "uuid" }), Type.Null()])),
+        }),
+        response: {
+          201: Type.Object({
+            messageId:      Type.String({ format: "uuid" }),
+            conversationId: Type.String({ format: "uuid" }),
+            senderId:       Type.String({ format: "uuid" }),
+            type:           Type.Literal("IMAGE"),
+            body:           Type.Null(),
+            replyTo:        Type.Union([Type.Null(), Type.Object({ messageId: Type.String(), preview: Type.Union([Type.String(), Type.Null()]), type: Type.String() })]),
+            reactions:      Type.Record(Type.String(), Type.Integer()),
+            myReaction:     Type.Union([Type.String(), Type.Null()]),
+            readBy:         Type.Array(Type.Object({ userId: Type.String({ format: "uuid" }), readAt: Type.String({ format: "date-time" }) })),
+            deliveredAt:    Type.Union([Type.String({ format: "date-time" }), Type.Null()]),
+            createdAt:      Type.String({ format: "date-time" }),
+            attachments:    Type.Array(Type.Object({
+              id:   Type.String(),
+              type: Type.Literal("image"),
+              media: Type.Object({
+                id:        Type.String(),
+                url:       Type.String(),
+                width:     Type.Optional(Type.Union([Type.Number(), Type.Null()])),
+                height:    Type.Optional(Type.Union([Type.Number(), Type.Null()])),
+                mimeType:  Type.String(),
+                sizeBytes: Type.Number(),
+              }),
+            })),
+          }),
+        },
+      },
+      config: { rateLimit: { max: 30, timeWindow: "1 minute" } },
+    },
+    async (request, reply) => {
+      const callerId = request.userId!;
+      const { conversationId } = request.params;
+      const { mediaId, replyToId } = request.body;
+
+      const conv = await assertParticipant(fastify, callerId, conversationId);
+
+      // Verify the media belongs to the caller
+      const media = await fastify.prisma.media.findUnique({ where: { id: mediaId } });
+      if (!media) throw new ProblemError("not_found", "Media not found.");
+      if (media.uploaderId !== callerId) throw new ProblemError("forbidden", "Not your media.");
+
+      if (replyToId) {
+        const parent = await fastify.prisma.message.findUnique({
+          where: { id: replyToId },
+          select: { conversationId: true },
+        });
+        if (!parent || parent.conversationId !== conversationId) {
+          throw new ProblemError("bad_request", "replyToId is not in this conversation.");
+        }
+      }
+
+      const participants = await fastify.prisma.participant.findMany({
+        where: { conversationId },
+        select: { userId: true },
+      });
+      const otherIds = participants.map((p) => p.userId).filter((uid) => uid !== callerId);
+      const allRecipientsOnline =
+        otherIds.length > 0 &&
+        otherIds.every((uid) => (fastify.io.sockets.adapter.rooms.get(`user:${uid}`)?.size ?? 0) > 0);
+      const deliveredAt = allRecipientsOnline ? new Date() : null;
+
+      const attachmentId = randomUUID();
+
+      const created = await fastify.prisma.$transaction(async (tx) => {
+        const msg = await tx.message.create({
+          data: {
+            conversationId,
+            senderId: callerId,
+            type: "IMAGE",
+            body: null,
+            ...(replyToId ? { replyToId } : {}),
+            ...(deliveredAt ? { deliveredAt } : {}),
+          },
+          include: {
+            replyTo: { select: { id: true, body: true, type: true } },
+            sender:  { select: { username: true } },
+          },
+        });
+        await tx.messageAttachment.create({
+          data: { id: attachmentId, messageId: msg.id, mediaId, type: "image" },
+        });
+        await tx.conversation.update({
+          where: { id: conversationId },
+          data: { updatedAt: new Date() },
+        });
+        return msg;
+      });
+
+      const signedUrl = await fastify.getMediaUrl(media.storageKey);
+
+      const attachment = {
+        id:   attachmentId,
+        type: "image" as const,
+        media: {
+          id:        media.id,
+          url:       signedUrl,
+          width:     media.width,
+          height:    media.height,
+          mimeType:  media.mimeType,
+          sizeBytes: media.sizeBytes,
+        },
+      };
+
+      const httpPayload = {
+        messageId:      created.id,
+        conversationId: created.conversationId,
+        senderId:       created.senderId,
+        type:           "IMAGE" as const,
+        body:           null,
+        replyTo: created.replyTo
+          ? {
+              messageId: created.replyTo.id,
+              preview:   created.replyTo.body ? created.replyTo.body.slice(0, 80) : null,
+              type:      created.replyTo.type,
+            }
+          : null,
+        reactions:   {} as Record<string, number>,
+        myReaction:  null as string | null,
+        readBy:      [] as { userId: string; readAt: string }[],
+        deliveredAt: created.deliveredAt ? created.deliveredAt.toISOString() : null,
+        createdAt:   created.createdAt.toISOString(),
+        attachments: [attachment],
+      };
+
+      const broadcastMessage = {
+        ...httpPayload,
+        senderUsername: created.sender.username,
+        isEdited:  false,
+        editedAt:  null,
+        isDeleted: false,
+      };
+
+      emitMessageNew(fastify.io, conversationId, { message: broadcastMessage });
+      for (const p of participants) {
+        emitMessageNewToUser(fastify.io, p.userId, { message: broadcastMessage });
+      }
 
       return reply.code(201).send(httpPayload);
     },

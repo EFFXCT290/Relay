@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { ArrowLeft, MoreHorizontal } from "lucide-react";
+import imageCompression from "browser-image-compression";
 import { ApiError, api } from "@/frontend-core/api";
 import { getSocket } from "@/frontend-core/socket";
 import { Avatar } from "@/shared/components/avatar";
@@ -14,6 +15,8 @@ import {
   type Message,
 } from "@/features/messages/components/message-bubble";
 import { ChatComposer } from "@/features/messages/components/chat-composer";
+import { UploadPreview } from "@/features/messages/components/upload-preview";
+import { mediaApi } from "@/frontend-core/api-client/media";
 
 const PAGE_SIZE = 30;
 
@@ -46,6 +49,15 @@ export default function ChatThreadPage() {
   const [editing, setEditing] = useState<Message | null>(null);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [loadingOlder, setLoadingOlder] = useState(false);
+
+  type PendingUpload = {
+    localId: string;
+    blobUrl: string;
+    status:  "uploading" | "sending";
+    width?:  number;
+    height?: number;
+  };
+  const [pendingUploads, setPendingUploads] = useState<PendingUpload[]>([]);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   // meId resolves async from /api/auth/me. The WS effect must not re-subscribe
@@ -451,6 +463,45 @@ export default function ChatThreadPage() {
     [conversationId],
   );
 
+  const handleSendImage = useCallback(
+    async (file: File) => {
+      const localId = crypto.randomUUID();
+      const blobUrl = URL.createObjectURL(file);
+      stickToBottomRef.current = true;
+
+      setPendingUploads((prev) => [...prev, { localId, blobUrl, status: "uploading" }]);
+
+      try {
+        const compressed = await imageCompression(file, {
+          maxSizeMB:        1,
+          maxWidthOrHeight: 1920,
+          useWebWorker:     true,
+          initialQuality:   0.84,
+        });
+
+        const { mediaId } = await mediaApi.upload(compressed);
+
+        setPendingUploads((prev) =>
+          prev.map((p) => (p.localId === localId ? { ...p, status: "sending" } : p)),
+        );
+
+        await api(`/api/conversations/${conversationId}/messages/media`, {
+          method: "POST",
+          body:   { mediaId },
+        });
+
+        // The message:new socket event adds the real message; remove the optimistic one.
+        setPendingUploads((prev) => prev.filter((p) => p.localId !== localId));
+      } catch (err) {
+        setPendingUploads((prev) => prev.filter((p) => p.localId !== localId));
+        setError(err instanceof Error ? err.message : "Failed to send image");
+      } finally {
+        URL.revokeObjectURL(blobUrl);
+      }
+    },
+    [conversationId],
+  );
+
   const grouped = useMemo(() => {
     if (!messages) return null;
     const groups: { label: string; items: Message[] }[] = [];
@@ -591,6 +642,17 @@ export default function ChatThreadPage() {
               ))}
             </>
           )}
+          {pendingUploads.map((p) => (
+            <div key={p.localId} className="flex flex-col items-end gap-1 self-end">
+              <UploadPreview
+                blobUrl={p.blobUrl}
+                status={p.status}
+                isMine
+                width={p.width}
+                height={p.height}
+              />
+            </div>
+          ))}
           {partnerTyping && <TypingBubble username={detail?.participant.username} />}
         </div>
       </div>
@@ -631,6 +693,7 @@ export default function ChatThreadPage() {
           onSend={handleSend}
           onUpdate={handleUpdate}
           onTypingChange={handleTypingChange}
+          onSendImage={handleSendImage}
           replyTo={replyTo}
           onCancelReply={() => setReplyTo(null)}
           editing={editing}

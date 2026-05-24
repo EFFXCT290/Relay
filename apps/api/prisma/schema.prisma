@@ -26,7 +26,7 @@ model User {
   sentMessages  Message[]        @relation("SentMessages")
   conversations Participant[]
   notifications Notification[]
-  accessLogs    MediaAccessLog[]
+  uploadedMedia Media[]
   reads         MessageRead[]
   reactions     Reaction[]
   presence      UserPresence?
@@ -81,18 +81,16 @@ model Message {
   isDeleted      Boolean     @default(false)
   deletedAt      DateTime?
   deliveredAt    DateTime?
-  viewConfig     Json?       // { viewLimit: 1-5 | null, viewCount: 0 }
   createdAt      DateTime    @default(now())
 
-  conversation Conversation  @relation(fields: [conversationId], references: [id], onDelete: Cascade)
-  sender       User          @relation("SentMessages", fields: [senderId], references: [id])
-  replyTo      Message?      @relation("Replies", fields: [replyToId], references: [id])
-  replies      Message[]     @relation("Replies")
-  media        Media[]
-  viewEvents   ViewEvent[]
-  reads        MessageRead[]
-  reactions    Reaction[]
-  embed        MessageEmbed?
+  conversation  Conversation       @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  sender        User               @relation("SentMessages", fields: [senderId], references: [id])
+  replyTo       Message?           @relation("Replies", fields: [replyToId], references: [id])
+  replies       Message[]          @relation("Replies")
+  attachments   MessageAttachment[]
+  reads         MessageRead[]
+  reactions     Reaction[]
+  embed         MessageEmbed?
 
   @@index([conversationId, createdAt])
   @@index([senderId])
@@ -150,68 +148,34 @@ model MessageRead {
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-//  Media (v1.1 — quality + status, one file per record)
+//  Media (Phase 1 — upload-first, attach-to-message via MessageAttachment)
 // ────────────────────────────────────────────────────────────────────────────
 
 model Media {
-  id         String       @id @default(uuid())
-  messageId  String
-  minioKey   String       @unique // media/{uuid}/file.{ext}
-  quality    MediaQuality
-  mimeType   String
-  sizeBytes  BigInt?      // null while PROCESSING
-  status     MediaStatus  @default(READY)
-  durationMs Int?
-  width      Int?
-  height     Int?
-  createdAt  DateTime     @default(now())
+  id          String   @id @default(cuid())
+  uploaderId  String
+  storageKey  String   @unique
+  mimeType    String
+  sizeBytes   Int
+  width       Int?
+  height      Int?
+  createdAt   DateTime @default(now())
 
-  message    Message          @relation(fields: [messageId], references: [id], onDelete: Cascade)
-  accessLogs MediaAccessLog[]
+  uploader    User                @relation(fields: [uploaderId], references: [id])
+  attachments MessageAttachment[]
 }
 
-enum MediaQuality {
-  ORIGINAL   // stored exactly as received — no processing
-  COMPRESSED // FFmpeg-processed before storage
-}
-
-enum MediaStatus {
-  PROCESSING
-  READY
-  FAILED
-}
-
-model ViewEvent {
-  id         String   @id @default(uuid())
-  messageId  String
-  viewerId   String
-  viewedAt   DateTime @default(now())
-  viewNumber Int
+model MessageAttachment {
+  id        String   @id @default(cuid())
+  messageId String
+  mediaId   String
+  type      String   // "image"
+  createdAt DateTime @default(now())
 
   message Message @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  media   Media   @relation(fields: [mediaId], references: [id])
 
-  @@index([messageId, viewerId])
-}
-
-model MediaAccessLog {
-  id         String      @id @default(uuid())
-  mediaId    String
-  userId     String
-  action     MediaAction
-  detectedAt DateTime    @default(now())
-  metadata   Json?
-
-  media Media @relation(fields: [mediaId], references: [id], onDelete: Cascade)
-  user  User  @relation(fields: [userId], references: [id])
-
-  @@index([mediaId])
-  @@index([userId])
-}
-
-enum MediaAction {
-  VIEW
-  SCREENSHOT_ATTEMPT
-  RECORD_ATTEMPT
+  @@index([messageId])
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -234,8 +198,6 @@ model Notification {
 enum NotificationType {
   SYSTEM_ALERT
   MESSAGE_RECEIVED
-  VIEW_COUNT_UPDATE
-  MEDIA_EXPIRED
 }
 
 model JtiBlocklist {

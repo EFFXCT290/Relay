@@ -5,6 +5,7 @@ import { cn } from "@/frontend-core/utils";
 import { Avatar } from "@/shared/components/avatar";
 import { ReactionChips, ReactionPicker } from "./reaction-picker";
 import { EmbedCard } from "./embeds";
+import { ImageGrid } from "./image-grid";
 import type { Message } from "@relay/contracts";
 
 export type { Message };  // re-export so existing consumers still resolve through this module
@@ -278,9 +279,12 @@ export function MessageBubble({
             </>
           )}
           <div className={cn("flex flex-col gap-1", isMine ? "items-end" : "items-start")}>
+            {message.attachments && message.attachments.length > 0 && (
+              <ImageGrid attachments={message.attachments} isMine={isMine} />
+            )}
             {message.embed && <EmbedCard embed={message.embed} isMine={isMine} />}
             {/* Hide the bubble when the entire body is just the URL — show only the embed card */}
-            {!(message.embed && message.body?.trim() === message.embed.url) && (
+            {message.body && !(message.embed && message.body.trim() === message.embed.url) && (
               <div
                 className={cn(
                   "rounded-[22px] px-3.5 py-2.5 text-[15px] leading-[21px]",

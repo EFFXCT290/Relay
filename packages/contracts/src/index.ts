@@ -1,4 +1,5 @@
 export * from "./auth.contract.js";
+export * from "./media.contract.js";
 export * from "./messages.contract.js";
 export * from "./conversations.contract.js";
 export * from "./notifications.contract.js";

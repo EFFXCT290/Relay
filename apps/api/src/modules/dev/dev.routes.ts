@@ -42,24 +42,8 @@ const devRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
             eventType: "SCREENSHOT_ATTEMPT",
             trigger: "visibilitychange burst",
             timestamp: new Date().toISOString(),
-            mediaId: "00000000-0000-0000-0000-000000000aa1",
             userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_2) Safari/605.1.15",
             platform: "macOS",
-          });
-          break;
-        case "view":
-          await notify(fastify, userId, "VIEW_COUNT_UPDATE", {
-            viewer: partnerRef,
-            messageId: "00000000-0000-0000-0000-000000000aa2",
-            viewsUsed: 1,
-            viewsAllowed: 3,
-          });
-          break;
-        case "expired":
-          await notify(fastify, userId, "MEDIA_EXPIRED", {
-            recipient: partnerRef,
-            messageId: "00000000-0000-0000-0000-000000000aa3",
-            expiredAt: new Date().toISOString(),
           });
           break;
         case "message":
