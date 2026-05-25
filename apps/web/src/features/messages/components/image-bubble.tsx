@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { cn } from "@/frontend-core/utils";
 import type { MessageAttachment } from "@relay/contracts";
+import { useInViewport } from "@/shared/hooks/use-in-viewport";
 
 const MAX_W = 280;
 const MAX_H = 360;
@@ -25,6 +26,7 @@ type Props = {
 export function ImageBubble({ attachment, isMine, onOpenLightbox }: Props) {
   const [loaded, setLoaded] = useState(false);
   const [error,  setError]  = useState(false);
+  const { ref: containerRef, visible } = useInViewport<HTMLDivElement>();
 
   // Use thumb dimensions for clamping when available — they reflect the actual
   // displayed asset size, preventing layout shifts on images that weren't
@@ -39,6 +41,7 @@ export function ImageBubble({ attachment, isMine, onOpenLightbox }: Props) {
 
   const inner = (
     <div
+      ref={containerRef}
       className={cn(
         "relative overflow-hidden rounded-[18px]",
         isMine ? "rounded-br-[6px]" : "rounded-bl-[6px]",
@@ -65,7 +68,7 @@ export function ImageBubble({ attachment, isMine, onOpenLightbox }: Props) {
       )}
       {!error ? (
         <img
-          src={chatSrc}
+          src={visible ? chatSrc : undefined}
           alt=""
           width={width}
           className={cn(
