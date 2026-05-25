@@ -98,6 +98,16 @@ async function uploadWithRetry(
   }
 }
 
+// Tagged union for events buffered by the sync barrier during replay.
+// Flushed in causal order (new → edit → delete → delivered → read) so
+// receipts never apply before the messages they reference exist in state.
+type SyncBufferEvent =
+  | { type: "new";       payload: { message: Message } }
+  | { type: "read";      payload: { conversationId: string; readBy: string; messageIds: string[]; readAt: string; deliveredAt?: string | null } }
+  | { type: "edit";      payload: { messageId: string; body: string; editedAt: string } }
+  | { type: "delete";    payload: { messageId: string } }
+  | { type: "delivered"; payload: { conversationId: string; messageIds: string[]; deliveredAt: string } };
+
 type ConversationDetail = {
   conversationId: string;
   participant: {
@@ -154,11 +164,14 @@ export default function ChatThreadPage() {
   // Sync barrier — buffers live message:new events that arrive while a
   // reconnect replay is in flight, then flushes them after replay completes
   // so messages are always applied oldest-first without duplicates.
-  const isSyncingRef  = useRef(false);
-  const syncQueueRef  = useRef<Array<{ message: Message }>>([]);
+  const isSyncingRef    = useRef(false);
+  const syncQueueRef    = useRef<SyncBufferEvent[]>([]);
   // Cursor for replay: createdAt of the last message the client has seen.
   // Updated in applyMessageNew so it always reflects in-memory state.
-  const replayCursorRef = useRef<string | null>(null);
+  const replayCursorRef  = useRef<string | null>(null);
+  // Safety net: read receipts that arrive before their target message is in
+  // local state. Flushed by applyMessageNew when the message lands.
+  const pendingReadsRef  = useRef<Map<string, Array<{ readBy: string; readAt: string; deliveredAt?: string | null }>>>(new Map());
 
   // Same pattern as meIdRef — detail resolves async, but WS handlers must
   // not re-subscribe when it lands (churn drops events). Read through a ref.
@@ -248,29 +261,116 @@ export default function ChatThreadPage() {
     // handler and the replay handler so dedup + auto-read logic is shared.
     const applyMessageNew = (payload: { message: Message }) => {
       if (payload.message.conversationId !== conversationId) return;
+      const { message } = payload;
       setMessages((prev) => {
         if (!prev) return prev;
-        if (prev.some((m) => m.messageId === payload.message.messageId)) return prev;
+        if (prev.some((m) => m.messageId === message.messageId)) return prev;
         const next = [
           ...prev,
           {
-            ...payload.message,
-            reactions:  payload.message.reactions  ?? {},
-            myReaction: payload.message.myReaction ?? null,
-            readBy:     payload.message.readBy     ?? [],
+            ...message,
+            reactions:  message.reactions  ?? {},
+            myReaction: message.myReaction ?? null,
+            readBy:     message.readBy     ?? [],
           },
         ];
         // Advance replay cursor as we apply messages.
-        replayCursorRef.current = payload.message.createdAt;
+        replayCursorRef.current = message.createdAt;
         return next;
       });
+      // Flush any read receipts that arrived before this message landed in state.
+      const pending = pendingReadsRef.current.get(message.messageId);
+      if (pending?.length) {
+        pendingReadsRef.current.delete(message.messageId);
+        setMessages((prev) =>
+          prev?.map((m) => {
+            if (m.messageId !== message.messageId) return m;
+            let updated = m;
+            for (const p of pending) {
+              if (!updated.readBy.some((r) => r.userId === p.readBy)) {
+                updated = {
+                  ...updated,
+                  readBy: [...updated.readBy, { userId: p.readBy, readAt: p.readAt }],
+                  deliveredAt: updated.deliveredAt ?? p.deliveredAt ?? p.readAt,
+                };
+              }
+            }
+            return updated;
+          }) ?? null,
+        );
+      }
       if (
-        payload.message.senderId !== meIdRef.current &&
+        message.senderId !== meIdRef.current &&
         typeof document !== "undefined" &&
         document.visibilityState === "visible"
       ) {
         void api(`/api/conversations/${conversationId}/read`, { method: "POST" }).catch(() => {});
       }
+    };
+
+    // Shared apply functions — used by both live handlers and the sync-barrier
+    // flush so state mutations are always identical regardless of the path.
+
+    const applyMessageRead = (payload: { conversationId: string; readBy: string; messageIds: string[]; readAt: string; deliveredAt?: string | null }) => {
+      if (payload.conversationId !== conversationId) return;
+      const ids = new Set(payload.messageIds);
+      // Buffer per messageId — flushed by applyMessageNew if the message
+      // hasn't landed in state yet (rare race on initial replay).
+      for (const msgId of payload.messageIds) {
+        const bucket = pendingReadsRef.current.get(msgId) ?? [];
+        bucket.push({ readBy: payload.readBy, readAt: payload.readAt, deliveredAt: payload.deliveredAt });
+        pendingReadsRef.current.set(msgId, bucket);
+      }
+      setMessages(
+        (prev) =>
+          prev?.map((m) => {
+            if (!ids.has(m.messageId)) return m;
+            const alreadyRead = m.readBy.some((r) => r.userId === payload.readBy);
+            return {
+              ...m,
+              readBy: alreadyRead
+                ? m.readBy
+                : [...m.readBy, { userId: payload.readBy, readAt: payload.readAt }],
+              // Read implies delivered — backfill so sender sees ✓✓ blue.
+              deliveredAt: m.deliveredAt ?? payload.deliveredAt ?? payload.readAt,
+            };
+          }) ?? null,
+      );
+    };
+
+    const applyMessageDelivered = (payload: { conversationId: string; messageIds: string[]; deliveredAt: string }) => {
+      if (payload.conversationId !== conversationId) return;
+      const ids = new Set(payload.messageIds);
+      setMessages(
+        (prev) =>
+          prev?.map((m) =>
+            ids.has(m.messageId) && !m.deliveredAt
+              ? { ...m, deliveredAt: payload.deliveredAt }
+              : m,
+          ) ?? null,
+      );
+    };
+
+    const applyMessageEdited = (payload: { messageId: string; body: string; editedAt: string }) => {
+      setMessages(
+        (prev) =>
+          prev?.map((m) =>
+            m.messageId === payload.messageId
+              ? { ...m, body: payload.body, isEdited: true, editedAt: payload.editedAt }
+              : m,
+          ) ?? null,
+      );
+    };
+
+    const applyMessageDeleted = (payload: { messageId: string }) => {
+      setMessages(
+        (prev) =>
+          prev?.map((m) =>
+            m.messageId === payload.messageId
+              ? { ...m, isDeleted: true, body: null }
+              : m,
+          ) ?? null,
+      );
     };
 
     // Initial join (or rejoin if already connected mid-handshake).
@@ -292,6 +392,7 @@ export default function ChatThreadPage() {
       setPartnerTyping(false);
       isSyncingRef.current = true;
       syncQueueRef.current  = [];
+      pendingReadsRef.current.clear();
 
       // Deregister previous handler so stale responses can't apply.
       if (currentReplayHandler) {
@@ -336,7 +437,13 @@ export default function ChatThreadPage() {
           currentReplayHandler  = null;
           isSyncingRef.current  = false;
           const queued = syncQueueRef.current.splice(0);
-          for (const p of queued) applyMessageNew(p);
+          // Causal flush order: new messages first (so receipts have something
+          // to apply to), then mutations, then read receipts last.
+          for (const e of queued) { if (e.type === "new")       applyMessageNew(e.payload); }
+          for (const e of queued) { if (e.type === "edit")      applyMessageEdited(e.payload); }
+          for (const e of queued) { if (e.type === "delete")    applyMessageDeleted(e.payload); }
+          for (const e of queued) { if (e.type === "delivered") applyMessageDelivered(e.payload); }
+          for (const e of queued) { if (e.type === "read")      applyMessageRead(e.payload); }
         }
       };
 
@@ -345,84 +452,48 @@ export default function ChatThreadPage() {
     };
     socket.on("connect", onReconnect);
 
-    // Live message:new — buffer during replay barrier, apply immediately otherwise.
+    // All four message event handlers gate on the sync barrier so that events
+    // arriving during replay are buffered and flushed in causal order, not
+    // applied out of order against an incomplete in-memory message list.
+
     const onMessageNew = (payload: { message: Message }) => {
       if (isSyncingRef.current) {
-        syncQueueRef.current.push(payload);
+        syncQueueRef.current.push({ type: "new", payload });
         return;
       }
       applyMessageNew(payload);
     };
 
-    const onMessageRead = (payload: {
-      conversationId: string;
-      readBy: string;
-      messageIds: string[];
-      readAt: string;
-      deliveredAt?: string | null;
-    }) => {
-      if (payload.conversationId !== conversationId) return;
-      const ids = new Set(payload.messageIds);
-      setMessages(
-        (prev) =>
-          prev?.map((m) => {
-            if (!ids.has(m.messageId)) return m;
-            const alreadyRead = m.readBy.some((r) => r.userId === payload.readBy);
-            return {
-              ...m,
-              readBy: alreadyRead
-                ? m.readBy
-                : [...m.readBy, { userId: payload.readBy, readAt: payload.readAt }],
-              // Read implies delivered. Backfill in case the receiver came
-              // online and went straight to reading without a separate
-              // delivered event landing first.
-              deliveredAt: m.deliveredAt ?? payload.deliveredAt ?? payload.readAt,
-            };
-          }) ?? null,
-      );
+    const onMessageRead = (payload: { conversationId: string; readBy: string; messageIds: string[]; readAt: string; deliveredAt?: string | null }) => {
+      if (isSyncingRef.current) {
+        syncQueueRef.current.push({ type: "read", payload });
+        return;
+      }
+      applyMessageRead(payload);
     };
 
-    const onMessageDelivered = (payload: {
-      conversationId: string;
-      messageIds: string[];
-      deliveredAt: string;
-    }) => {
-      if (payload.conversationId !== conversationId) return;
-      const ids = new Set(payload.messageIds);
-      setMessages(
-        (prev) =>
-          prev?.map((m) =>
-            ids.has(m.messageId) && !m.deliveredAt
-              ? { ...m, deliveredAt: payload.deliveredAt }
-              : m,
-          ) ?? null,
-      );
+    const onMessageDelivered = (payload: { conversationId: string; messageIds: string[]; deliveredAt: string }) => {
+      if (isSyncingRef.current) {
+        syncQueueRef.current.push({ type: "delivered", payload });
+        return;
+      }
+      applyMessageDelivered(payload);
     };
 
-    const onMessageEdited = (payload: {
-      messageId: string;
-      body: string;
-      editedAt: string;
-    }) => {
-      setMessages(
-        (prev) =>
-          prev?.map((m) =>
-            m.messageId === payload.messageId
-              ? { ...m, body: payload.body, isEdited: true, editedAt: payload.editedAt }
-              : m,
-          ) ?? null,
-      );
+    const onMessageEdited = (payload: { messageId: string; body: string; editedAt: string }) => {
+      if (isSyncingRef.current) {
+        syncQueueRef.current.push({ type: "edit", payload });
+        return;
+      }
+      applyMessageEdited(payload);
     };
 
     const onMessageDeleted = (payload: { messageId: string }) => {
-      setMessages(
-        (prev) =>
-          prev?.map((m) =>
-            m.messageId === payload.messageId
-              ? { ...m, isDeleted: true, body: null }
-              : m,
-          ) ?? null,
-      );
+      if (isSyncingRef.current) {
+        syncQueueRef.current.push({ type: "delete", payload });
+        return;
+      }
+      applyMessageDeleted(payload);
     };
 
     const onMessageReaction = (payload: {
@@ -552,10 +623,11 @@ export default function ChatThreadPage() {
     socket.on(MEDIA_EVENTS.READY, onMediaReady);
 
     return () => {
-      // Leave the room and clear the barrier — prevents stale state from
+      // Leave the room and clear all barriers — prevents stale state from
       // leaking into the next conversation or mount cycle.
       isSyncingRef.current = false;
       syncQueueRef.current  = [];
+      pendingReadsRef.current.clear();
       socket.off("connect", onReconnect);
       socket.emit("conversation:leave", { conversationId });
       if (currentReplayHandler) {
