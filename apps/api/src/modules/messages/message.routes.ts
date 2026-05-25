@@ -275,7 +275,9 @@ const messageRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
         createdAt:   created.createdAt.toISOString(),
       };
 
-      const broadcastMessage = { ...httpPayload, isEdited: false, editedAt: null, isDeleted: false };
+      // clientMessageId is included so the sender's client can atomically swap
+      // its optimistic tempId placeholder for the real server ID on WS echo.
+      const broadcastMessage = { ...httpPayload, isEdited: false, editedAt: null, isDeleted: false, clientMessageId: clientMessageId ?? null };
       emitMessageNew(fastify.io, conversationId, { message: broadcastMessage });
       for (const p of participants) emitMessageNewToUser(fastify.io, p.userId, { message: broadcastMessage });
 

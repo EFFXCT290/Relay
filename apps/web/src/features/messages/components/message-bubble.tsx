@@ -24,10 +24,12 @@ type Props = {
   showReadReceipt?: boolean;
   readAt?: string | null;
   deliveredAt?: string | null;
+  failed?: boolean;
   onReact?: (messageId: string, emoji: string) => void;
   onReply?: (message: Message) => void;
   onEdit?: (message: Message) => void;
   onDelete?: (message: Message) => void;
+  onDismiss?: () => void;
   onOpenLightbox?: (attachments: MessageAttachment[], index: number) => void;
 };
 
@@ -37,10 +39,12 @@ export function MessageBubble({
   showReadReceipt,
   readAt,
   deliveredAt,
+  failed,
   onReact,
   onReply,
   onEdit,
   onDelete,
+  onDismiss,
   onOpenLightbox,
 }: Props) {
   const [pickerOpen, setPickerOpen] = useState(false);
@@ -350,23 +354,43 @@ export function MessageBubble({
             <span
               className="flex items-center gap-1"
               style={{
-                color: readAt
-                  ? "var(--color-read-receipt)"
-                  : "var(--color-text-muted)",
+                color: failed
+                  ? "var(--color-alert)"
+                  : readAt
+                    ? "var(--color-read-receipt)"
+                    : "var(--color-text-muted)",
               }}
             >
-              {readAt || deliveredAt ? (
-                <CheckCheck className="h-3 w-3" />
+              {failed ? (
+                <>
+                  <span className="text-[10px]" style={{ fontFamily: mono }}>Failed</span>
+                  {onDismiss && (
+                    <button
+                      type="button"
+                      onClick={(e) => { e.stopPropagation(); onDismiss(); }}
+                      className="text-[10px] underline"
+                      style={{ fontFamily: mono, color: "var(--color-alert)" }}
+                    >
+                      Dismiss
+                    </button>
+                  )}
+                </>
               ) : (
-                <Check className="h-3 w-3" />
+                <>
+                  {readAt || deliveredAt ? (
+                    <CheckCheck className="h-3 w-3" />
+                  ) : (
+                    <Check className="h-3 w-3" />
+                  )}
+                  <span className="text-[10px]" style={{ fontFamily: mono }}>
+                    {readAt
+                      ? `Read ${formatHHMM(readAt)}`
+                      : deliveredAt
+                        ? "Delivered"
+                        : "Sent"}
+                  </span>
+                </>
               )}
-              <span className="text-[10px]" style={{ fontFamily: mono }}>
-                {readAt
-                  ? `Read ${formatHHMM(readAt)}`
-                  : deliveredAt
-                    ? "Delivered"
-                    : "Sent"}
-              </span>
             </span>
           )}
         </div>

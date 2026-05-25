@@ -51,8 +51,11 @@ export const MessageSchema = Type.Object({
   readBy:         Type.Array(ReadReceiptSchema),
   deliveredAt:    Type.Union([Type.String({ format: "date-time" }), Type.Null()]),
   createdAt:      Type.String({ format: "date-time" }),
-  embed:          Type.Optional(Type.Union([Type.Null(), MessageEmbedSchema])),
-  attachments:    Type.Optional(Type.Array(MessageAttachmentSchema)),
+  embed:           Type.Optional(Type.Union([Type.Null(), MessageEmbedSchema])),
+  attachments:     Type.Optional(Type.Array(MessageAttachmentSchema)),
+  // Set only on message:new WS echoes for text sends — used by the sender's
+  // client to atomically swap the optimistic tempId for the server's real ID.
+  clientMessageId: Type.Optional(Type.Union([Type.String({ format: "uuid" }), Type.Null()])),
 });
 export type Message = Static<typeof MessageSchema>;
 

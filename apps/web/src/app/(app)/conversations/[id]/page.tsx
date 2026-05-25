@@ -108,6 +108,10 @@ type SyncBufferEvent =
   | { type: "delete";    payload: { messageId: string } }
   | { type: "delivered"; payload: { conversationId: string; messageIds: string[]; deliveredAt: string } };
 
+// Client-only extension — `_failed` is never set by the server and is
+// stripped implicitly when a message is replaced by the real server row.
+type LocalMessage = Message & { _failed?: true };
+
 type ConversationDetail = {
   conversationId: string;
   participant: {
@@ -133,7 +137,15 @@ export default function ChatThreadPage() {
 
   const [meId, setMeId] = useState<string | null>(null);
   const [detail, setDetail] = useState<ConversationDetail | null>(null);
-  const [messages, setMessages] = useState<Message[] | null>(null);
+  // Normalized message store: keyed by messageId for O(1) lookup and atomic
+  // swaps (optimistic tempId → server realId without re-ordering the array).
+  const messagesRef      = useRef<Record<string, LocalMessage>>({});
+  const [messagesLoaded, setMessagesLoaded] = useState(false);
+  // Increment to force a re-render after ref mutations.
+  const [renderTick,     setRenderTick]     = useState(0);
+  // Maps clientMessageId → tempId so the WS echo can atomically replace the
+  // optimistic placeholder without causing a visible duplicate.
+  const clientToTempRef  = useRef<Map<string, string>>(new Map());
   const [partnerTyping, setPartnerTyping] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [replyTo, setReplyTo] = useState<Message | null>(null);
@@ -178,6 +190,16 @@ export default function ChatThreadPage() {
   const partnerIdRef = useRef<string | null>(null);
   useEffect(() => { partnerIdRef.current = detail?.participant.userId ?? null; }, [detail]);
 
+  // Returns messages sorted oldest-first. Reads directly from the ref so
+  // callers always get the latest snapshot after any ref mutation.
+  // messageId tie-breaker gives deterministic order when two messages share
+  // the same createdAt timestamp (burst sends, replayed events).
+  const getMessagesArray = (): LocalMessage[] =>
+    Object.values(messagesRef.current).sort((a, b) => {
+      const t = new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
+      return t !== 0 ? t : a.messageId.localeCompare(b.messageId);
+    });
+
   // Initial loads — me, detail, history — fired in parallel.
   useEffect(() => {
     let cancelled = false;
@@ -195,8 +217,10 @@ export default function ChatThreadPage() {
         setDetail(det);
         // API returns newest-first; reverse so DOM order is oldest-first.
         const ordered = [...hist.messages].reverse();
-        setMessages(ordered);
+        // Populate normalized store — triggers a single render via setMessagesLoaded.
+        messagesRef.current = Object.fromEntries(ordered.map((m) => [m.messageId, m]));
         setNextCursor(hist.nextCursor);
+        setMessagesLoaded(true);
         // Seed the replay cursor so reconnect knows where to resume from.
         const lastMsg = ordered[ordered.length - 1];
         if (lastMsg) replayCursorRef.current = lastMsg.createdAt;
@@ -257,48 +281,63 @@ export default function ChatThreadPage() {
       if (partnerId) socket.emit(PRESENCE_EVENTS.SYNC_REQUEST, { userIds: [partnerId] });
     };
 
-    // Applies a message:new payload to local state. Used by both the live
-    // handler and the replay handler so dedup + auto-read logic is shared.
+    // One rerender() call triggers a render that reads the latest ref snapshot.
+    // setRenderTick is stable (like setState), so it's safe to close over here.
+    const rerender = () => setRenderTick((x) => x + 1);
+
+    // ── apply* functions ──────────────────────────────────────────────────────
+    // All mutations go through these. Both live handlers and the sync-barrier
+    // flush use the same path so state is always consistent.
+
     const applyMessageNew = (payload: { message: Message }) => {
       if (payload.message.conversationId !== conversationId) return;
       const { message } = payload;
-      setMessages((prev) => {
-        if (!prev) return prev;
-        if (prev.some((m) => m.messageId === message.messageId)) return prev;
-        const next = [
-          ...prev,
-          {
-            ...message,
-            reactions:  message.reactions  ?? {},
-            myReaction: message.myReaction ?? null,
-            readBy:     message.readBy     ?? [],
-          },
-        ];
-        // Advance replay cursor as we apply messages.
-        replayCursorRef.current = message.createdAt;
-        return next;
-      });
-      // Flush any read receipts that arrived before this message landed in state.
+
+      // If this is a WS echo of one of our pending optimistic sends, do an
+      // atomic swap: replace the tempId placeholder with the real server ID
+      // in a single mutation so the message never flickers out of view.
+      const ourTempId = message.clientMessageId
+        ? clientToTempRef.current.get(message.clientMessageId)
+        : undefined;
+      if (ourTempId !== undefined) {
+        clientToTempRef.current.delete(message.clientMessageId!);
+        messagesRef.current[message.messageId] = {
+          ...messagesRef.current[ourTempId],
+          ...message,
+          reactions:  message.reactions  ?? {},
+          myReaction: message.myReaction ?? null,
+          readBy:     message.readBy     ?? [],
+        };
+        delete messagesRef.current[ourTempId];
+      } else {
+        if (messagesRef.current[message.messageId]) return; // dedup
+        messagesRef.current[message.messageId] = {
+          ...message,
+          reactions:  message.reactions  ?? {},
+          myReaction: message.myReaction ?? null,
+          readBy:     message.readBy     ?? [],
+        };
+      }
+
+      replayCursorRef.current = message.createdAt;
+
+      // Flush any read receipts buffered while this message was still missing.
       const pending = pendingReadsRef.current.get(message.messageId);
       if (pending?.length) {
         pendingReadsRef.current.delete(message.messageId);
-        setMessages((prev) =>
-          prev?.map((m) => {
-            if (m.messageId !== message.messageId) return m;
-            let updated = m;
-            for (const p of pending) {
-              if (!updated.readBy.some((r) => r.userId === p.readBy)) {
-                updated = {
-                  ...updated,
-                  readBy: [...updated.readBy, { userId: p.readBy, readAt: p.readAt }],
-                  deliveredAt: updated.deliveredAt ?? p.deliveredAt ?? p.readAt,
-                };
-              }
+        let m = messagesRef.current[message.messageId];
+        if (m) {
+          for (const p of pending) {
+            if (!m.readBy.some((r) => r.userId === p.readBy)) {
+              m = { ...m, readBy: [...m.readBy, { userId: p.readBy, readAt: p.readAt }], deliveredAt: m.deliveredAt ?? p.deliveredAt ?? p.readAt };
             }
-            return updated;
-          }) ?? null,
-        );
+          }
+          messagesRef.current[message.messageId] = m;
+        }
       }
+
+      rerender();
+
       if (
         message.senderId !== meIdRef.current &&
         typeof document !== "undefined" &&
@@ -308,69 +347,59 @@ export default function ChatThreadPage() {
       }
     };
 
-    // Shared apply functions — used by both live handlers and the sync-barrier
-    // flush so state mutations are always identical regardless of the path.
-
     const applyMessageRead = (payload: { conversationId: string; readBy: string; messageIds: string[]; readAt: string; deliveredAt?: string | null }) => {
       if (payload.conversationId !== conversationId) return;
-      const ids = new Set(payload.messageIds);
-      // Buffer per messageId — flushed by applyMessageNew if the message
-      // hasn't landed in state yet (rare race on initial replay).
+      let changed = false;
       for (const msgId of payload.messageIds) {
-        const bucket = pendingReadsRef.current.get(msgId) ?? [];
-        bucket.push({ readBy: payload.readBy, readAt: payload.readAt, deliveredAt: payload.deliveredAt });
-        pendingReadsRef.current.set(msgId, bucket);
+        const m = messagesRef.current[msgId];
+        if (!m) {
+          // Message not in state yet — buffer for when it lands.
+          const bucket = pendingReadsRef.current.get(msgId) ?? [];
+          bucket.push({ readBy: payload.readBy, readAt: payload.readAt, deliveredAt: payload.deliveredAt });
+          pendingReadsRef.current.set(msgId, bucket);
+          continue;
+        }
+        const alreadyRead = m.readBy.some((r) => r.userId === payload.readBy);
+        if (!alreadyRead) {
+          messagesRef.current[msgId] = {
+            ...m,
+            readBy: [...m.readBy, { userId: payload.readBy, readAt: payload.readAt }],
+            // Read implies delivered — backfill so sender sees ✓✓ blue.
+            deliveredAt: m.deliveredAt ?? payload.deliveredAt ?? payload.readAt,
+          };
+          changed = true;
+        } else if (!m.deliveredAt) {
+          const fill = payload.deliveredAt ?? payload.readAt;
+          if (fill) { messagesRef.current[msgId] = { ...m, deliveredAt: fill }; changed = true; }
+        }
       }
-      setMessages(
-        (prev) =>
-          prev?.map((m) => {
-            if (!ids.has(m.messageId)) return m;
-            const alreadyRead = m.readBy.some((r) => r.userId === payload.readBy);
-            return {
-              ...m,
-              readBy: alreadyRead
-                ? m.readBy
-                : [...m.readBy, { userId: payload.readBy, readAt: payload.readAt }],
-              // Read implies delivered — backfill so sender sees ✓✓ blue.
-              deliveredAt: m.deliveredAt ?? payload.deliveredAt ?? payload.readAt,
-            };
-          }) ?? null,
-      );
+      if (changed) rerender();
     };
 
     const applyMessageDelivered = (payload: { conversationId: string; messageIds: string[]; deliveredAt: string }) => {
       if (payload.conversationId !== conversationId) return;
-      const ids = new Set(payload.messageIds);
-      setMessages(
-        (prev) =>
-          prev?.map((m) =>
-            ids.has(m.messageId) && !m.deliveredAt
-              ? { ...m, deliveredAt: payload.deliveredAt }
-              : m,
-          ) ?? null,
-      );
+      let changed = false;
+      for (const msgId of payload.messageIds) {
+        const m = messagesRef.current[msgId];
+        if (m && !m.deliveredAt) { messagesRef.current[msgId] = { ...m, deliveredAt: payload.deliveredAt }; changed = true; }
+      }
+      if (changed) rerender();
     };
 
     const applyMessageEdited = (payload: { messageId: string; body: string; editedAt: string }) => {
-      setMessages(
-        (prev) =>
-          prev?.map((m) =>
-            m.messageId === payload.messageId
-              ? { ...m, body: payload.body, isEdited: true, editedAt: payload.editedAt }
-              : m,
-          ) ?? null,
-      );
+      const m = messagesRef.current[payload.messageId];
+      if (!m) return;
+      // Last-write-wins: ignore stale edits that arrived out of order.
+      if (m.editedAt && new Date(m.editedAt) >= new Date(payload.editedAt)) return;
+      messagesRef.current[payload.messageId] = { ...m, body: payload.body, isEdited: true, editedAt: payload.editedAt };
+      rerender();
     };
 
     const applyMessageDeleted = (payload: { messageId: string }) => {
-      setMessages(
-        (prev) =>
-          prev?.map((m) =>
-            m.messageId === payload.messageId
-              ? { ...m, isDeleted: true, body: null }
-              : m,
-          ) ?? null,
-      );
+      const m = messagesRef.current[payload.messageId];
+      if (!m) return;
+      messagesRef.current[payload.messageId] = { ...m, isDeleted: true, body: null };
+      rerender();
     };
 
     // Initial join (or rejoin if already connected mid-handshake).
@@ -422,14 +451,39 @@ export default function ChatThreadPage() {
           syncQueueRef.current  = [];
           return;
         }
+
+        // ACK all envelopes first (idempotent — safe before applying).
         for (const env of res.events) {
-          if (env.eventName === "message:new") {
-            applyMessageNew(env.payload as { message: Message });
-          }
-          // ACK each replayed envelope so it's marked delivered and won't
-          // appear in future replay responses.
           socket.emit(ACK_EVENT, { eventId: env.eventId, status: "ok" });
         }
+        // Apply in causal order: new messages first so that edit/delete/read
+        // events referencing them find their targets already in state.
+        for (const env of res.events) {
+          if (env.eventName === "message:new")
+            applyMessageNew(env.payload as { message: Message });
+        }
+        for (const env of res.events) {
+          if (env.eventName === "message:edited")
+            applyMessageEdited(env.payload as { messageId: string; body: string; editedAt: string });
+        }
+        for (const env of res.events) {
+          if (env.eventName === "message:deleted")
+            applyMessageDeleted(env.payload as { messageId: string });
+        }
+        for (const env of res.events) {
+          if (env.eventName === "message:delivered")
+            applyMessageDelivered(env.payload as { conversationId: string; messageIds: string[]; deliveredAt: string });
+        }
+        for (const env of res.events) {
+          if (env.eventName === "message:read")
+            applyMessageRead(env.payload as { conversationId: string; readBy: string; messageIds: string[]; readAt: string; deliveredAt?: string | null });
+        }
+
+        // Advance the replay cursor to the outbox insertion timestamp (not the
+        // message's createdAt) so the next replay starts from the right position.
+        const lastEnv = res.events[res.events.length - 1];
+        if (lastEnv) replayCursorRef.current = lastEnv.timestamp;
+
         // If nextCursor is null the server has fully caught us up — close the
         // barrier and flush any live events that queued during the sync window.
         if (!res.nextCursor) {
@@ -496,26 +550,13 @@ export default function ChatThreadPage() {
       applyMessageDeleted(payload);
     };
 
-    const onMessageReaction = (payload: {
-      messageId: string;
-      reactions: Record<string, number>;
-      actorId: string;
-    }) => {
-      // The actor already applied the server response inside handleReact —
-      // the WS echo would clobber `myReaction` because the payload can't
-      // distinguish the actor's selection from anyone else's totals. Skip it.
+    const onMessageReaction = (payload: { messageId: string; reactions: Record<string, number>; actorId: string }) => {
       if (payload.actorId === meIdRef.current) return;
-      setMessages(
-        (prev) =>
-          prev?.map((m) => {
-            if (m.messageId !== payload.messageId) return m;
-            // For other users' reactions my own selection is unchanged —
-            // preserve it if it still appears in the totals, drop it if gone.
-            const stillMine =
-              m.myReaction && payload.reactions[m.myReaction] ? m.myReaction : null;
-            return { ...m, reactions: payload.reactions, myReaction: stillMine };
-          }) ?? null,
-      );
+      const m = messagesRef.current[payload.messageId];
+      if (!m) return;
+      const stillMine = m.myReaction && payload.reactions[m.myReaction] ? m.myReaction : null;
+      messagesRef.current[payload.messageId] = { ...m, reactions: payload.reactions, myReaction: stillMine };
+      rerender();
     };
 
     const onTypingUpdate = (payload: {
@@ -569,43 +610,27 @@ export default function ChatThreadPage() {
       );
     };
 
-    const onMessageEmbedUpdate = (payload: {
-      messageId: string;
-      embed: Message["embed"];
-    }) => {
-      setMessages(
-        (prev) =>
-          prev?.map((m) =>
-            m.messageId === payload.messageId ? { ...m, embed: payload.embed } : m,
-          ) ?? null,
-      );
+    const onMessageEmbedUpdate = (payload: { messageId: string; embed: Message["embed"] }) => {
+      const m = messagesRef.current[payload.messageId];
+      if (!m) return;
+      messagesRef.current[payload.messageId] = { ...m, embed: payload.embed };
+      rerender();
     };
 
     const onMediaReady = (payload: MediaReadyEvent) => {
-      setMessages((prev) =>
-        prev?.map((m) => {
-          if (!m.attachments?.some((a) => a.media.id === payload.mediaId)) return m;
-          return {
-            ...m,
-            attachments: m.attachments.map((a) =>
-              a.media.id !== payload.mediaId
-                ? a
-                : {
-                    ...a,
-                    media: {
-                      ...a.media,
-                      blurUrl:    payload.blurUrl,
-                      thumbUrl:   payload.thumbUrl,
-                      blurWidth:  payload.blurWidth,
-                      blurHeight: payload.blurHeight,
-                      thumbWidth:  payload.thumbWidth,
-                      thumbHeight: payload.thumbHeight,
-                    },
-                  },
-            ),
-          };
-        }) ?? null,
-      );
+      for (const m of Object.values(messagesRef.current)) {
+        if (!m.attachments?.some((a) => a.media.id === payload.mediaId)) continue;
+        messagesRef.current[m.messageId] = {
+          ...m,
+          attachments: m.attachments.map((a) =>
+            a.media.id !== payload.mediaId
+              ? a
+              : { ...a, media: { ...a.media, blurUrl: payload.blurUrl, thumbUrl: payload.thumbUrl, blurWidth: payload.blurWidth, blurHeight: payload.blurHeight, thumbWidth: payload.thumbWidth, thumbHeight: payload.thumbHeight } },
+          ),
+        };
+        rerender();
+        break; // mediaId is unique per upload
+      }
     };
 
     socket.on("message:new", onMessageNew);
@@ -625,9 +650,12 @@ export default function ChatThreadPage() {
     return () => {
       // Leave the room and clear all barriers — prevents stale state from
       // leaking into the next conversation or mount cycle.
-      isSyncingRef.current = false;
-      syncQueueRef.current  = [];
+      isSyncingRef.current    = false;
+      syncQueueRef.current    = [];
       pendingReadsRef.current.clear();
+      messagesRef.current     = {};
+      clientToTempRef.current.clear();
+      replayCursorRef.current = null;
       socket.off("connect", onReconnect);
       socket.emit("conversation:leave", { conversationId });
       if (currentReplayHandler) {
@@ -690,8 +718,11 @@ export default function ChatThreadPage() {
       const res = await api<{ messages: Message[]; nextCursor: string | null }>(
         `/api/conversations/${conversationId}/messages?limit=${PAGE_SIZE}&cursor=${nextCursor}`,
       );
-      setMessages((prev) => (prev ? [...[...res.messages].reverse(), ...prev] : prev));
-      setNextCursor(res.nextCursor);
+      // Merge older messages into the ref (dedup in case WS delivered some).
+      for (const m of res.messages) {
+        if (!messagesRef.current[m.messageId]) messagesRef.current[m.messageId] = m;
+      }
+      setNextCursor(res.nextCursor); // triggers re-render, which reads updated ref
       // Restore viewport after DOM has the new nodes.
       requestAnimationFrame(() => {
         const el = scrollRef.current;
@@ -742,7 +773,12 @@ export default function ChatThreadPage() {
         createdAt:  new Date().toISOString(),
       };
       stickToBottomRef.current = true;
-      setMessages((prev) => (prev ? [...prev, optimistic] : prev));
+      // Register the clientMessageId → tempId mapping BEFORE inserting the
+      // optimistic, so if the WS echo races the HTTP response the atomic swap
+      // in applyMessageNew wins and the user never sees a duplicate.
+      clientToTempRef.current.set(clientMessageId, tempId);
+      messagesRef.current[tempId] = optimistic;
+      setRenderTick((x) => x + 1);
       setReplyTo(null);
 
       try {
@@ -751,22 +787,31 @@ export default function ChatThreadPage() {
           { method: "POST", body: { body, ...(replyToId ? { replyToId } : {}), clientMessageId } },
         );
         // Swap optimistic placeholder → real message.
-        // If the socket delivered the real message first (rare but possible),
-        // the real row is already in state — just remove the placeholder.
-        setMessages((prev) => {
-          if (!prev) return prev;
-          const alreadyReal = prev.some((m) => m.messageId === sent.messageId);
-          if (alreadyReal) return prev.filter((m) => m.messageId !== tempId);
-          return prev.map((m) =>
-            m.messageId === tempId
-              ? { ...sent, reactions: sent.reactions ?? {}, myReaction: sent.myReaction ?? null }
-              : m,
-          );
-        });
+        // Case A (common): HTTP response beat the WS echo — tempId is still in
+        //   the ref; do the swap now.
+        // Case B (rare): WS echo arrived first (via applyMessageNew's atomic
+        //   swap) — tempId is already gone; realId is in the ref; nothing to do.
+        clientToTempRef.current.delete(clientMessageId);
+        if (messagesRef.current[tempId]) {
+          messagesRef.current[sent.messageId] = {
+            ...messagesRef.current[tempId],
+            ...sent,
+            reactions:  sent.reactions  ?? {},
+            myReaction: sent.myReaction ?? null,
+          };
+          delete messagesRef.current[tempId];
+        } else if (!messagesRef.current[sent.messageId]) {
+          // Defensive: neither temp nor real — insert the confirmed message.
+          messagesRef.current[sent.messageId] = { ...sent, reactions: {}, myReaction: null };
+        }
+        setRenderTick((x) => x + 1);
       } catch (err) {
-        // Remove the optimistic placeholder on failure so the user isn't
-        // left staring at a message that was never sent.
-        setMessages((prev) => prev?.filter((m) => m.messageId !== tempId) ?? null);
+        // Mark the optimistic as failed rather than deleting it — prevents a
+        // ghost state where the message just vanishes with no feedback.
+        clientToTempRef.current.delete(clientMessageId);
+        const m = messagesRef.current[tempId];
+        if (m) messagesRef.current[tempId] = { ...m, _failed: true };
+        setRenderTick((x) => x + 1);
         setError(err instanceof Error ? err.message : "Failed to send");
       }
     },
@@ -776,15 +821,11 @@ export default function ChatThreadPage() {
   const handleUpdate = useCallback(async (messageId: string, body: string) => {
     try {
       await api(`/api/messages/${messageId}`, { method: "PATCH", body: { body } });
-      // Local optimistic update; the WS event will also confirm.
-      setMessages(
-        (prev) =>
-          prev?.map((m) =>
-            m.messageId === messageId
-              ? { ...m, body, isEdited: true, editedAt: new Date().toISOString() }
-              : m,
-          ) ?? null,
-      );
+      const m = messagesRef.current[messageId];
+      if (m) {
+        messagesRef.current[messageId] = { ...m, body, isEdited: true, editedAt: new Date().toISOString() };
+        setRenderTick((x) => x + 1);
+      }
       setEditing(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to edit");
@@ -805,14 +846,11 @@ export default function ChatThreadPage() {
         method: "POST",
         body: { emoji },
       });
-      setMessages(
-        (prev) =>
-          prev?.map((m) =>
-            m.messageId === res.messageId
-              ? { ...m, reactions: res.reactions, myReaction: res.myReaction }
-              : m,
-          ) ?? null,
-      );
+      const m = messagesRef.current[res.messageId];
+      if (m) {
+        messagesRef.current[res.messageId] = { ...m, reactions: res.reactions, myReaction: res.myReaction };
+        setRenderTick((x) => x + 1);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to react");
     }
@@ -826,6 +864,11 @@ export default function ChatThreadPage() {
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to delete");
     }
+  }, []);
+
+  const handleDismissFailed = useCallback((messageId: string) => {
+    delete messagesRef.current[messageId];
+    setRenderTick((x) => x + 1);
   }, []);
 
   const handleTypingChange = useCallback(
@@ -984,16 +1027,16 @@ export default function ChatThreadPage() {
   type VirtualRow =
     | { kind: "loader" }
     | { kind: "separator"; label: string }
-    | { kind: "message"; message: Message }
+    | { kind: "message"; message: LocalMessage }
     | { kind: "pending"; batch: PendingBatch }
     | { kind: "typing" };
 
   const flatRows = useMemo((): VirtualRow[] => {
-    if (!messages) return [];
+    if (!messagesLoaded) return [];
     const rows: VirtualRow[] = [];
     if (loadingOlder) rows.push({ kind: "loader" });
     let lastLabel = "";
-    for (const m of messages) {
+    for (const m of getMessagesArray()) {
       const label = dayLabel(m.createdAt);
       if (label !== lastLabel) { rows.push({ kind: "separator", label }); lastLabel = label; }
       rows.push({ kind: "message", message: m });
@@ -1001,7 +1044,8 @@ export default function ChatThreadPage() {
     for (const batch of pendingBatches) rows.push({ kind: "pending", batch });
     if (partnerTyping) rows.push({ kind: "typing" });
     return rows;
-  }, [messages, loadingOlder, pendingBatches, partnerTyping]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [messagesLoaded, renderTick, loadingOlder, pendingBatches, partnerTyping]);
 
   const virtualizer = useVirtualizer({
     count:           flatRows.length,
@@ -1126,13 +1170,13 @@ export default function ChatThreadPage() {
 
       {/* Message scroll — virtualized */}
       <div ref={scrollRef} className="flex-1 overflow-y-auto" style={{ touchAction: "pan-y" }}>
-        {messages === null ? (
+        {!messagesLoaded ? (
           <div className="flex items-center justify-center py-12">
             <span className="text-[11px] uppercase tracking-[0.18em] text-[var(--color-text-muted)]" style={{ fontFamily: mono }}>
               loading
             </span>
           </div>
-        ) : messages.length === 0 && !pendingBatches.length && !partnerTyping ? (
+        ) : Object.keys(messagesRef.current).length === 0 && !pendingBatches.length && !partnerTyping ? (
           <div className="flex flex-col items-center gap-2 py-12 text-center">
             <span className="text-[11px] uppercase tracking-[0.18em] text-[var(--color-text-muted)]" style={{ fontFamily: mono }}>
               empty thread
@@ -1176,10 +1220,12 @@ export default function ChatThreadPage() {
                           showReadReceipt={isMine}
                           readAt={partnerRead?.readAt ?? null}
                           deliveredAt={isMine ? m.deliveredAt : null}
+                          failed={m._failed}
                           onReact={handleReact}
                           onReply={(msg) => { setEditing(null); setReplyTo(msg); }}
-                          onEdit={(msg) => { setReplyTo(null); setEditing(msg); }}
-                          onDelete={handleDelete}
+                          onEdit={m._failed ? undefined : (msg) => { setReplyTo(null); setEditing(msg); }}
+                          onDelete={m._failed ? undefined : handleDelete}
+                          onDismiss={m._failed ? () => handleDismissFailed(m.messageId) : undefined}
                           onOpenLightbox={(atts: MessageAttachment[], idx: number) =>
                             setLightbox({ images: atts, index: idx })
                           }
