@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
-import { ArrowLeft, MoreHorizontal } from "lucide-react";
+import { ArrowLeft, ImagePlus, MoreHorizontal } from "lucide-react";
 import imageCompression from "browser-image-compression";
 import { ApiError, api } from "@/frontend-core/api";
 import { getSocket } from "@/frontend-core/socket";
@@ -25,6 +25,33 @@ const PAGE_SIZE = 30;
 
 const mono = "var(--font-mono)";
 const display = "var(--font-display)";
+
+// Must match server-side ALLOWED_MIME in media.service.ts
+const ACCEPTED_IMAGE_MIME = new Set(["image/jpeg", "image/png", "image/webp", "image/heic"]);
+
+function extractImageFiles(transfer: DataTransfer | ClipboardEvent["clipboardData"]): File[] {
+  if (!transfer) return [];
+  const files: File[] = [];
+  // DataTransfer.items gives richer type info than .files for paste events
+  if (transfer.items) {
+    for (const item of Array.from(transfer.items)) {
+      if (item.kind === "file") {
+        const f = item.getAsFile();
+        if (f && ACCEPTED_IMAGE_MIME.has(f.type)) files.push(f);
+      }
+    }
+    return files;
+  }
+  // Fallback for drop events that only expose .files
+  for (const f of Array.from(transfer.files)) {
+    if (ACCEPTED_IMAGE_MIME.has(f.type)) files.push(f);
+  }
+  return files;
+}
+
+function hasDragImages(e: React.DragEvent): boolean {
+  return Array.from(e.dataTransfer.types).includes("Files");
+}
 
 type ConversationDetail = {
   conversationId: string;
@@ -62,6 +89,8 @@ export default function ChatThreadPage() {
   const [pendingBatches, setPendingBatches] = useState<PendingBatch[]>([]);
   const batchControllersRef = useRef(new Map<string, AbortController>());
   const [lightbox, setLightbox] = useState<LightboxState | null>(null);
+  const [dragActive, setDragActive] = useState(false);
+  const dragCounterRef = useRef(0);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   // meId resolves async from /api/auth/me. The WS effect must not re-subscribe
@@ -569,6 +598,52 @@ export default function ChatThreadPage() {
     [pendingBatches, handleSendImages],
   );
 
+  // Paste — intercept only when clipboard contains images (screenshots, copied images).
+  // Text paste falls through to the textarea normally.
+  useEffect(() => {
+    const canSend = () => detail?.myAcceptedAt !== null;
+    const onPaste = (e: ClipboardEvent) => {
+      if (!canSend() || !e.clipboardData) return;
+      const files = extractImageFiles(e.clipboardData);
+      if (!files.length) return;
+      e.preventDefault();
+      void handleSendImages(files);
+    };
+    document.addEventListener("paste", onPaste);
+    return () => document.removeEventListener("paste", onPaste);
+  }, [detail, handleSendImages]);
+
+  // Drag handlers — counter pattern eliminates false dragleave fires from child elements.
+  const handleDragEnter = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    if (!hasDragImages(e)) return;
+    dragCounterRef.current += 1;
+    if (dragCounterRef.current === 1) setDragActive(true);
+  }, []);
+
+  const handleDragLeave = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    dragCounterRef.current -= 1;
+    if (dragCounterRef.current <= 0) {
+      dragCounterRef.current = 0;
+      setDragActive(false);
+    }
+  }, []);
+
+  const handleDragOver = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "copy";
+  }, []);
+
+  const handleDrop = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    dragCounterRef.current = 0;
+    setDragActive(false);
+    if (!detail?.myAcceptedAt) return;
+    const files = extractImageFiles(e.dataTransfer);
+    if (files.length) void handleSendImages(files);
+  }, [detail, handleSendImages]);
+
   type VirtualRow =
     | { kind: "loader" }
     | { kind: "separator"; label: string }
@@ -632,7 +707,33 @@ export default function ChatThreadPage() {
   }, [flatRows.length]);
 
   return (
-    <div className="flex h-dvh flex-col lg:h-[100dvh]">
+    <div
+      className="relative flex h-dvh flex-col lg:h-[100dvh]"
+      onDragEnter={handleDragEnter}
+      onDragLeave={handleDragLeave}
+      onDragOver={handleDragOver}
+      onDrop={handleDrop}
+    >
+      {/* Drop overlay */}
+      {dragActive && (
+        <div
+          className="pointer-events-none absolute inset-0 z-50 flex flex-col items-center justify-center gap-3"
+          style={{
+            background: "color-mix(in srgb, var(--color-signal) 8%, transparent)",
+            border: "2px dashed var(--color-signal)",
+            borderRadius: 0,
+          }}
+        >
+          <ImagePlus className="h-10 w-10" style={{ color: "var(--color-signal)" }} />
+          <span
+            className="text-[13px] font-semibold tracking-[0.04em]"
+            style={{ color: "var(--color-signal)", fontFamily: mono }}
+          >
+            Drop images to send
+          </span>
+        </div>
+      )}
+
       {/* Header */}
       <header
         className="flex items-center gap-3 border-b bg-[var(--color-bg)]/92 px-4 py-2 backdrop-blur-xl"
