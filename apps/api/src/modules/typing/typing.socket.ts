@@ -1,7 +1,8 @@
 import type { Socket } from "socket.io";
 import type { FastifyInstance } from "fastify";
-import { TYPING_EVENTS, type TypingInbound } from "@relay/contracts";
+import { TYPING_EVENTS, type TypingInbound, type TypingSyncRequest } from "@relay/contracts";
 import {
+  getActiveTypers,
   typingClearForSocket,
   typingStart,
   typingStop,
@@ -28,6 +29,12 @@ export function registerTypingSocket(
   socket.on(TYPING_EVENTS.STOP, (payload: TypingInbound) => {
     if (typeof payload?.conversationId !== "string") return;
     typingStop(fastify, payload.conversationId, userId);
+  });
+
+  socket.on(TYPING_EVENTS.SYNC_REQUEST, (payload: TypingSyncRequest) => {
+    if (!Array.isArray(payload?.conversationIds)) return;
+    const active = getActiveTypers(payload.conversationIds);
+    socket.emit(TYPING_EVENTS.SYNC_RESPONSE, { active });
   });
 
   socket.on("disconnect", () => {

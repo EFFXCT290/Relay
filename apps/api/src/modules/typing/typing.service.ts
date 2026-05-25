@@ -86,6 +86,24 @@ export function typingStop(
   broadcast(fastify, conversationId, userId, false);
 }
 
+// Sync query — returns active typers for a set of conversation IDs.
+// Used to answer typing:sync-request so clients get correct state on
+// connect/reconnect without waiting for the next sweep tick.
+export function getActiveTypers(conversationIds: string[]): Record<string, string[]> {
+  const now = Date.now();
+  const result: Record<string, string[]> = {};
+  for (const id of conversationIds) {
+    const convo = state.get(id);
+    if (!convo) continue;
+    const active: string[] = [];
+    for (const [userId, entry] of convo) {
+      if (entry.expiresAt > now) active.push(userId);
+    }
+    if (active.length > 0) result[id] = active;
+  }
+  return result;
+}
+
 // Disconnect cleanup — clear every conversation this socket was typing in.
 export function typingClearForSocket(
   fastify:  FastifyInstance,

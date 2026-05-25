@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { Camera, Check, Plus, Send, X } from "lucide-react";
-import { TYPING_DEBOUNCE_MS, TYPING_TIMEOUT_MS } from "@relay/contracts";
+import { TYPING_DEBOUNCE_MS } from "@relay/contracts";
 import type { Message } from "./message-bubble";
 
 type Props = {
@@ -40,12 +40,10 @@ export function ChatComposer({
   //   - Emit typing:start ONCE when typing begins, then suppress repeats for
   //     TYPING_DEBOUNCE_MS. After that window any further keystroke re-emits
   //     typing:start so the server refreshes its expiresAt.
-  //   - Track inactivity locally: if no keystroke for TYPING_TIMEOUT_MS we
-  //     emit typing:stop (cheap, but the server would sweep us anyway).
-  //   - Emit typing:stop on empty input, send, edit, or unmount.
+  //   - Emit typing:stop on: empty input, send, edit mode, or unmount.
+  //   - No client-side expiry timer — the server sweep is the sole authority.
   const typingActiveRef = useRef(false);
   const lastStartAtRef = useRef(0);
-  const inactivityTimerRef = useRef<number | null>(null);
 
   // When entering edit mode, seed the textarea; when leaving, clear it.
   useEffect(() => {
@@ -65,10 +63,6 @@ export function ChatComposer({
   }, [value]);
 
   const stopTyping = () => {
-    if (inactivityTimerRef.current !== null) {
-      window.clearTimeout(inactivityTimerRef.current);
-      inactivityTimerRef.current = null;
-    }
     if (typingActiveRef.current) {
       typingActiveRef.current = false;
       lastStartAtRef.current = 0;
@@ -78,18 +72,13 @@ export function ChatComposer({
 
   const noteKeystroke = () => {
     const now = Date.now();
-    // Debounce: emit typing:start only on the first keystroke after a
-    // TYPING_DEBOUNCE_MS-wide quiet window. Server uses this to refresh
-    // its expiresAt without us spamming the socket on every keypress.
+    // Emit typing:start only on the first keystroke or after DEBOUNCE_MS of
+    // silence — server uses this to refresh expiresAt without being spammed.
     if (!typingActiveRef.current || now - lastStartAtRef.current >= TYPING_DEBOUNCE_MS) {
       typingActiveRef.current = true;
       lastStartAtRef.current = now;
       onTypingChange?.(true);
     }
-    if (inactivityTimerRef.current !== null) {
-      window.clearTimeout(inactivityTimerRef.current);
-    }
-    inactivityTimerRef.current = window.setTimeout(stopTyping, TYPING_TIMEOUT_MS);
   };
 
   const handleChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {

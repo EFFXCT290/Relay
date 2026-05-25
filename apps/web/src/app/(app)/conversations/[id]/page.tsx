@@ -25,7 +25,7 @@ import {
   drainSessions,
 } from "@/frontend-core/upload-session";
 import { ImageLightbox, type LightboxState } from "@/features/messages/components/lightbox/image-lightbox";
-import { MEDIA_EVENTS, type MediaReadyEvent, type MessageAttachment } from "@relay/contracts";
+import { MEDIA_EVENTS, TYPING_EVENTS, type MediaReadyEvent, type MessageAttachment, type TypingSyncResponse } from "@relay/contracts";
 
 const PAGE_SIZE = 30;
 
@@ -205,7 +205,25 @@ export default function ChatThreadPage() {
   // WebSocket subscription — join the conversation room and react to events.
   useEffect(() => {
     const socket = getSocket();
-    socket.emit("conversation:join", { conversationId });
+
+    const joinAndSync = () => {
+      socket.emit("conversation:join", { conversationId });
+      // Ask server for current typing state immediately — prevents the window
+      // between join and the next sweep tick where the indicator would be wrong.
+      socket.emit(TYPING_EVENTS.SYNC_REQUEST, { conversationIds: [conversationId] });
+    };
+
+    // Initial join (or rejoin if already connected mid-handshake).
+    joinAndSync();
+
+    // Reconnect: Socket.IO clears server-side rooms on disconnect, so we must
+    // rejoin and resync on every reconnect. Reset partnerTyping first so stale
+    // state never lingers while the sync response is in flight.
+    const onReconnect = () => {
+      setPartnerTyping(false);
+      joinAndSync();
+    };
+    socket.on("connect", onReconnect);
 
     const onMessageNew = (payload: { message: Message }) => {
       if (payload.message.conversationId !== conversationId) return;
@@ -328,9 +346,6 @@ export default function ChatThreadPage() {
       );
     };
 
-    // Server is the source of truth for "is the partner typing right now?".
-    // It already debounces refreshes and expires stuck entries on its own
-    // sweep — receiver just mirrors the latest typing:update.
     const onTypingUpdate = (payload: {
       conversationId: string;
       userId:         string;
@@ -339,6 +354,12 @@ export default function ChatThreadPage() {
       if (payload.conversationId !== conversationId) return;
       if (payload.userId === meIdRef.current) return;
       setPartnerTyping(payload.isTyping);
+    };
+
+    const onTypingSyncResponse = (res: TypingSyncResponse) => {
+      const typers = res.active[conversationId] ?? [];
+      const partnerId = partnerIdRef.current;
+      setPartnerTyping(!!partnerId && typers.includes(partnerId));
     };
 
     const onPresenceOnline = (payload: { userId: string }) => {
@@ -404,11 +425,13 @@ export default function ChatThreadPage() {
     socket.on("message:delivered", onMessageDelivered);
     socket.on("message:embed:update", onMessageEmbedUpdate);
     socket.on("typing:update", onTypingUpdate);
+    socket.on(TYPING_EVENTS.SYNC_RESPONSE, onTypingSyncResponse);
     socket.on("presence:online", onPresenceOnline);
     socket.on("presence:offline", onPresenceOffline);
     socket.on(MEDIA_EVENTS.READY, onMediaReady);
 
     return () => {
+      socket.off("connect", onReconnect);
       socket.emit("conversation:leave", { conversationId });
       socket.off("message:new", onMessageNew);
       socket.off("message:edited", onMessageEdited);
@@ -418,6 +441,7 @@ export default function ChatThreadPage() {
       socket.off("message:delivered", onMessageDelivered);
       socket.off("message:embed:update", onMessageEmbedUpdate);
       socket.off("typing:update", onTypingUpdate);
+      socket.off(TYPING_EVENTS.SYNC_RESPONSE, onTypingSyncResponse);
       socket.off("presence:online", onPresenceOnline);
       socket.off("presence:offline", onPresenceOffline);
       socket.off(MEDIA_EVENTS.READY, onMediaReady);

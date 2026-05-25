@@ -9,6 +9,7 @@ import { getSocket } from "@/frontend-core/socket";
 import { Button } from "@/shared/ui/button";
 import { Avatar } from "@/shared/components/avatar";
 import { ConversationRow, type ConversationListItem } from "@/features/conversations/components/conversation-row";
+import { TYPING_EVENTS, type TypingSyncResponse } from "@relay/contracts";
 
 const mono = "var(--font-mono)";
 const display = "var(--font-display)";
@@ -165,6 +166,15 @@ export default function ConversationsPage() {
       );
     };
 
+    const onTypingSyncResponse = (res: TypingSyncResponse) => {
+      setConversations((prev) =>
+        prev?.map((c) => ({
+          ...c,
+          isTyping: (res.active[c.conversationId] ?? []).includes(c.participant.userId),
+        })) ?? prev,
+      );
+    };
+
     socket.on("conversation:request", onRequest);
     socket.on("conversation:accepted", onAccepted);
     socket.on("conversation:deleted", onDeleted);
@@ -172,6 +182,7 @@ export default function ConversationsPage() {
     socket.on("presence:online", onPresenceOnline);
     socket.on("presence:offline", onPresenceOffline);
     socket.on("typing:update", onTypingUpdate);
+    socket.on(TYPING_EVENTS.SYNC_RESPONSE, onTypingSyncResponse);
 
     return () => {
       socket.off("conversation:request", onRequest);
@@ -181,6 +192,7 @@ export default function ConversationsPage() {
       socket.off("presence:online", onPresenceOnline);
       socket.off("presence:offline", onPresenceOffline);
       socket.off("typing:update", onTypingUpdate);
+      socket.off(TYPING_EVENTS.SYNC_RESPONSE, onTypingSyncResponse);
     };
   }, []);
 
@@ -191,8 +203,25 @@ export default function ConversationsPage() {
     const ids = conversations?.map((c) => c.conversationId) ?? [];
     if (ids.length === 0) return;
     const socket = getSocket();
-    ids.forEach((id) => socket.emit("conversation:join", { conversationId: id }));
+
+    const joinAndSync = () => {
+      ids.forEach((id) => socket.emit("conversation:join", { conversationId: id }));
+      socket.emit(TYPING_EVENTS.SYNC_REQUEST, { conversationIds: ids });
+    };
+
+    joinAndSync();
+
+    // On reconnect: Socket.IO clears server-side rooms. Re-join all rooms and
+    // reset isTyping to false before the sync response arrives so stale
+    // indicators never linger.
+    const onReconnect = () => {
+      setConversations((prev) => prev?.map((c) => ({ ...c, isTyping: false })) ?? prev);
+      joinAndSync();
+    };
+    socket.on("connect", onReconnect);
+
     return () => {
+      socket.off("connect", onReconnect);
       ids.forEach((id) => socket.emit("conversation:leave", { conversationId: id }));
     };
   }, [conversations?.length]);
