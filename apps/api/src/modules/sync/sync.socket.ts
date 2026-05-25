@@ -16,7 +16,8 @@ import { SyncService } from "./sync.service.js";
 //
 // Two listeners per connection:
 //   1. SYNC_EVENTS.REPLAY_REQUEST → service.replayFor() → REPLAY_RESPONSE.
-//      The client asks for un-ACKed events since a cursor; we return them.
+//      The client asks for un-ACKed events since a cursor, optionally scoped
+//      to one conversationId so only relevant events are returned.
 //   2. ACK_EVENT → service.markAcked(). When the client confirms receipt of a
 //      server-emitted envelope, the outbox row is stamped. After that, the
 //      same eventId is never returned by a replay.
@@ -31,7 +32,12 @@ export function registerSyncSocket(socket: Socket, fastify: FastifyInstance, use
   // ── 1. Replay ──────────────────────────────────────────────────────────────
   socket.on(SYNC_EVENTS.REPLAY_REQUEST, async (req: ReplayRequest) => {
     try {
-      const response: ReplayResponse = await service.replayFor(userId, req.since, req.limit);
+      const response: ReplayResponse = await service.replayFor(
+        userId,
+        req.since,
+        req.limit,
+        req.conversationId,
+      );
       socket.emit(SYNC_EVENTS.REPLAY_RESPONSE, response);
     } catch (err) {
       // Replay failures are non-fatal for the socket; emit an empty response

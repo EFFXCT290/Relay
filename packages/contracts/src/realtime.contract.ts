@@ -60,8 +60,11 @@ export const SYNC_EVENTS = {
 export type SyncEventName = (typeof SYNC_EVENTS)[keyof typeof SYNC_EVENTS];
 
 export const ReplayRequestSchema = Type.Object({
-  since: Type.String({ format: "date-time" }),
-  limit: Type.Optional(Type.Number({ minimum: 1, maximum: 1000 })),
+  since:          Type.String({ format: "date-time" }),
+  limit:          Type.Optional(Type.Number({ minimum: 1, maximum: 1000 })),
+  // Scopes replay to one conversation so the server returns only relevant
+  // events and the client avoids ACKing events that belong to other threads.
+  conversationId: Type.Optional(Type.String({ format: "uuid" })),
 });
 export type ReplayRequest = Static<typeof ReplayRequestSchema>;
 

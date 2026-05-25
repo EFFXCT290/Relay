@@ -216,3 +216,24 @@ model JtiBlocklist {
 
   @@index([expiresAt])
 }
+
+// ────────────────────────────────────────────────────────────────────────────
+//  Realtime event outbox (Phase 4.3 reconnect replay)
+// ────────────────────────────────────────────────────────────────────────────
+// One row per (event, recipient). Rows are written before socket emit so no
+// event can be lost between "sent" and "recorded". ackedAt is stamped when
+// the recipient confirms delivery; only null-ackedAt rows appear in replay.
+// Cleanup of old acked rows is a background job (separate from this schema).
+model EventOutbox {
+  id             String    @id @default(uuid())
+  eventId        String    @unique
+  eventName      String
+  conversationId String?   // scopes replay to a single thread; null = user-global event
+  payload        Json
+  recipientId    String
+  createdAt      DateTime  @default(now())
+  ackedAt        DateTime?
+
+  // id tiebreaks millisecond collisions → deterministic replay order under burst load.
+  @@index([recipientId, ackedAt, createdAt, id])
+}

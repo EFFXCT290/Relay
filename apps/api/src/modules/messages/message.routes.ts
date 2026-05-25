@@ -2,7 +2,9 @@ import type { FastifyPluginAsyncTypebox } from "@fastify/type-provider-typebox";
 import { Type } from "@sinclair/typebox";
 import { randomUUID } from "node:crypto";
 import { ProblemError } from "../../backend-core/http/errors.js";
-import { MessageSchema } from "@relay/contracts";
+import { MESSAGE_EVENTS, MessageSchema } from "@relay/contracts";
+import { SyncService } from "../sync/sync.service.js";
+import { SyncRepository } from "../sync/sync.repository.js";
 import {
   emitMessageDeleted,
   emitMessageEdited,
@@ -276,6 +278,25 @@ const messageRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
       const broadcastMessage = { ...httpPayload, isEdited: false, editedAt: null, isDeleted: false };
       emitMessageNew(fastify.io, conversationId, { message: broadcastMessage });
       for (const p of participants) emitMessageNewToUser(fastify.io, p.userId, { message: broadcastMessage });
+
+      // Record in outbox per recipient, scoped to this conversation, so
+      // replay requests can be narrowed without returning unrelated events.
+      // Each recipient gets a unique eventId so their ACK is independent.
+      const syncSvc = new SyncService(new SyncRepository(fastify.prisma));
+      await Promise.all(
+        otherIds.map((uid) =>
+          syncSvc.record(
+            {
+              eventId:   randomUUID(),
+              eventName: MESSAGE_EVENTS.NEW,
+              payload:   { message: broadcastMessage },
+              timestamp: created.createdAt.toISOString(),
+            },
+            uid,
+            conversationId,
+          ),
+        ),
+      );
 
       // Async embed fetch — does not block the HTTP response.
       void (async () => {

@@ -7,7 +7,7 @@ import { useParams, useRouter } from "next/navigation";
 import { ArrowLeft, ImagePlus, MoreHorizontal } from "lucide-react";
 import imageCompression from "browser-image-compression";
 import { ApiError, api } from "@/frontend-core/api";
-import { getSocket } from "@/frontend-core/socket";
+import { getSocket, getReconnectEpoch } from "@/frontend-core/socket";
 import { Avatar } from "@/shared/components/avatar";
 import {
   DaySeparator,
@@ -25,7 +25,7 @@ import {
   drainSessions,
 } from "@/frontend-core/upload-session";
 import { ImageLightbox, type LightboxState } from "@/features/messages/components/lightbox/image-lightbox";
-import { MEDIA_EVENTS, PRESENCE_EVENTS, TYPING_EVENTS, type MediaReadyEvent, type MessageAttachment, type PresenceSyncResponse, type TypingSyncResponse } from "@relay/contracts";
+import { ACK_EVENT, MEDIA_EVENTS, PRESENCE_EVENTS, SYNC_EVENTS, TYPING_EVENTS, type MediaReadyEvent, type MessageAttachment, type PresenceSyncResponse, type ReplayResponse, type TypingSyncResponse } from "@relay/contracts";
 import { formatLastSeen } from "@/frontend-core/format-presence";
 
 const PAGE_SIZE = 30;
@@ -151,6 +151,15 @@ export default function ChatThreadPage() {
   const meIdRef = useRef<string | null>(null);
   useEffect(() => { meIdRef.current = meId; }, [meId]);
 
+  // Sync barrier — buffers live message:new events that arrive while a
+  // reconnect replay is in flight, then flushes them after replay completes
+  // so messages are always applied oldest-first without duplicates.
+  const isSyncingRef  = useRef(false);
+  const syncQueueRef  = useRef<Array<{ message: Message }>>([]);
+  // Cursor for replay: createdAt of the last message the client has seen.
+  // Updated in applyMessageNew so it always reflects in-memory state.
+  const replayCursorRef = useRef<string | null>(null);
+
   // Same pattern as meIdRef — detail resolves async, but WS handlers must
   // not re-subscribe when it lands (churn drops events). Read through a ref.
   const partnerIdRef = useRef<string | null>(null);
@@ -172,8 +181,12 @@ export default function ChatThreadPage() {
         setMeId(me.userId);
         setDetail(det);
         // API returns newest-first; reverse so DOM order is oldest-first.
-        setMessages([...hist.messages].reverse());
+        const ordered = [...hist.messages].reverse();
+        setMessages(ordered);
         setNextCursor(hist.nextCursor);
+        // Seed the replay cursor so reconnect knows where to resume from.
+        const lastMsg = ordered[ordered.length - 1];
+        if (lastMsg) replayCursorRef.current = lastMsg.createdAt;
 
         // Mark whatever's unread now as read — fire-and-forget. The server
         // will broadcast message:read to the original sender.
@@ -231,26 +244,14 @@ export default function ChatThreadPage() {
       if (partnerId) socket.emit(PRESENCE_EVENTS.SYNC_REQUEST, { userIds: [partnerId] });
     };
 
-    // Initial join (or rejoin if already connected mid-handshake).
-    joinAndSync();
-
-    // Reconnect: Socket.IO clears server-side rooms on disconnect, so we must
-    // rejoin and resync on every reconnect. Reset partnerTyping first so stale
-    // state never lingers while the sync response is in flight.
-    const onReconnect = () => {
-      setPartnerTyping(false);
-      joinAndSync();
-    };
-    socket.on("connect", onReconnect);
-
-    const onMessageNew = (payload: { message: Message }) => {
+    // Applies a message:new payload to local state. Used by both the live
+    // handler and the replay handler so dedup + auto-read logic is shared.
+    const applyMessageNew = (payload: { message: Message }) => {
       if (payload.message.conversationId !== conversationId) return;
       setMessages((prev) => {
         if (!prev) return prev;
-        // Dedup by real messageId. Optimistic placeholders (tempIds) have a
-        // different UUID so they don't collide here — the HTTP swap handles them.
         if (prev.some((m) => m.messageId === payload.message.messageId)) return prev;
-        return [
+        const next = [
           ...prev,
           {
             ...payload.message,
@@ -259,9 +260,10 @@ export default function ChatThreadPage() {
             readBy:     payload.message.readBy     ?? [],
           },
         ];
+        // Advance replay cursor as we apply messages.
+        replayCursorRef.current = payload.message.createdAt;
+        return next;
       });
-      // Auto-mark-read for any incoming message from the other side, but only
-      // while this tab is visible. Hidden tabs keep the unread state honest.
       if (
         payload.message.senderId !== meIdRef.current &&
         typeof document !== "undefined" &&
@@ -269,6 +271,87 @@ export default function ChatThreadPage() {
       ) {
         void api(`/api/conversations/${conversationId}/read`, { method: "POST" }).catch(() => {});
       }
+    };
+
+    // Initial join (or rejoin if already connected mid-handshake).
+    joinAndSync();
+
+    // Active replay handler — one per reconnect. Replaced (not accumulated) on
+    // each reconnect so epoch validation is always tied to the right closure.
+    let currentReplayHandler: ((res: ReplayResponse) => void) | null = null;
+
+    // Reconnect: Socket.IO clears server-side rooms on disconnect. Rejoin,
+    // clear stale typing, open the sync barrier, then request replay so any
+    // messages that arrived during the disconnect are replayed in order.
+    //
+    // Per-reconnect handler pattern: each reconnect creates a fresh closure
+    // that captures the epoch at that exact moment. If another reconnect fires
+    // before the response arrives, the old handler is deregistered and any
+    // response that still sneaks through is discarded by the epoch check.
+    const onReconnect = () => {
+      setPartnerTyping(false);
+      isSyncingRef.current = true;
+      syncQueueRef.current  = [];
+
+      // Deregister previous handler so stale responses can't apply.
+      if (currentReplayHandler) {
+        socket.off(SYNC_EVENTS.REPLAY_RESPONSE, currentReplayHandler);
+        currentReplayHandler = null;
+      }
+
+      const epoch  = getReconnectEpoch();
+      joinAndSync();
+
+      const cursor = replayCursorRef.current;
+      if (!cursor) {
+        // No cursor yet (page still loading) — skip replay, just un-block.
+        isSyncingRef.current = false;
+        return;
+      }
+
+      socket.emit(SYNC_EVENTS.REPLAY_REQUEST, { since: cursor, conversationId });
+
+      // Relay response — apply missed events oldest-first, then flush any
+      // live events that buffered while the barrier was up.
+      const handleReplay = (res: ReplayResponse) => {
+        // Stale check: a newer reconnect fired while this response was in
+        // flight. The new reconnect's handler will take over.
+        if (epoch !== getReconnectEpoch()) {
+          isSyncingRef.current = false;
+          syncQueueRef.current  = [];
+          return;
+        }
+        for (const env of res.events) {
+          if (env.eventName === "message:new") {
+            applyMessageNew(env.payload as { message: Message });
+          }
+          // ACK each replayed envelope so it's marked delivered and won't
+          // appear in future replay responses.
+          socket.emit(ACK_EVENT, { eventId: env.eventId, status: "ok" });
+        }
+        // If nextCursor is null the server has fully caught us up — close the
+        // barrier and flush any live events that queued during the sync window.
+        if (!res.nextCursor) {
+          socket.off(SYNC_EVENTS.REPLAY_RESPONSE, handleReplay);
+          currentReplayHandler  = null;
+          isSyncingRef.current  = false;
+          const queued = syncQueueRef.current.splice(0);
+          for (const p of queued) applyMessageNew(p);
+        }
+      };
+
+      currentReplayHandler = handleReplay;
+      socket.on(SYNC_EVENTS.REPLAY_RESPONSE, handleReplay);
+    };
+    socket.on("connect", onReconnect);
+
+    // Live message:new — buffer during replay barrier, apply immediately otherwise.
+    const onMessageNew = (payload: { message: Message }) => {
+      if (isSyncingRef.current) {
+        syncQueueRef.current.push(payload);
+        return;
+      }
+      applyMessageNew(payload);
     };
 
     const onMessageRead = (payload: {
@@ -469,8 +552,16 @@ export default function ChatThreadPage() {
     socket.on(MEDIA_EVENTS.READY, onMediaReady);
 
     return () => {
+      // Leave the room and clear the barrier — prevents stale state from
+      // leaking into the next conversation or mount cycle.
+      isSyncingRef.current = false;
+      syncQueueRef.current  = [];
       socket.off("connect", onReconnect);
       socket.emit("conversation:leave", { conversationId });
+      if (currentReplayHandler) {
+        socket.off(SYNC_EVENTS.REPLAY_RESPONSE, currentReplayHandler);
+        currentReplayHandler = null;
+      }
       socket.off("message:new", onMessageNew);
       socket.off("message:edited", onMessageEdited);
       socket.off("message:deleted", onMessageDeleted);
