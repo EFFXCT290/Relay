@@ -211,18 +211,16 @@ export default function ChatThreadPage() {
       if (payload.message.conversationId !== conversationId) return;
       setMessages((prev) => {
         if (!prev) return prev;
-        // Idempotency — if the server-sent copy of our own message lands
-        // after the optimistic one, dedupe by id.
+        // Dedup by real messageId. Optimistic placeholders (tempIds) have a
+        // different UUID so they don't collide here — the HTTP swap handles them.
         if (prev.some((m) => m.messageId === payload.message.messageId)) return prev;
-        // Server payloads from message:new may omit reactions/readBy since they
-        // weren't populated yet; fill defaults so renderers don't choke.
         return [
           ...prev,
           {
             ...payload.message,
-            reactions: payload.message.reactions ?? {},
+            reactions:  payload.message.reactions  ?? {},
             myReaction: payload.message.myReaction ?? null,
-            readBy: payload.message.readBy ?? [],
+            readBy:     payload.message.readBy     ?? [],
           },
         ];
       });
@@ -492,31 +490,61 @@ export default function ChatThreadPage() {
 
   const handleSend = useCallback(
     async (body: string, replyToId?: string | null) => {
+      const tempId          = crypto.randomUUID();
+      const clientMessageId = crypto.randomUUID();
+
+      // Optimistic: show the message instantly so there's no gap between
+      // Enter and the message appearing. Swapped out for the real row once
+      // the server responds.
+      const optimistic: Message = {
+        messageId:      tempId,
+        conversationId,
+        senderId:       meId ?? "",
+        senderUsername: "you",  // replaced on swap
+        type:           "TEXT",
+        body,
+        replyTo: replyTo
+          ? { messageId: replyTo.messageId, preview: replyTo.body?.slice(0, 80) ?? null, type: replyTo.type }
+          : null,
+        isEdited:   false,
+        editedAt:   null,
+        isDeleted:  false,
+        reactions:  {},
+        myReaction: null,
+        readBy:     [],
+        deliveredAt: null,
+        createdAt:  new Date().toISOString(),
+      };
       stickToBottomRef.current = true;
+      setMessages((prev) => (prev ? [...prev, optimistic] : prev));
+      setReplyTo(null);
+
       try {
         const sent = await api<Message>(
           `/api/conversations/${conversationId}/messages`,
-          { method: "POST", body: { body, ...(replyToId ? { replyToId } : {}) } },
+          { method: "POST", body: { body, ...(replyToId ? { replyToId } : {}), clientMessageId } },
         );
+        // Swap optimistic placeholder → real message.
+        // If the socket delivered the real message first (rare but possible),
+        // the real row is already in state — just remove the placeholder.
         setMessages((prev) => {
           if (!prev) return prev;
-          if (prev.some((m) => m.messageId === sent.messageId)) return prev;
-          return [
-            ...prev,
-            {
-              ...sent,
-              senderUsername: sent.senderUsername ?? "you",
-              reactions: sent.reactions ?? {},
-              myReaction: sent.myReaction ?? null,
-            },
-          ];
+          const alreadyReal = prev.some((m) => m.messageId === sent.messageId);
+          if (alreadyReal) return prev.filter((m) => m.messageId !== tempId);
+          return prev.map((m) =>
+            m.messageId === tempId
+              ? { ...sent, reactions: sent.reactions ?? {}, myReaction: sent.myReaction ?? null }
+              : m,
+          );
         });
-        setReplyTo(null);
       } catch (err) {
+        // Remove the optimistic placeholder on failure so the user isn't
+        // left staring at a message that was never sent.
+        setMessages((prev) => prev?.filter((m) => m.messageId !== tempId) ?? null);
         setError(err instanceof Error ? err.message : "Failed to send");
       }
     },
-    [conversationId],
+    [conversationId, meId, replyTo],
   );
 
   const handleUpdate = useCallback(async (messageId: string, body: string) => {

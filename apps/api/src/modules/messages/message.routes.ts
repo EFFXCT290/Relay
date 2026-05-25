@@ -148,7 +148,7 @@ const messageRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
     },
   );
 
-  // ── POST /api/conversations/:id/messages (text only — Phase 1) ────────────
+  // ── POST /api/conversations/:id/messages (text) ──────────────────────────
   fastify.post(
     "/conversations/:conversationId/messages",
     {
@@ -156,39 +156,65 @@ const messageRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
       schema: {
         params: Type.Object({ conversationId: Type.String({ format: "uuid" }) }),
         body: Type.Object({
-          body: Type.String({ minLength: 1, maxLength: 4000 }),
-          replyToId: Type.Optional(Type.Union([Type.String({ format: "uuid" }), Type.Null()])),
+          body:            Type.String({ minLength: 1, maxLength: 4000 }),
+          replyToId:       Type.Optional(Type.Union([Type.String({ format: "uuid" }), Type.Null()])),
+          clientMessageId: Type.Optional(Type.String({ format: "uuid" })),
         }),
         response: {
           201: Type.Object({
-            messageId: Type.String({ format: "uuid" }),
+            messageId:      Type.String({ format: "uuid" }),
             conversationId: Type.String({ format: "uuid" }),
-            senderId: Type.String({ format: "uuid" }),
-            type: Type.Literal("TEXT"),
-            body: Type.String(),
-            replyTo: Type.Union([Type.Null(), Type.Object({ messageId: Type.String(), preview: Type.Union([Type.String(), Type.Null()]), type: Type.String() })]),
-            reactions: Type.Record(Type.String(), Type.Integer()),
-            myReaction: Type.Union([Type.String(), Type.Null()]),
-            readBy: Type.Array(
-              Type.Object({
-                userId: Type.String({ format: "uuid" }),
-                readAt: Type.String({ format: "date-time" }),
-              }),
-            ),
-            deliveredAt: Type.Union([Type.String({ format: "date-time" }), Type.Null()]),
-            createdAt: Type.String({ format: "date-time" }),
+            senderId:       Type.String({ format: "uuid" }),
+            senderUsername: Type.String(),
+            type:           Type.Literal("TEXT"),
+            body:           Type.String(),
+            replyTo:        Type.Union([Type.Null(), Type.Object({ messageId: Type.String(), preview: Type.Union([Type.String(), Type.Null()]), type: Type.String() })]),
+            reactions:      Type.Record(Type.String(), Type.Integer()),
+            myReaction:     Type.Union([Type.String(), Type.Null()]),
+            readBy:         Type.Array(Type.Object({ userId: Type.String({ format: "uuid" }), readAt: Type.String({ format: "date-time" }) })),
+            deliveredAt:    Type.Union([Type.String({ format: "date-time" }), Type.Null()]),
+            createdAt:      Type.String({ format: "date-time" }),
           }),
         },
       },
-      config: {
-        rateLimit: { max: 60, timeWindow: "1 minute" },
-      },
+      config: { rateLimit: { max: 60, timeWindow: "1 minute" } },
     },
     async (request, reply) => {
       const callerId = request.userId!;
       const { conversationId } = request.params;
-      const { body, replyToId } = request.body;
+      const { body, replyToId, clientMessageId } = request.body;
       await assertParticipant(fastify, callerId, conversationId);
+
+      // Idempotency: if this clientMessageId was already committed, return the
+      // existing message instead of creating a duplicate (handles retries and
+      // double-taps safely).
+      if (clientMessageId) {
+        const existing = await fastify.prisma.message.findUnique({
+          where: { senderId_clientMessageId: { senderId: callerId, clientMessageId } },
+          include: {
+            sender:  { select: { username: true } },
+            replyTo: { select: { id: true, body: true, type: true } },
+          },
+        });
+        if (existing) {
+          return reply.code(201).send({
+            messageId:      existing.id,
+            conversationId: existing.conversationId,
+            senderId:       existing.senderId,
+            senderUsername: existing.sender.username,
+            type:           "TEXT" as const,
+            body:           existing.body!,
+            replyTo:        existing.replyTo
+              ? { messageId: existing.replyTo.id, preview: existing.replyTo.body?.slice(0, 80) ?? null, type: existing.replyTo.type }
+              : null,
+            reactions:   {} as Record<string, number>,
+            myReaction:  null as string | null,
+            readBy:      [] as { userId: string; readAt: string }[],
+            deliveredAt: existing.deliveredAt ? existing.deliveredAt.toISOString() : null,
+            createdAt:   existing.createdAt.toISOString(),
+          });
+        }
+      }
 
       if (replyToId) {
         const parent = await fastify.prisma.message.findUnique({
@@ -200,20 +226,14 @@ const messageRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
         }
       }
 
-      // Determine recipients up front so we can fold "is the other side online?"
-      // into the create — anyone in their user:{id} room counts as delivered.
       const participants = await fastify.prisma.participant.findMany({
         where: { conversationId },
         select: { userId: true },
       });
-      const otherIds = participants
-        .map((p) => p.userId)
-        .filter((uid) => uid !== callerId);
+      const otherIds = participants.map((p) => p.userId).filter((uid) => uid !== callerId);
       const allRecipientsOnline =
         otherIds.length > 0 &&
-        otherIds.every(
-          (uid) => (fastify.io.sockets.adapter.rooms.get(`user:${uid}`)?.size ?? 0) > 0,
-        );
+        otherIds.every((uid) => (fastify.io.sockets.adapter.rooms.get(`user:${uid}`)?.size ?? 0) > 0);
       const deliveredAt = allRecipientsOnline ? new Date() : null;
 
       const created = await fastify.prisma.$transaction(async (tx) => {
@@ -221,59 +241,41 @@ const messageRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
           data: {
             conversationId,
             senderId: callerId,
-            type: "TEXT",
+            type:     "TEXT",
             body,
-            ...(replyToId ? { replyToId } : {}),
-            ...(deliveredAt ? { deliveredAt } : {}),
+            ...(replyToId       ? { replyToId }       : {}),
+            ...(deliveredAt     ? { deliveredAt }      : {}),
+            ...(clientMessageId ? { clientMessageId }  : {}),
           },
           include: {
             replyTo: { select: { id: true, body: true, type: true } },
             sender:  { select: { username: true } },
           },
         });
-        // Bump the conversation so inbox ordering stays correct.
-        await tx.conversation.update({
-          where: { id: conversationId },
-          data: { updatedAt: new Date() },
-        });
+        await tx.conversation.update({ where: { id: conversationId }, data: { updatedAt: new Date() } });
         return msg;
       });
 
       const httpPayload = {
-        messageId: created.id,
+        messageId:      created.id,
         conversationId: created.conversationId,
-        senderId: created.senderId,
-        type: "TEXT" as const,
-        body: created.body!,
-        replyTo: created.replyTo
-          ? {
-              messageId: created.replyTo.id,
-              preview: created.replyTo.body ? created.replyTo.body.slice(0, 80) : null,
-              type: created.replyTo.type,
-            }
-          : null,
-        reactions: {} as Record<string, number>,
-        myReaction: null as string | null,
-        readBy: [] as { userId: string; readAt: string }[],
-        deliveredAt: created.deliveredAt ? created.deliveredAt.toISOString() : null,
-        createdAt: created.createdAt.toISOString(),
-      };
-
-      // Broadcast carries the full Message shape — the HTTP response is a
-      // narrower subset (no senderUsername/isEdited/etc. since the caller is
-      // the sender and just-created messages can't yet be edited or deleted).
-      const broadcastMessage = {
-        ...httpPayload,
+        senderId:       created.senderId,
         senderUsername: created.sender.username,
-        isEdited:  false,
-        editedAt:  null,
-        isDeleted: false,
+        type:           "TEXT" as const,
+        body:           created.body!,
+        replyTo: created.replyTo
+          ? { messageId: created.replyTo.id, preview: created.replyTo.body ? created.replyTo.body.slice(0, 80) : null, type: created.replyTo.type }
+          : null,
+        reactions:   {} as Record<string, number>,
+        myReaction:  null as string | null,
+        readBy:      [] as { userId: string; readAt: string }[],
+        deliveredAt: created.deliveredAt ? created.deliveredAt.toISOString() : null,
+        createdAt:   created.createdAt.toISOString(),
       };
 
+      const broadcastMessage = { ...httpPayload, isEdited: false, editedAt: null, isDeleted: false };
       emitMessageNew(fastify.io, conversationId, { message: broadcastMessage });
-      for (const p of participants) {
-        emitMessageNewToUser(fastify.io, p.userId, { message: broadcastMessage });
-      }
+      for (const p of participants) emitMessageNewToUser(fastify.io, p.userId, { message: broadcastMessage });
 
       // Async embed fetch — does not block the HTTP response.
       void (async () => {
@@ -306,20 +308,14 @@ const messageRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
           const embedEvent = {
             messageId: created.id,
             embed: {
-              url:         embedData.url,
-              title:       embedData.title,
-              description: embedData.description,
-              imageUrl:    embedData.imageUrl,
-              siteName:    embedData.siteName,
-              faviconUrl:  embedData.faviconUrl,
-              provider:    embedData.provider,
+              url: embedData.url, title: embedData.title, description: embedData.description,
+              imageUrl: embedData.imageUrl, siteName: embedData.siteName,
+              faviconUrl: embedData.faviconUrl, provider: embedData.provider,
             },
           };
           fastify.log.info({ messageId: created.id, conversationId }, "[embed] emitting message:embed:update");
           emitMessageEmbedUpdate(fastify.io, conversationId, embedEvent);
-          for (const p of participants) {
-            emitMessageEmbedUpdateToUser(fastify.io, p.userId, embedEvent);
-          }
+          for (const p of participants) emitMessageEmbedUpdateToUser(fastify.io, p.userId, embedEvent);
         } catch (err) {
           fastify.log.error({ err }, "[embed] unhandled error in embed IIFE");
         }

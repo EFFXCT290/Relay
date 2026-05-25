@@ -81,6 +81,7 @@ model Message {
   isDeleted      Boolean     @default(false)
   deletedAt      DateTime?
   deliveredAt    DateTime?
+  clientMessageId String?                    // client-generated UUID for idempotent sends
   createdAt      DateTime    @default(now())
 
   conversation  Conversation       @relation(fields: [conversationId], references: [id], onDelete: Cascade)
@@ -94,6 +95,7 @@ model Message {
 
   @@index([conversationId, createdAt])
   @@index([senderId])
+  @@unique([senderId, clientMessageId])
 }
 
 model MessageEmbed {
