@@ -3,15 +3,21 @@ import { ApiError } from "@/frontend-core/api";
 import type { MediaUploadResponse } from "@relay/contracts";
 
 export const mediaApi = {
-  upload: async (file: File | Blob, signal?: AbortSignal): Promise<MediaUploadResponse> => {
+  upload: async (
+    file:     File | Blob,
+    uploadId: string,
+    signal?:  AbortSignal,
+  ): Promise<MediaUploadResponse> => {
     const formData = new FormData();
     formData.append("file", file);
 
     // Must NOT set Content-Type — let the browser set the multipart boundary.
+    // uploadId sent as a header so the server can deduplicate retried uploads.
     const res = await fetch(`${getApiUrl()}/api/media/upload`, {
-      method: "POST",
+      method:      "POST",
       credentials: "include",
-      body: formData,
+      headers:     { "X-Upload-Id": uploadId },
+      body:        formData,
       signal,
     });
 

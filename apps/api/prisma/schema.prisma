@@ -166,6 +166,7 @@ model Media {
   thumbWidth      Int?
   thumbHeight     Int?
   status          String   @default("ready")  // "processing" | "ready" | "failed"
+  clientUploadId  String?  @unique            // client-generated UUID for idempotent re-uploads
   createdAt       DateTime @default(now())
 
   uploader    User                @relation(fields: [uploaderId], references: [id])

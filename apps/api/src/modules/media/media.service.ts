@@ -20,17 +20,38 @@ const MIME_TO_EXT: Record<string, string> = {
 };
 
 export async function uploadImage(
-  buffer:     Buffer,
-  mimeType:   string,
-  uploaderId: string,
-  prisma:     PrismaClient,
-  s3:         S3Client,
+  buffer:         Buffer,
+  mimeType:       string,
+  uploaderId:     string,
+  prisma:         PrismaClient,
+  s3:             S3Client,
+  clientUploadId: string | null = null,
 ): Promise<UploadedMedia> {
   if (!ALLOWED_MIME.has(mimeType)) {
     throw Object.assign(new Error("Unsupported MIME type"), { code: "unsupported_mime" });
   }
   if (buffer.length > env.MEDIA_MAX_SIZE_MB * 1024 * 1024) {
     throw Object.assign(new Error("File too large"), { code: "too_large" });
+  }
+
+  // Idempotency: same clientUploadId → return the existing Media row without
+  // re-uploading. The caller gets the same mediaId, which is safe to attach.
+  if (clientUploadId) {
+    const repo = createMediaRepository(prisma);
+    const existing = await repo.findByClientUploadId(clientUploadId);
+    if (existing) {
+      if (existing.uploaderId !== uploaderId) {
+        throw Object.assign(new Error("Forbidden"), { code: "forbidden" });
+      }
+      return {
+        mediaId:    existing.id,
+        storageKey: existing.storageKey,
+        mimeType:   existing.mimeType,
+        sizeBytes:  existing.sizeBytes,
+        width:      existing.width,
+        height:     existing.height,
+      };
+    }
   }
 
   // .rotate() corrects EXIF orientation — must be first in every pipeline.
@@ -68,6 +89,7 @@ export async function uploadImage(
     width,
     height,
     status: "processing",
+    ...(clientUploadId ? { clientUploadId } : {}),
   });
 
   // Enqueue variant generation — worker produces blur + thumb, updates DB,

@@ -18,6 +18,12 @@ import {
 import { ChatComposer } from "@/features/messages/components/chat-composer";
 import { UploadPreview } from "@/features/messages/components/upload-preview";
 import { mediaApi } from "@/frontend-core/api-client/media";
+import {
+  saveSession,
+  updateSession,
+  removeSession,
+  drainSessions,
+} from "@/frontend-core/upload-session";
 import { ImageLightbox, type LightboxState } from "@/features/messages/components/lightbox/image-lightbox";
 import { MEDIA_EVENTS, type MediaReadyEvent, type MessageAttachment } from "@relay/contracts";
 
@@ -53,6 +59,44 @@ function hasDragImages(e: React.DragEvent): boolean {
   return Array.from(e.dataTransfer.types).includes("Files");
 }
 
+const MAX_CONCURRENT_UPLOADS = 3;
+const UPLOAD_RETRY_DELAYS_MS = [1_000, 2_000, 5_000]; // exponential steps
+
+// Concurrency pool — runs tasks with at most `limit` in-flight at once.
+async function uploadPool<T>(tasks: (() => Promise<T>)[], limit: number): Promise<T[]> {
+  const results: T[] = [];
+  let next = 0;
+  const workers = Array.from({ length: Math.min(limit, tasks.length) }, async () => {
+    while (next < tasks.length) {
+      const i = next++;
+      results[i] = await tasks[i]!();
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
+
+// Per-file upload with automatic retry on network errors only.
+// Server-side errors (ApiError) are not retried — bubble up for manual retry.
+async function uploadWithRetry(
+  file:     Blob,
+  uploadId: string,
+  signal:   AbortSignal,
+): Promise<string> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      const r = await mediaApi.upload(file, uploadId, signal);
+      return r.mediaId;
+    } catch (err) {
+      if (signal.aborted) throw err;
+      if (err instanceof ApiError) throw err; // server error → manual retry
+      const delay = UPLOAD_RETRY_DELAYS_MS[attempt];
+      if (delay === undefined) throw err;    // exhausted retries
+      await new Promise((res) => setTimeout(res, delay));
+    }
+  }
+}
+
 type ConversationDetail = {
   conversationId: string;
   participant: {
@@ -81,10 +125,11 @@ export default function ChatThreadPage() {
   const [loadingOlder, setLoadingOlder] = useState(false);
 
   type PendingBatch = {
-    batchId:  string;
-    files:    File[];
-    previews: { localId: string; blobUrl: string }[];
-    status:   "uploading" | "sending" | "error";
+    batchId:         string;
+    files:           File[];
+    previews:        { localId: string; blobUrl: string }[];
+    status:          "uploading" | "sending" | "error";
+    clientUploadIds: string[];  // stable per-file; reused on retry for server-side dedup
   };
   const [pendingBatches, setPendingBatches] = useState<PendingBatch[]>([]);
   const batchControllersRef = useRef(new Map<string, AbortController>());
@@ -139,6 +184,23 @@ export default function ChatThreadPage() {
       cancelled = true;
     };
   }, [conversationId, router]);
+
+  // Session recovery — fires once on mount. If the page was refreshed while
+  // a batch was in the "sending" state (uploads done, POST not sent), auto-
+  // resume by sending the message now. Orphaned "uploading" sessions (files
+  // gone) are drained and discarded without showing UI.
+  useEffect(() => {
+    const { resumable } = drainSessions(conversationId);
+    for (const session of resumable) {
+      void api(`/api/conversations/${conversationId}/messages/media`, {
+        method: "POST",
+        body:   { mediaIds: session.mediaIds },
+      }).catch(() => {
+        // If recovery POST fails, the session was already removed from storage.
+        // The user will need to re-upload — silent failure is acceptable here.
+      });
+    }
+  }, [conversationId]);
 
   // WebSocket subscription — join the conversation room and react to events.
   useEffect(() => {
@@ -521,15 +583,30 @@ export default function ChatThreadPage() {
   );
 
   const handleSendImages = useCallback(
-    async (files: File[]) => {
+    async (files: File[], existingUploadIds?: string[]) => {
       if (!files.length) return;
-      const batchId  = crypto.randomUUID();
-      const previews = files.map((f) => ({ localId: crypto.randomUUID(), blobUrl: URL.createObjectURL(f) }));
-      const controller = new AbortController();
+      const batchId         = crypto.randomUUID();
+      const clientUploadIds = existingUploadIds ?? files.map(() => crypto.randomUUID());
+      const previews        = files.map((f) => ({ localId: crypto.randomUUID(), blobUrl: URL.createObjectURL(f) }));
+      const controller      = new AbortController();
       batchControllersRef.current.set(batchId, controller);
 
-      setPendingBatches((prev) => [...prev, { batchId, files, previews, status: "uploading" }]);
+      setPendingBatches((prev) => [
+        ...prev,
+        { batchId, files, previews, status: "uploading", clientUploadIds },
+      ]);
       stickToBottomRef.current = true;
+
+      // Persist session before touching the network — survives refresh.
+      saveSession({
+        sessionId:       batchId,
+        conversationId,
+        fileCount:       files.length,
+        clientUploadIds,
+        mediaIds:        [],
+        status:          "uploading",
+        createdAt:       Date.now(),
+      });
 
       let succeeded = false;
       let aborted   = false;
@@ -541,10 +618,13 @@ export default function ChatThreadPage() {
         );
         if (controller.signal.aborted) { aborted = true; return; }
 
-        const mediaIds = await Promise.all(
-          compressed.map((f) => mediaApi.upload(f, controller.signal).then((r) => r.mediaId)),
+        // Upload with concurrency limit + per-file auto-retry on network errors.
+        const uploadTasks = compressed.map((f, i) => () =>
+          uploadWithRetry(f, clientUploadIds[i]!, controller.signal),
         );
+        const mediaIds = await uploadPool(uploadTasks, MAX_CONCURRENT_UPLOADS);
 
+        updateSession(batchId, { mediaIds, status: "sending" });
         setPendingBatches((prev) =>
           prev.map((b) => (b.batchId === batchId ? { ...b, status: "sending" } : b)),
         );
@@ -554,12 +634,14 @@ export default function ChatThreadPage() {
           body:   { mediaIds },
         });
 
+        removeSession(batchId);
         // The message:new socket event adds the real message; remove the optimistic batch.
         setPendingBatches((prev) => prev.filter((b) => b.batchId !== batchId));
         succeeded = true;
       } catch (err) {
         if (err instanceof Error && err.name === "AbortError") {
           aborted = true;
+          removeSession(batchId);
           setPendingBatches((prev) => prev.filter((b) => b.batchId !== batchId));
         } else {
           setPendingBatches((prev) =>
@@ -587,13 +669,14 @@ export default function ChatThreadPage() {
     (batchId: string) => {
       const batch = pendingBatches.find((b) => b.batchId === batchId);
       if (!batch || batch.status !== "error") return;
-      const { files } = batch;
+      const { files, clientUploadIds } = batch;
       setPendingBatches((prev) => {
         const b = prev.find((x) => x.batchId === batchId);
         if (b) b.previews.forEach((p) => URL.revokeObjectURL(p.blobUrl));
         return prev.filter((b) => b.batchId !== batchId);
       });
-      void handleSendImages(files);
+      // Reuse the same clientUploadIds so the server deduplicates already-uploaded files.
+      void handleSendImages(files, clientUploadIds);
     },
     [pendingBatches, handleSendImages],
   );

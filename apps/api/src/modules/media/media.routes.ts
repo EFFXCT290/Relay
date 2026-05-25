@@ -27,9 +27,11 @@ const mediaRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
 
       if (buffer.length === 0) throw new ProblemError("bad_request", "Empty file.");
 
+      const clientUploadId = (request.headers["x-upload-id"] as string | undefined) ?? null;
+
       let result;
       try {
-        result = await uploadImage(buffer, mimeType, callerId, fastify.prisma, fastify.s3);
+        result = await uploadImage(buffer, mimeType, callerId, fastify.prisma, fastify.s3, clientUploadId);
       } catch (err) {
         const code = (err as { code?: string }).code;
         if (code === "unsupported_mime") {
@@ -37,6 +39,9 @@ const mediaRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
         }
         if (code === "too_large") {
           throw new ProblemError("validation_error", `Image must be under ${env.MEDIA_MAX_SIZE_MB}MB.`);
+        }
+        if (code === "forbidden") {
+          throw new ProblemError("forbidden", "Upload ID belongs to another user.");
         }
         if (code === "ECONNREFUSED" || code === "ENOTFOUND") {
           throw new ProblemError("internal_error", "Storage is temporarily unavailable. Try again shortly.");
