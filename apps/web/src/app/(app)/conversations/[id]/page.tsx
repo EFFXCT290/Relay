@@ -25,7 +25,8 @@ import {
   drainSessions,
 } from "@/frontend-core/upload-session";
 import { ImageLightbox, type LightboxState } from "@/features/messages/components/lightbox/image-lightbox";
-import { MEDIA_EVENTS, TYPING_EVENTS, type MediaReadyEvent, type MessageAttachment, type TypingSyncResponse } from "@relay/contracts";
+import { MEDIA_EVENTS, PRESENCE_EVENTS, TYPING_EVENTS, type MediaReadyEvent, type MessageAttachment, type PresenceSyncResponse, type TypingSyncResponse } from "@relay/contracts";
+import { formatLastSeen } from "@/frontend-core/format-presence";
 
 const PAGE_SIZE = 30;
 
@@ -113,6 +114,12 @@ export default function ChatThreadPage() {
   const params = useParams<{ id: string }>();
   const router = useRouter();
   const conversationId = params.id;
+
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    const id = setInterval(() => setTick((t) => t + 1), 60_000);
+    return () => clearInterval(id);
+  }, []);
 
   const [meId, setMeId] = useState<string | null>(null);
   const [detail, setDetail] = useState<ConversationDetail | null>(null);
@@ -202,15 +209,26 @@ export default function ChatThreadPage() {
     }
   }, [conversationId]);
 
+  // Once the conversation detail resolves we know the partner's userId and can
+  // request their current presence state. joinAndSync (called on socket connect)
+  // skips this on initial mount because partnerIdRef isn't set yet.
+  useEffect(() => {
+    const partnerId = detail?.participant.userId;
+    if (!partnerId) return;
+    getSocket().emit(PRESENCE_EVENTS.SYNC_REQUEST, { userIds: [partnerId] });
+  }, [detail?.participant.userId]);
+
   // WebSocket subscription — join the conversation room and react to events.
   useEffect(() => {
     const socket = getSocket();
 
     const joinAndSync = () => {
       socket.emit("conversation:join", { conversationId });
-      // Ask server for current typing state immediately — prevents the window
-      // between join and the next sweep tick where the indicator would be wrong.
       socket.emit(TYPING_EVENTS.SYNC_REQUEST, { conversationIds: [conversationId] });
+      // Presence sync on reconnect — partnerIdRef is populated by then.
+      // Initial load is handled by a separate effect once detail resolves.
+      const partnerId = partnerIdRef.current;
+      if (partnerId) socket.emit(PRESENCE_EVENTS.SYNC_REQUEST, { userIds: [partnerId] });
     };
 
     // Initial join (or rejoin if already connected mid-handshake).
@@ -362,6 +380,25 @@ export default function ChatThreadPage() {
       setPartnerTyping(!!partnerId && typers.includes(partnerId));
     };
 
+    const onPresenceSyncResponse = (res: PresenceSyncResponse) => {
+      const partnerId = partnerIdRef.current;
+      if (!partnerId) return;
+      const entry = res.users.find((u) => u.userId === partnerId);
+      if (!entry) return;
+      setDetail((prev) =>
+        prev
+          ? {
+              ...prev,
+              participant: {
+                ...prev.participant,
+                isOnline:   entry.isOnline,
+                lastSeenAt: entry.lastSeen ?? prev.participant.lastSeenAt,
+              },
+            }
+          : prev,
+      );
+    };
+
     const onPresenceOnline = (payload: { userId: string }) => {
       if (payload.userId !== partnerIdRef.current) return;
       setDetail((prev) =>
@@ -426,6 +463,7 @@ export default function ChatThreadPage() {
     socket.on("message:embed:update", onMessageEmbedUpdate);
     socket.on("typing:update", onTypingUpdate);
     socket.on(TYPING_EVENTS.SYNC_RESPONSE, onTypingSyncResponse);
+    socket.on(PRESENCE_EVENTS.SYNC_RESPONSE, onPresenceSyncResponse);
     socket.on("presence:online", onPresenceOnline);
     socket.on("presence:offline", onPresenceOffline);
     socket.on(MEDIA_EVENTS.READY, onMediaReady);
@@ -442,6 +480,7 @@ export default function ChatThreadPage() {
       socket.off("message:embed:update", onMessageEmbedUpdate);
       socket.off("typing:update", onTypingUpdate);
       socket.off(TYPING_EVENTS.SYNC_RESPONSE, onTypingSyncResponse);
+      socket.off(PRESENCE_EVENTS.SYNC_RESPONSE, onPresenceSyncResponse);
       socket.off("presence:online", onPresenceOnline);
       socket.off("presence:offline", onPresenceOffline);
       socket.off(MEDIA_EVENTS.READY, onMediaReady);
@@ -905,11 +944,7 @@ export default function ChatThreadPage() {
                     fontFamily: mono,
                   }}
                 >
-                  {detail.participant.isOnline
-                    ? "Active now"
-                    : detail.participant.lastSeenAt
-                      ? lastSeenText(detail.participant.lastSeenAt)
-                      : "Offline"}
+                  {formatLastSeen(detail.participant.lastSeenAt, detail.participant.isOnline)}
                 </span>
               </div>
             </>
@@ -1122,16 +1157,3 @@ function dayLabel(iso: string): string {
   return d.toLocaleDateString([], { weekday: "long", month: "short", day: "numeric" });
 }
 
-function lastSeenText(iso: string): string {
-  const d = new Date(iso);
-  const now = new Date();
-  const mins = Math.floor((now.getTime() - d.getTime()) / 60_000);
-  if (mins < 1) return "last seen just now";
-  if (mins < 60) return `last seen ${mins}m ago`;
-  const time = d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit", hour12: true });
-  const yesterday = new Date(now);
-  yesterday.setDate(yesterday.getDate() - 1);
-  if (d.toDateString() === now.toDateString()) return `last seen today at ${time}`;
-  if (d.toDateString() === yesterday.toDateString()) return `last seen yesterday at ${time}`;
-  return `last seen ${d.toLocaleDateString([], { month: "short", day: "numeric" })} at ${time}`;
-}

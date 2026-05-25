@@ -12,6 +12,7 @@ import {
 import { api } from "@/frontend-core/api";
 import { getSocket } from "@/frontend-core/socket";
 import type { Notification } from "@/features/notifications/components/notification-card";
+import { PRESENCE_EVENTS, PRESENCE_PING_INTERVAL_MS } from "@relay/contracts";
 
 type State = {
   notifications: Notification[];
@@ -69,9 +70,16 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
     };
     socket.on("notification:new", onNew);
 
+    // Presence heartbeat — keeps the Redis heartbeat key alive so the server
+    // doesn't flip the user offline while the socket is connected but idle.
+    const ping = () => socket.emit(PRESENCE_EVENTS.PING);
+    ping(); // immediate ping so presence is fresh before the first interval fires
+    const pingInterval = setInterval(ping, PRESENCE_PING_INTERVAL_MS);
+
     return () => {
       mounted.current = false;
       socket.off("notification:new", onNew);
+      clearInterval(pingInterval);
     };
   }, [refresh]);
 

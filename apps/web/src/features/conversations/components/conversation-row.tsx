@@ -2,6 +2,7 @@ import Link from "next/link";
 import { Video } from "lucide-react";
 import { Avatar } from "@/shared/components/avatar";
 import { cn } from "@/frontend-core/utils";
+import { formatLastSeen } from "@/frontend-core/format-presence";
 import type { ConversationListItem } from "@relay/contracts";
 
 export type { ConversationListItem };  // re-export so prior consumers via this path keep working
@@ -63,20 +64,15 @@ export function ConversationRow({ conversation }: { conversation: ConversationLi
               Capture
             </span>
           )}
-          {!captureAlert && participant.isOnline && (
+          {!captureAlert && participant.isOnline !== undefined && (
             <span
               className="shrink-0 text-[10px]"
-              style={{ color: "var(--color-online)", fontFamily: mono }}
+              style={{
+                color: participant.isOnline ? "var(--color-online)" : "var(--color-text-muted)",
+                fontFamily: mono,
+              }}
             >
-              Active now
-            </span>
-          )}
-          {!captureAlert && participant.isOnline === false && participant.lastSeenAt && (
-            <span
-              className="shrink-0 text-[10px] text-[var(--color-text-muted)]"
-              style={{ fontFamily: mono }}
-            >
-              {relativeShort(participant.lastSeenAt)}
+              {formatLastSeen(participant.lastSeenAt, participant.isOnline)}
             </span>
           )}
         </div>
@@ -174,16 +170,3 @@ function TypingPreview() {
   );
 }
 
-function relativeShort(iso: string): string {
-  const d = new Date(iso);
-  const now = new Date();
-  const mins = Math.floor((now.getTime() - d.getTime()) / 60_000);
-  if (mins < 1) return "last seen just now";
-  if (mins < 60) return `last seen ${mins}m ago`;
-  const time = d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit", hour12: true });
-  const yesterday = new Date(now);
-  yesterday.setDate(yesterday.getDate() - 1);
-  if (d.toDateString() === now.toDateString()) return `last seen today at ${time}`;
-  if (d.toDateString() === yesterday.toDateString()) return `last seen yesterday at ${time}`;
-  return `last seen ${d.toLocaleDateString([], { month: "short", day: "numeric" })}`;
-}

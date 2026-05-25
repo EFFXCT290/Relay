@@ -1,32 +1,39 @@
 import type { FastifyInstance } from "fastify";
+import { PRESENCE_HEARTBEAT_TTL_S } from "@relay/contracts";
 
-// Presence state lives in Redis (volatile, cheap to query/expire) — NOT
-// Postgres. Keys: `presence:user:{userId}` → { isOnline, lastSeen }.
-// Two-minute TTL on the online state handles dead connections without
-// requiring an explicit disconnect event. Only file in the module that
-// touches Redis directly.
+// Two keys per user — intentionally split:
+//
+//   presence:heartbeat:{userId}  →  "1"  EX PRESENCE_HEARTBEAT_TTL_S
+//     Ephemeral. EXISTS → online. Refreshed by every presence:ping and on
+//     connect. Expires automatically when pings stop (disconnect / crash).
+//
+//   presence:user:{userId}  →  { lastSeen: ISO }  EX 7d
+//     Persistent. Written only when the user is confirmed offline (after grace
+//     window). Never overwritten on connect/reconnect — that would corrupt the
+//     "last seen" text on a tab reload.
 
 export class PresenceRepository {
   constructor(private fastify: FastifyInstance) {}
 
-  private key(userId: string) {
-    return `presence:user:${userId}`;
+  private heartbeatKey(userId: string) { return `presence:heartbeat:${userId}`; }
+  private userKey(userId: string)      { return `presence:user:${userId}`; }
+
+  async setHeartbeat(userId: string): Promise<void> {
+    await this.fastify.redis.set(this.heartbeatKey(userId), "1", "EX", PRESENCE_HEARTBEAT_TTL_S);
   }
 
-  async setOnline(userId: string): Promise<void> {
-    const payload = JSON.stringify({ isOnline: true, lastSeen: new Date().toISOString() });
-    await this.fastify.redis.set(this.key(userId), payload, "EX", 120);
+  async heartbeatExists(userId: string): Promise<boolean> {
+    return (await this.fastify.redis.exists(this.heartbeatKey(userId))) === 1;
   }
 
-  async setOffline(userId: string): Promise<void> {
-    const payload = JSON.stringify({ isOnline: false, lastSeen: new Date().toISOString() });
-    // Keep the offline state around so "last seen" survives a brief reconnect;
-    // expire after a week.
-    await this.fastify.redis.set(this.key(userId), payload, "EX", 7 * 24 * 3600);
+  async setLastSeen(userId: string, lastSeen: string): Promise<void> {
+    const payload = JSON.stringify({ lastSeen });
+    await this.fastify.redis.set(this.userKey(userId), payload, "EX", 7 * 24 * 3600);
   }
 
-  async get(userId: string): Promise<{ isOnline: boolean; lastSeen: string | null } | null> {
-    const raw = await this.fastify.redis.get(this.key(userId));
-    return raw ? JSON.parse(raw) : null;
+  async getLastSeen(userId: string): Promise<string | null> {
+    const raw = await this.fastify.redis.get(this.userKey(userId));
+    if (!raw) return null;
+    return (JSON.parse(raw) as { lastSeen: string }).lastSeen;
   }
 }

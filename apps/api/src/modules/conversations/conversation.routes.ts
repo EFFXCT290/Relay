@@ -7,11 +7,25 @@ import {
   emitConversationDeleted,
   emitConversationRequest,
 } from "./conversation.socket.js";
+import { PresenceService } from "../presence/presence.service.js";
 
 const ParticipantSchema = Type.Object({
-  userId: Type.String({ format: "uuid" }),
-  username: Type.String(),
+  userId:     Type.String({ format: "uuid" }),
+  username:   Type.String(),
+  isOnline:   Type.Optional(Type.Boolean()),
+  lastSeenAt: Type.Optional(Type.Union([Type.String({ format: "date-time" }), Type.Null()])),
 });
+
+// Batch-fetch presence for a set of userIds. Returns a Map so callers
+// can attach isOnline/lastSeenAt to each participant in O(1).
+async function presencesFor(
+  fastify: import("fastify").FastifyInstance,
+  userIds: string[],
+): Promise<Map<string, { isOnline: boolean; lastSeen: string | null }>> {
+  if (userIds.length === 0) return new Map();
+  const results = await new PresenceService(fastify).getMany(userIds);
+  return new Map(results.map((r) => [r.userId, r]));
+}
 
 const ListItemSchema = Type.Object({
   conversationId: Type.String({ format: "uuid" }),
@@ -184,20 +198,25 @@ const conversationRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
       const slice = hasMore ? rows.slice(0, -1) : rows;
       const nextCursor = hasMore ? slice[slice.length - 1]?.id ?? null : null;
 
-      const unreadCounts = await unreadCountsFor(
-        fastify,
-        callerId,
-        slice.map((c) => c.id),
-      );
+      const otherIds = slice.map((c) => {
+        const other = c.participants.find((p) => p.userId !== callerId);
+        return other?.userId ?? callerId;
+      });
+
+      const [unreadCounts, presences] = await Promise.all([
+        unreadCountsFor(fastify, callerId, slice.map((c) => c.id)),
+        presencesFor(fastify, otherIds),
+      ]);
 
       return {
         conversations: slice.map((c) => {
           const other = c.participants.find((p) => p.userId !== callerId);
-          const last = c.messages[0];
+          const last  = c.messages[0];
+          const p     = presences.get(other?.userId ?? callerId);
           return {
             conversationId: c.id,
             participant: other
-              ? { userId: other.user.id, username: other.user.username }
+              ? { userId: other.user.id, username: other.user.username, isOnline: p?.isOnline, lastSeenAt: p?.lastSeen ?? null }
               : { userId: callerId, username: "—" },
             lastMessage: last
               ? {
@@ -248,20 +267,25 @@ const conversationRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
         orderBy: { updatedAt: "desc" },
       });
 
-      const unreadCounts = await unreadCountsFor(
-        fastify,
-        callerId,
-        rows.map((c) => c.id),
-      );
+      const otherIds = rows.map((c) => {
+        const other = c.participants.find((p) => p.userId !== callerId);
+        return other?.userId ?? callerId;
+      });
+
+      const [unreadCounts, presences] = await Promise.all([
+        unreadCountsFor(fastify, callerId, rows.map((c) => c.id)),
+        presencesFor(fastify, otherIds),
+      ]);
 
       return {
         requests: rows.map((c) => {
           const other = c.participants.find((p) => p.userId !== callerId);
-          const last = c.messages[0];
+          const last  = c.messages[0];
+          const p     = presences.get(other?.userId ?? callerId);
           return {
             conversationId: c.id,
             participant: other
-              ? { userId: other.user.id, username: other.user.username }
+              ? { userId: other.user.id, username: other.user.username, isOnline: p?.isOnline, lastSeenAt: p?.lastSeen ?? null }
               : { userId: callerId, username: "—" },
             lastMessage: last
               ? {
@@ -310,9 +334,15 @@ const conversationRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
       if (!me) throw new ProblemError("forbidden", "You are not a participant.");
 
       const other = conv.participants.find((p) => p.userId !== callerId) ?? conv.participants[0]!;
+      const presence = await new PresenceService(fastify).getFor(other.user.id);
       return {
         conversationId: conv.id,
-        participant: { userId: other.user.id, username: other.user.username },
+        participant: {
+          userId:     other.user.id,
+          username:   other.user.username,
+          isOnline:   presence.isOnline,
+          lastSeenAt: presence.lastSeen ?? null,
+        },
         createdAt: conv.createdAt.toISOString(),
         myAcceptedAt: me.acceptedAt ? me.acceptedAt.toISOString() : null,
       };

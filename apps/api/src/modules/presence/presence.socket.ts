@@ -1,26 +1,42 @@
 import type { Socket } from "socket.io";
 import type { FastifyInstance } from "fastify";
+import { PRESENCE_EVENTS, type PresenceSyncRequest } from "@relay/contracts";
 import { PresenceService } from "./presence.service.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Presence socket layer is INTENTIONALLY thin: it only signals
-// connect/disconnect to PresenceService. It does NOT decide who's online,
-// store state, broadcast events, or do anything that could be tested without
-// a socket. All of that lives in PresenceService.
+// Presence socket layer — intentionally thin. Four signals:
+//
+//   connect          → markOnline  (cancels pending timer, sets heartbeat, broadcasts if new)
+//   presence:ping    → pulse       (refreshes heartbeat TTL, silent)
+//   presence:sync-request → getMany → sync-response (snapshot for reconnecting client)
+//   disconnect       → scheduleOffline (timer lives in service, one per userId)
+//
+// Timer ownership is in PresenceService so markOnline can cancel a pending
+// offline check the moment the user reconnects — regardless of which socket
+// instance created the timer.
 // ─────────────────────────────────────────────────────────────────────────────
 
 export function registerPresenceSocket(
-  socket: Socket,
+  socket:  Socket,
   fastify: FastifyInstance,
-  userId: string,
+  userId:  string,
 ) {
   const service = new PresenceService(fastify);
 
-  // Mark online on connection. Already-connected case is handled because
-  // plugins/socket.ts invokes this registration on every new socket.
   void service.markOnline(userId);
 
+  socket.on(PRESENCE_EVENTS.PING, () => {
+    void service.pulse(userId);
+  });
+
+  socket.on(PRESENCE_EVENTS.SYNC_REQUEST, (payload: PresenceSyncRequest) => {
+    if (!Array.isArray(payload?.userIds)) return;
+    void service.getMany(payload.userIds).then((users) => {
+      socket.emit(PRESENCE_EVENTS.SYNC_RESPONSE, { users });
+    });
+  });
+
   socket.on("disconnect", () => {
-    void service.markOffline(userId);
+    service.scheduleOffline(userId);
   });
 }

@@ -9,7 +9,7 @@ import { getSocket } from "@/frontend-core/socket";
 import { Button } from "@/shared/ui/button";
 import { Avatar } from "@/shared/components/avatar";
 import { ConversationRow, type ConversationListItem } from "@/features/conversations/components/conversation-row";
-import { TYPING_EVENTS, type TypingSyncResponse } from "@relay/contracts";
+import { PRESENCE_EVENTS, TYPING_EVENTS, type PresenceSyncResponse, type TypingSyncResponse } from "@relay/contracts";
 
 const mono = "var(--font-mono)";
 const display = "var(--font-display)";
@@ -22,6 +22,13 @@ export default function ConversationsPage() {
   const [requests, setRequests] = useState<ConversationListItem[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState<Filter>("all");
+
+  // Tick every 60s so "Last seen Nm ago" labels in ConversationRow stay current.
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    const id = setInterval(() => setTick((t) => t + 1), 60_000);
+    return () => clearInterval(id);
+  }, []);
 
   // Initial load — accepted convos + pending requests in parallel.
   useEffect(() => {
@@ -175,6 +182,25 @@ export default function ConversationsPage() {
       );
     };
 
+    const onPresenceSyncResponse = (res: PresenceSyncResponse) => {
+      const map = new Map(res.users.map((u) => [u.userId, u]));
+      const patch = (list: typeof conversations): typeof conversations =>
+        list?.map((c) => {
+          const p = map.get(c.participant.userId);
+          if (!p) return c;
+          return {
+            ...c,
+            participant: {
+              ...c.participant,
+              isOnline:   p.isOnline,
+              lastSeenAt: p.lastSeen ?? c.participant.lastSeenAt,
+            },
+          };
+        }) ?? list;
+      setConversations(patch);
+      setRequests(patch);
+    };
+
     socket.on("conversation:request", onRequest);
     socket.on("conversation:accepted", onAccepted);
     socket.on("conversation:deleted", onDeleted);
@@ -183,6 +209,7 @@ export default function ConversationsPage() {
     socket.on("presence:offline", onPresenceOffline);
     socket.on("typing:update", onTypingUpdate);
     socket.on(TYPING_EVENTS.SYNC_RESPONSE, onTypingSyncResponse);
+    socket.on(PRESENCE_EVENTS.SYNC_RESPONSE, onPresenceSyncResponse);
 
     return () => {
       socket.off("conversation:request", onRequest);
@@ -193,6 +220,7 @@ export default function ConversationsPage() {
       socket.off("presence:offline", onPresenceOffline);
       socket.off("typing:update", onTypingUpdate);
       socket.off(TYPING_EVENTS.SYNC_RESPONSE, onTypingSyncResponse);
+      socket.off(PRESENCE_EVENTS.SYNC_RESPONSE, onPresenceSyncResponse);
     };
   }, []);
 
@@ -204,9 +232,14 @@ export default function ConversationsPage() {
     if (ids.length === 0) return;
     const socket = getSocket();
 
+    const participantIds = conversations?.map((c) => c.participant.userId) ?? [];
+
     const joinAndSync = () => {
       ids.forEach((id) => socket.emit("conversation:join", { conversationId: id }));
       socket.emit(TYPING_EVENTS.SYNC_REQUEST, { conversationIds: ids });
+      if (participantIds.length > 0) {
+        socket.emit(PRESENCE_EVENTS.SYNC_REQUEST, { userIds: participantIds });
+      }
     };
 
     joinAndSync();
