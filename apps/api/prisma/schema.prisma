@@ -152,17 +152,20 @@ model MessageRead {
 // ────────────────────────────────────────────────────────────────────────────
 
 model Media {
-  id             String   @id @default(cuid())
-  uploaderId     String
-  storageKey     String   @unique
-  blurStorageKey String?
-  mimeType       String
-  sizeBytes      Int
-  width          Int?
-  height         Int?
-  blurWidth      Int?
-  blurHeight     Int?
-  createdAt      DateTime @default(now())
+  id              String   @id @default(cuid())
+  uploaderId      String
+  storageKey      String   @unique
+  blurStorageKey  String?
+  thumbStorageKey String?
+  mimeType        String
+  sizeBytes       Int
+  width           Int?
+  height          Int?
+  blurWidth       Int?
+  blurHeight      Int?
+  thumbWidth      Int?
+  thumbHeight     Int?
+  createdAt       DateTime @default(now())
 
   uploader    User                @relation(fields: [uploaderId], references: [id])
   attachments MessageAttachment[]

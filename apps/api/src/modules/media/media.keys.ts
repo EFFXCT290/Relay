@@ -18,8 +18,8 @@ export type MediaKind = "images" | "videos" | "voice";
  *  layout reserves their slots so keys stay stable when they ship. */
 export type MediaVariant =
   | "original"
-  | "thumb"
   | "blur"
+  | "thumb"
   | "preview"
   | "waveform";
 

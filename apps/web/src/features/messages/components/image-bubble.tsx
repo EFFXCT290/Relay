@@ -17,27 +17,36 @@ function clampDimensions(w?: number | null, h?: number | null) {
 }
 
 type Props = {
-  attachment: MessageAttachment;
-  isMine: boolean;
+  attachment:      MessageAttachment;
+  isMine:          boolean;
+  onOpenLightbox?: (attachment: MessageAttachment) => void;
 };
 
-export function ImageBubble({ attachment, isMine }: Props) {
+export function ImageBubble({ attachment, isMine, onOpenLightbox }: Props) {
   const [loaded, setLoaded] = useState(false);
   const [error,  setError]  = useState(false);
 
-  const { width, height } = clampDimensions(attachment.media.width, attachment.media.height);
+  // Use thumb dimensions for clamping when available — they reflect the actual
+  // displayed asset size, preventing layout shifts on images that weren't
+  // downscaled (e.g. small originals where thumb === original dimensions).
+  const { width, height } = clampDimensions(
+    attachment.media.thumbWidth  ?? attachment.media.width,
+    attachment.media.thumbHeight ?? attachment.media.height,
+  );
   const blurUrl = attachment.media.blurUrl;
+  // Thumb is the displayed asset in chat; original is reserved for lightbox.
+  const chatSrc = attachment.media.thumbUrl ?? attachment.media.url;
 
-  return (
+  const inner = (
     <div
       className={cn(
         "relative overflow-hidden rounded-[18px]",
         isMine ? "rounded-br-[6px]" : "rounded-bl-[6px]",
+        onOpenLightbox && loaded && !error && "cursor-zoom-in",
       )}
       style={{ width, height: loaded ? undefined : height }}
     >
-      {/* Placeholder layer: blur image if we have one, else a pulsing block.
-          Always painted underneath; the original fades in on top of it. */}
+      {/* Placeholder layer: blur if available, else pulsing block. */}
       {!loaded && !error && (
         blurUrl ? (
           <img
@@ -56,7 +65,7 @@ export function ImageBubble({ attachment, isMine }: Props) {
       )}
       {!error ? (
         <img
-          src={attachment.media.url}
+          src={chatSrc}
           alt=""
           width={width}
           className={cn(
@@ -65,6 +74,7 @@ export function ImageBubble({ attachment, isMine }: Props) {
           )}
           onLoad={() => setLoaded(true)}
           onError={() => setError(true)}
+          draggable={false}
         />
       ) : (
         <div
@@ -81,4 +91,19 @@ export function ImageBubble({ attachment, isMine }: Props) {
       )}
     </div>
   );
+
+  if (onOpenLightbox && loaded && !error) {
+    return (
+      <button
+        type="button"
+        onClick={() => onOpenLightbox(attachment)}
+        aria-label="View image"
+        className="block appearance-none border-0 bg-transparent p-0"
+      >
+        {inner}
+      </button>
+    );
+  }
+
+  return inner;
 }

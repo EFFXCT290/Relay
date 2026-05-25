@@ -32,25 +32,26 @@ export async function uploadImage(
     throw Object.assign(new Error("File too large"), { code: "too_large" });
   }
 
+  // .rotate() corrects EXIF orientation on all variants — without it iPhone
+  // photos randomly appear rotated. Must be the first operation in every pipeline.
   let width:  number | null = null;
   let height: number | null = null;
   try {
-    const meta = await sharp(buffer).metadata();
+    const meta = await sharp(buffer).rotate().metadata();
     width  = meta.width  ?? null;
     height = meta.height ?? null;
   } catch {
     // Non-fatal — dimensions are optional
   }
 
-  // Blur placeholder: a tiny, heavily-compressed, intentionally-blurry JPEG
-  // (~a few hundred bytes) the client paints instantly while the original
-  // loads. Not a thumbnail — never displayed sharp. Always JPEG regardless of
-  // the source MIME. Synchronous on purpose: no queue/worker yet (Phase 2.1).
+  // Blur placeholder: tiny (~few hundred bytes), intentionally blurry JPEG the
+  // client paints instantly while thumb loads. Never displayed sharp.
   let blurBuffer: Buffer | null = null;
   let blurWidth:  number | null = null;
   let blurHeight: number | null = null;
   try {
     blurBuffer = await sharp(buffer)
+      .rotate()
       .resize(32)
       .blur()
       .jpeg({ quality: 40 })
@@ -59,15 +60,35 @@ export async function uploadImage(
     blurWidth  = blurMeta.width  ?? null;
     blurHeight = blurMeta.height ?? null;
   } catch {
-    // Non-fatal — image still works without a placeholder, just less smooth.
     blurBuffer = null;
+  }
+
+  // Thumbnail: max 480px long edge, high quality — used in chat bubbles.
+  // The original is reserved for lightbox/fullscreen only.
+  let thumbBuffer: Buffer | null = null;
+  let thumbWidth:  number | null = null;
+  let thumbHeight: number | null = null;
+  try {
+    thumbBuffer = await sharp(buffer)
+      .rotate()
+      .resize({ width: 480, height: 480, fit: "inside", withoutEnlargement: true })
+      .jpeg({ quality: 82 })
+      .toBuffer();
+    const thumbMeta = await sharp(thumbBuffer).metadata();
+    thumbWidth  = thumbMeta.width  ?? null;
+    thumbHeight = thumbMeta.height ?? null;
+  } catch {
+    thumbBuffer = null;
   }
 
   const mediaId    = randomUUID();
   const ext        = MIME_TO_EXT[mimeType] ?? ".jpg";
   const storageKey = buildMediaKey({ kind: "images", id: mediaId, variant: "original", ext });
   const blurKey    = blurBuffer
-    ? buildMediaKey({ kind: "images", id: mediaId, variant: "blur", ext: ".jpg" })
+    ? buildMediaKey({ kind: "images", id: mediaId, variant: "blur",  ext: ".jpg" })
+    : null;
+  const thumbKey   = thumbBuffer
+    ? buildMediaKey({ kind: "images", id: mediaId, variant: "thumb", ext: ".jpg" })
     : null;
 
   await s3.send(new PutObjectCommand({
@@ -88,18 +109,31 @@ export async function uploadImage(
     }));
   }
 
+  if (thumbBuffer && thumbKey) {
+    await s3.send(new PutObjectCommand({
+      Bucket:        env.MINIO_BUCKET,
+      Key:           thumbKey,
+      Body:          thumbBuffer,
+      ContentType:   "image/jpeg",
+      ContentLength: thumbBuffer.length,
+    }));
+  }
+
   const repo  = createMediaRepository(prisma);
   const media = await repo.createMedia({
     id: mediaId,
     uploaderId,
     storageKey,
-    blurStorageKey: blurKey,
+    blurStorageKey:  blurKey,
+    thumbStorageKey: thumbKey,
     mimeType,
     sizeBytes: buffer.length,
     width,
     height,
     blurWidth,
     blurHeight,
+    thumbWidth,
+    thumbHeight,
   });
 
   return {

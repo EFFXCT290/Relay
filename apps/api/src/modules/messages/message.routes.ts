@@ -91,15 +91,18 @@ const messageRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
             id:   att.id,
             type: "image" as const,
             media: {
-              id:         att.media.id,
-              url:        await fastify.getMediaUrl(att.media.storageKey),
-              blurUrl:    att.media.blurStorageKey ? await fastify.getMediaUrl(att.media.blurStorageKey) : null,
-              width:      att.media.width,
-              height:     att.media.height,
-              blurWidth:  att.media.blurWidth,
-              blurHeight: att.media.blurHeight,
-              mimeType:   att.media.mimeType,
-              sizeBytes:  att.media.sizeBytes,
+              id:          att.media.id,
+              url:         await fastify.getMediaUrl(att.media.storageKey),
+              blurUrl:     att.media.blurStorageKey  ? await fastify.getMediaUrl(att.media.blurStorageKey)  : null,
+              thumbUrl:    att.media.thumbStorageKey ? await fastify.getMediaUrl(att.media.thumbStorageKey) : null,
+              width:       att.media.width,
+              height:      att.media.height,
+              blurWidth:   att.media.blurWidth,
+              blurHeight:  att.media.blurHeight,
+              thumbWidth:  att.media.thumbWidth,
+              thumbHeight: att.media.thumbHeight,
+              mimeType:    att.media.mimeType,
+              sizeBytes:   att.media.sizeBytes,
             },
           })),
         );
@@ -354,15 +357,18 @@ const messageRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
               id:   Type.String(),
               type: Type.Literal("image"),
               media: Type.Object({
-                id:         Type.String(),
-                url:        Type.String(),
-                blurUrl:    Type.Optional(Type.Union([Type.String(), Type.Null()])),
-                width:      Type.Optional(Type.Union([Type.Number(), Type.Null()])),
-                height:     Type.Optional(Type.Union([Type.Number(), Type.Null()])),
-                blurWidth:  Type.Optional(Type.Union([Type.Number(), Type.Null()])),
-                blurHeight: Type.Optional(Type.Union([Type.Number(), Type.Null()])),
-                mimeType:   Type.String(),
-                sizeBytes:  Type.Number(),
+                id:          Type.String(),
+                url:         Type.String(),
+                blurUrl:     Type.Optional(Type.Union([Type.String(), Type.Null()])),
+                thumbUrl:    Type.Optional(Type.Union([Type.String(), Type.Null()])),
+                width:       Type.Optional(Type.Union([Type.Number(), Type.Null()])),
+                height:      Type.Optional(Type.Union([Type.Number(), Type.Null()])),
+                blurWidth:   Type.Optional(Type.Union([Type.Number(), Type.Null()])),
+                blurHeight:  Type.Optional(Type.Union([Type.Number(), Type.Null()])),
+                thumbWidth:  Type.Optional(Type.Union([Type.Number(), Type.Null()])),
+                thumbHeight: Type.Optional(Type.Union([Type.Number(), Type.Null()])),
+                mimeType:    Type.String(),
+                sizeBytes:   Type.Number(),
               }),
             })),
           }),
@@ -429,22 +435,26 @@ const messageRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
         return msg;
       });
 
-      const signedUrl = await fastify.getMediaUrl(media.storageKey);
-      const blurUrl   = media.blurStorageKey ? await fastify.getMediaUrl(media.blurStorageKey) : null;
+      const signedUrl  = await fastify.getMediaUrl(media.storageKey);
+      const blurUrl    = media.blurStorageKey  ? await fastify.getMediaUrl(media.blurStorageKey)  : null;
+      const thumbUrl   = media.thumbStorageKey ? await fastify.getMediaUrl(media.thumbStorageKey) : null;
 
       const attachment = {
         id:   attachmentId,
         type: "image" as const,
         media: {
-          id:         media.id,
-          url:        signedUrl,
+          id:          media.id,
+          url:         signedUrl,
           blurUrl,
-          width:      media.width,
-          height:     media.height,
-          blurWidth:  media.blurWidth,
-          blurHeight: media.blurHeight,
-          mimeType:   media.mimeType,
-          sizeBytes:  media.sizeBytes,
+          thumbUrl,
+          width:       media.width,
+          height:      media.height,
+          blurWidth:   media.blurWidth,
+          blurHeight:  media.blurHeight,
+          thumbWidth:  media.thumbWidth,
+          thumbHeight: media.thumbHeight,
+          mimeType:    media.mimeType,
+          sizeBytes:   media.sizeBytes,
         },
       };
 

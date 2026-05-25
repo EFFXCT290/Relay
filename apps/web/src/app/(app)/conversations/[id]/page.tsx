@@ -17,6 +17,8 @@ import {
 import { ChatComposer } from "@/features/messages/components/chat-composer";
 import { UploadPreview } from "@/features/messages/components/upload-preview";
 import { mediaApi } from "@/frontend-core/api-client/media";
+import { ImageLightbox, type LightboxState } from "@/features/messages/components/lightbox/image-lightbox";
+import type { MessageAttachment } from "@relay/contracts";
 
 const PAGE_SIZE = 30;
 
@@ -58,6 +60,7 @@ export default function ChatThreadPage() {
     height?: number;
   };
   const [pendingUploads, setPendingUploads] = useState<PendingUpload[]>([]);
+  const [lightbox, setLightbox] = useState<LightboxState | null>(null);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   // meId resolves async from /api/auth/me. The WS effect must not re-subscribe
@@ -635,6 +638,9 @@ export default function ChatThreadPage() {
                           setEditing(msg);
                         }}
                         onDelete={handleDelete}
+                        onOpenLightbox={(att: MessageAttachment) =>
+                          setLightbox({ images: [att], index: 0 })
+                        }
                       />
                     );
                   })}
@@ -698,6 +704,13 @@ export default function ChatThreadPage() {
           onCancelReply={() => setReplyTo(null)}
           editing={editing}
           onCancelEdit={() => setEditing(null)}
+        />
+      )}
+
+      {lightbox && (
+        <ImageLightbox
+          state={lightbox}
+          onClose={() => setLightbox(null)}
         />
       )}
     </div>
