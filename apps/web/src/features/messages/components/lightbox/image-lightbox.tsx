@@ -1,8 +1,8 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { X } from "lucide-react";
+import { ChevronLeft, ChevronRight, X } from "lucide-react";
 import type { MessageAttachment } from "@relay/contracts";
 import { LightboxBackdrop } from "./lightbox-backdrop";
 import { LightboxImage } from "./lightbox-image";
@@ -18,9 +18,17 @@ type Props = {
 };
 
 export function ImageLightbox({ state, onClose }: Props) {
-  const attachment = state.images[state.index];
+  const [index, setIndex] = useState(state.index);
   const closeRef = useRef(onClose);
   useEffect(() => { closeRef.current = onClose; });
+
+  const total      = state.images.length;
+  const attachment = state.images[index];
+  const hasPrev    = index > 0;
+  const hasNext    = index < total - 1;
+
+  const prev = () => setIndex((i) => Math.max(0, i - 1));
+  const next = () => setIndex((i) => Math.min(total - 1, i + 1));
 
   // Lock body scroll while open.
   useEffect(() => {
@@ -29,14 +37,16 @@ export function ImageLightbox({ state, onClose }: Props) {
     return () => { document.body.style.overflow = prev; };
   }, []);
 
-  // Keyboard: ESC closes, ← → reserved for future gallery nav.
+  // Keyboard: ESC closes, ← → navigates.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") closeRef.current();
+      if (e.key === "Escape")     closeRef.current();
+      if (e.key === "ArrowLeft")  setIndex((i) => Math.max(0, i - 1));
+      if (e.key === "ArrowRight") setIndex((i) => Math.min(total - 1, i + 1));
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, []);
+  }, [total]);
 
   if (!attachment) return null;
 
@@ -47,12 +57,10 @@ export function ImageLightbox({ state, onClose }: Props) {
       aria-label="Image viewer"
       className="fixed inset-0 z-[200] flex items-center justify-center"
       style={{
-        // Safe-area padding for notch/home-indicator on iOS.
         paddingTop:    "env(safe-area-inset-top, 16px)",
         paddingBottom: "env(safe-area-inset-bottom, 16px)",
         paddingLeft:   "env(safe-area-inset-left,  16px)",
         paddingRight:  "env(safe-area-inset-right, 16px)",
-        // Allow vertical pan so iOS overscroll doesn't fight the modal.
         touchAction: "pan-y",
         animation: "lbFadeIn 0.18s ease-out both",
       }}
@@ -72,19 +80,51 @@ export function ImageLightbox({ state, onClose }: Props) {
         onClick={onClose}
         aria-label="Close"
         className="absolute right-4 top-4 z-10 flex h-9 w-9 items-center justify-center rounded-full"
-        style={{
-          background: "rgba(255,255,255,0.1)",
-          color: "#fff",
-          backdropFilter: "blur(8px)",
-        }}
+        style={{ background: "rgba(255,255,255,0.1)", color: "#fff", backdropFilter: "blur(8px)" }}
       >
         <X className="h-5 w-5" />
       </button>
+
+      {/* Counter — only when multiple images */}
+      {total > 1 && (
+        <div
+          className="absolute left-1/2 top-4 z-10 -translate-x-1/2 rounded-full px-3 py-1 text-sm font-medium text-white"
+          style={{ background: "rgba(0,0,0,0.45)", backdropFilter: "blur(8px)" }}
+        >
+          {index + 1} / {total}
+        </div>
+      )}
 
       {/* Image centred over backdrop */}
       <div className="relative z-10 flex items-center justify-center">
         <LightboxImage attachment={attachment} />
       </div>
+
+      {/* Prev / next buttons */}
+      {total > 1 && (
+        <>
+          <button
+            type="button"
+            onClick={prev}
+            disabled={!hasPrev}
+            aria-label="Previous image"
+            className="absolute left-4 top-1/2 z-10 -translate-y-1/2 flex h-10 w-10 items-center justify-center rounded-full transition-opacity disabled:opacity-0"
+            style={{ background: "rgba(255,255,255,0.1)", color: "#fff", backdropFilter: "blur(8px)" }}
+          >
+            <ChevronLeft className="h-6 w-6" />
+          </button>
+          <button
+            type="button"
+            onClick={next}
+            disabled={!hasNext}
+            aria-label="Next image"
+            className="absolute right-4 top-1/2 z-10 -translate-y-1/2 flex h-10 w-10 items-center justify-center rounded-full transition-opacity disabled:opacity-0"
+            style={{ background: "rgba(255,255,255,0.1)", color: "#fff", backdropFilter: "blur(8px)" }}
+          >
+            <ChevronRight className="h-6 w-6" />
+          </button>
+        </>
+      )}
     </div>,
     document.body,
   );

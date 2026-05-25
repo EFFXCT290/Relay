@@ -638,8 +638,8 @@ export default function ChatThreadPage() {
                           setEditing(msg);
                         }}
                         onDelete={handleDelete}
-                        onOpenLightbox={(att: MessageAttachment) =>
-                          setLightbox({ images: [att], index: 0 })
+                        onOpenLightbox={(atts: MessageAttachment[], idx: number) =>
+                          setLightbox({ images: atts, index: idx })
                         }
                       />
                     );

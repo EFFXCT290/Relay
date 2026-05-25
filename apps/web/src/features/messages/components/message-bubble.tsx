@@ -28,7 +28,7 @@ type Props = {
   onReply?: (message: Message) => void;
   onEdit?: (message: Message) => void;
   onDelete?: (message: Message) => void;
-  onOpenLightbox?: (attachment: MessageAttachment) => void;
+  onOpenLightbox?: (attachments: MessageAttachment[], index: number) => void;
 };
 
 export function MessageBubble({
