@@ -9,7 +9,7 @@ type Props = {
   onSend: (body: string, replyToId?: string | null) => Promise<void> | void;
   onUpdate?: (messageId: string, body: string) => Promise<void> | void;
   onTypingChange?: (isTyping: boolean) => void;
-  onSendImage?: (file: File) => void;
+  onSendImages?: (files: File[]) => void;
   /** When set, composer renders in reply mode with the parent preview above. */
   replyTo?: Message | null;
   onCancelReply?: () => void;
@@ -25,7 +25,7 @@ export function ChatComposer({
   onSend,
   onUpdate,
   onTypingChange,
-  onSendImage,
+  onSendImages,
   replyTo,
   onCancelReply,
   editing,
@@ -174,17 +174,18 @@ export function ChatComposer({
             ref={fileInputRef}
             type="file"
             accept="image/jpeg,image/png,image/webp"
+            multiple
             className="hidden"
             onChange={(e) => {
-              const file = e.target.files?.[0];
-              if (file) onSendImage?.(file);
+              const files = Array.from(e.target.files ?? []);
+              if (files.length) onSendImages?.(files);
               e.target.value = "";
             }}
           />
           <button
             type="button"
             aria-label="Send image"
-            disabled={!onSendImage || busy || disabled}
+            disabled={!onSendImages || busy || disabled}
             onClick={() => fileInputRef.current?.click()}
             className="mb-1 text-[var(--color-text-secondary)] transition-opacity disabled:opacity-40 hover:text-[var(--color-text)]"
           >

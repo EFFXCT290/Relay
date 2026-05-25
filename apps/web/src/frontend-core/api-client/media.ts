@@ -3,7 +3,7 @@ import { ApiError } from "@/frontend-core/api";
 import type { MediaUploadResponse } from "@relay/contracts";
 
 export const mediaApi = {
-  upload: async (file: File | Blob): Promise<MediaUploadResponse> => {
+  upload: async (file: File | Blob, signal?: AbortSignal): Promise<MediaUploadResponse> => {
     const formData = new FormData();
     formData.append("file", file);
 
@@ -12,6 +12,7 @@ export const mediaApi = {
       method: "POST",
       credentials: "include",
       body: formData,
+      signal,
     });
 
     if (!res.ok) {

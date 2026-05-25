@@ -337,7 +337,7 @@ const messageRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
       schema: {
         params: Type.Object({ conversationId: Type.String({ format: "uuid" }) }),
         body: Type.Object({
-          mediaId:   Type.String(),
+          mediaIds:  Type.Array(Type.String(), { minItems: 1, maxItems: 10 }),
           replyToId: Type.Optional(Type.Union([Type.String({ format: "uuid" }), Type.Null()])),
         }),
         response: {
@@ -379,14 +379,19 @@ const messageRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
     async (request, reply) => {
       const callerId = request.userId!;
       const { conversationId } = request.params;
-      const { mediaId, replyToId } = request.body;
+      const { mediaIds, replyToId } = request.body;
 
-      const conv = await assertParticipant(fastify, callerId, conversationId);
+      await assertParticipant(fastify, callerId, conversationId);
 
-      // Verify the media belongs to the caller
-      const media = await fastify.prisma.media.findUnique({ where: { id: mediaId } });
-      if (!media) throw new ProblemError("not_found", "Media not found.");
-      if (media.uploaderId !== callerId) throw new ProblemError("forbidden", "Not your media.");
+      // Verify all media belong to the caller
+      const mediaItems = await fastify.prisma.media.findMany({
+        where: { id: { in: mediaIds } },
+      });
+      if (mediaItems.length !== mediaIds.length) {
+        throw new ProblemError("not_found", "One or more media items not found.");
+      }
+      const forbidden = mediaItems.find((m) => m.uploaderId !== callerId);
+      if (forbidden) throw new ProblemError("forbidden", "Not your media.");
 
       if (replyToId) {
         const parent = await fastify.prisma.message.findUnique({
@@ -408,8 +413,8 @@ const messageRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
         otherIds.every((uid) => (fastify.io.sockets.adapter.rooms.get(`user:${uid}`)?.size ?? 0) > 0);
       const deliveredAt = allRecipientsOnline ? new Date() : null;
 
-      const attachmentId = randomUUID();
-
+      // Create message + all attachment rows in a single transaction.
+      const attachmentRecords: { id: string; mediaId: string }[] = [];
       const created = await fastify.prisma.$transaction(async (tx) => {
         const msg = await tx.message.create({
           data: {
@@ -425,9 +430,13 @@ const messageRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
             sender:  { select: { username: true } },
           },
         });
-        await tx.messageAttachment.create({
-          data: { id: attachmentId, messageId: msg.id, mediaId, type: "image" },
-        });
+        for (const mediaId of mediaIds) {
+          const id = randomUUID();
+          await tx.messageAttachment.create({
+            data: { id, messageId: msg.id, mediaId, type: "image" },
+          });
+          attachmentRecords.push({ id, mediaId });
+        }
         await tx.conversation.update({
           where: { id: conversationId },
           data: { updatedAt: new Date() },
@@ -435,28 +444,31 @@ const messageRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
         return msg;
       });
 
-      const signedUrl  = await fastify.getMediaUrl(media.storageKey);
-      const blurUrl    = media.blurStorageKey  ? await fastify.getMediaUrl(media.blurStorageKey)  : null;
-      const thumbUrl   = media.thumbStorageKey ? await fastify.getMediaUrl(media.thumbStorageKey) : null;
-
-      const attachment = {
-        id:   attachmentId,
-        type: "image" as const,
-        media: {
-          id:          media.id,
-          url:         signedUrl,
-          blurUrl,
-          thumbUrl,
-          width:       media.width,
-          height:      media.height,
-          blurWidth:   media.blurWidth,
-          blurHeight:  media.blurHeight,
-          thumbWidth:  media.thumbWidth,
-          thumbHeight: media.thumbHeight,
-          mimeType:    media.mimeType,
-          sizeBytes:   media.sizeBytes,
-        },
-      };
+      // Sign URLs for all attachments in parallel.
+      const mediaMap = new Map(mediaItems.map((m) => [m.id, m]));
+      const attachments = await Promise.all(
+        attachmentRecords.map(async ({ id, mediaId }) => {
+          const media = mediaMap.get(mediaId)!;
+          return {
+            id,
+            type: "image" as const,
+            media: {
+              id:          media.id,
+              url:         await fastify.getMediaUrl(media.storageKey),
+              blurUrl:     media.blurStorageKey  ? await fastify.getMediaUrl(media.blurStorageKey)  : null,
+              thumbUrl:    media.thumbStorageKey ? await fastify.getMediaUrl(media.thumbStorageKey) : null,
+              width:       media.width,
+              height:      media.height,
+              blurWidth:   media.blurWidth,
+              blurHeight:  media.blurHeight,
+              thumbWidth:  media.thumbWidth,
+              thumbHeight: media.thumbHeight,
+              mimeType:    media.mimeType,
+              sizeBytes:   media.sizeBytes,
+            },
+          };
+        }),
+      );
 
       const httpPayload = {
         messageId:      created.id,
@@ -476,7 +488,7 @@ const messageRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
         readBy:      [] as { userId: string; readAt: string }[],
         deliveredAt: created.deliveredAt ? created.deliveredAt.toISOString() : null,
         createdAt:   created.createdAt.toISOString(),
-        attachments: [attachment],
+        attachments,
       };
 
       const broadcastMessage = {

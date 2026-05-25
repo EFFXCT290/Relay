@@ -48,6 +48,20 @@ export function ImageLightbox({ state, onClose }: Props) {
     return () => document.removeEventListener("keydown", onKey);
   }, [total]);
 
+  // Preload adjacent originals in the background so swipes feel instant.
+  useEffect(() => {
+    const urls = [
+      state.images[index - 1]?.media.url,
+      state.images[index + 1]?.media.url,
+    ].filter((u): u is string => !!u);
+    const imgs = urls.map((url) => {
+      const img = new window.Image();
+      img.src = url;
+      return img;
+    });
+    return () => { imgs.forEach((img) => { img.src = ""; }); };
+  }, [index, state.images]);
+
   if (!attachment) return null;
 
   return createPortal(

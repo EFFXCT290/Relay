@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { ArrowLeft, MoreHorizontal } from "lucide-react";
@@ -52,14 +53,14 @@ export default function ChatThreadPage() {
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [loadingOlder, setLoadingOlder] = useState(false);
 
-  type PendingUpload = {
-    localId: string;
-    blobUrl: string;
-    status:  "uploading" | "sending";
-    width?:  number;
-    height?: number;
+  type PendingBatch = {
+    batchId:  string;
+    files:    File[];
+    previews: { localId: string; blobUrl: string }[];
+    status:   "uploading" | "sending" | "error";
   };
-  const [pendingUploads, setPendingUploads] = useState<PendingUpload[]>([]);
+  const [pendingBatches, setPendingBatches] = useState<PendingBatch[]>([]);
+  const batchControllersRef = useRef(new Map<string, AbortController>());
   const [lightbox, setLightbox] = useState<LightboxState | null>(null);
 
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -333,11 +334,6 @@ export default function ChatThreadPage() {
     return () => el.removeEventListener("scroll", onScroll);
   }, []);
 
-  useEffect(() => {
-    const el = scrollRef.current;
-    if (!el) return;
-    if (stickToBottomRef.current) el.scrollTop = el.scrollHeight;
-  }, [messages, partnerTyping]);
 
   // Infinite scroll up — when scrolled near the top, fetch one more page.
   // Anchor preservation: capture scrollHeight before prepend, then shift
@@ -466,56 +462,145 @@ export default function ChatThreadPage() {
     [conversationId],
   );
 
-  const handleSendImage = useCallback(
-    async (file: File) => {
-      const localId = crypto.randomUUID();
-      const blobUrl = URL.createObjectURL(file);
+  const handleSendImages = useCallback(
+    async (files: File[]) => {
+      if (!files.length) return;
+      const batchId  = crypto.randomUUID();
+      const previews = files.map((f) => ({ localId: crypto.randomUUID(), blobUrl: URL.createObjectURL(f) }));
+      const controller = new AbortController();
+      batchControllersRef.current.set(batchId, controller);
+
+      setPendingBatches((prev) => [...prev, { batchId, files, previews, status: "uploading" }]);
       stickToBottomRef.current = true;
 
-      setPendingUploads((prev) => [...prev, { localId, blobUrl, status: "uploading" }]);
-
+      let succeeded = false;
+      let aborted   = false;
       try {
-        const compressed = await imageCompression(file, {
-          maxSizeMB:        1,
-          maxWidthOrHeight: 1920,
-          useWebWorker:     true,
-          initialQuality:   0.84,
-        });
+        const compressed = await Promise.all(
+          files.map((f) =>
+            imageCompression(f, { maxSizeMB: 1, maxWidthOrHeight: 1920, useWebWorker: true, initialQuality: 0.84 }),
+          ),
+        );
+        if (controller.signal.aborted) { aborted = true; return; }
 
-        const { mediaId } = await mediaApi.upload(compressed);
+        const mediaIds = await Promise.all(
+          compressed.map((f) => mediaApi.upload(f, controller.signal).then((r) => r.mediaId)),
+        );
 
-        setPendingUploads((prev) =>
-          prev.map((p) => (p.localId === localId ? { ...p, status: "sending" } : p)),
+        setPendingBatches((prev) =>
+          prev.map((b) => (b.batchId === batchId ? { ...b, status: "sending" } : b)),
         );
 
         await api(`/api/conversations/${conversationId}/messages/media`, {
           method: "POST",
-          body:   { mediaId },
+          body:   { mediaIds },
         });
 
-        // The message:new socket event adds the real message; remove the optimistic one.
-        setPendingUploads((prev) => prev.filter((p) => p.localId !== localId));
+        // The message:new socket event adds the real message; remove the optimistic batch.
+        setPendingBatches((prev) => prev.filter((b) => b.batchId !== batchId));
+        succeeded = true;
       } catch (err) {
-        setPendingUploads((prev) => prev.filter((p) => p.localId !== localId));
-        setError(err instanceof Error ? err.message : "Failed to send image");
+        if (err instanceof Error && err.name === "AbortError") {
+          aborted = true;
+          setPendingBatches((prev) => prev.filter((b) => b.batchId !== batchId));
+        } else {
+          setPendingBatches((prev) =>
+            prev.map((b) => (b.batchId === batchId ? { ...b, status: "error" } : b)),
+          );
+        }
       } finally {
-        URL.revokeObjectURL(blobUrl);
+        batchControllersRef.current.delete(batchId);
+        if (succeeded || aborted) previews.forEach((p) => URL.revokeObjectURL(p.blobUrl));
       }
     },
     [conversationId],
   );
 
-  const grouped = useMemo(() => {
-    if (!messages) return null;
-    const groups: { label: string; items: Message[] }[] = [];
+  const handleCancelBatch = useCallback((batchId: string) => {
+    batchControllersRef.current.get(batchId)?.abort();
+    setPendingBatches((prev) => {
+      const batch = prev.find((b) => b.batchId === batchId);
+      if (batch) batch.previews.forEach((p) => URL.revokeObjectURL(p.blobUrl));
+      return prev.filter((b) => b.batchId !== batchId);
+    });
+  }, []);
+
+  const handleRetryBatch = useCallback(
+    (batchId: string) => {
+      const batch = pendingBatches.find((b) => b.batchId === batchId);
+      if (!batch || batch.status !== "error") return;
+      const { files } = batch;
+      setPendingBatches((prev) => {
+        const b = prev.find((x) => x.batchId === batchId);
+        if (b) b.previews.forEach((p) => URL.revokeObjectURL(p.blobUrl));
+        return prev.filter((b) => b.batchId !== batchId);
+      });
+      void handleSendImages(files);
+    },
+    [pendingBatches, handleSendImages],
+  );
+
+  type VirtualRow =
+    | { kind: "loader" }
+    | { kind: "separator"; label: string }
+    | { kind: "message"; message: Message }
+    | { kind: "pending"; batch: PendingBatch }
+    | { kind: "typing" };
+
+  const flatRows = useMemo((): VirtualRow[] => {
+    if (!messages) return [];
+    const rows: VirtualRow[] = [];
+    if (loadingOlder) rows.push({ kind: "loader" });
+    let lastLabel = "";
     for (const m of messages) {
       const label = dayLabel(m.createdAt);
-      const last = groups[groups.length - 1];
-      if (last && last.label === label) last.items.push(m);
-      else groups.push({ label, items: [m] });
+      if (label !== lastLabel) { rows.push({ kind: "separator", label }); lastLabel = label; }
+      rows.push({ kind: "message", message: m });
     }
-    return groups;
-  }, [messages]);
+    for (const batch of pendingBatches) rows.push({ kind: "pending", batch });
+    if (partnerTyping) rows.push({ kind: "typing" });
+    return rows;
+  }, [messages, loadingOlder, pendingBatches, partnerTyping]);
+
+  const virtualizer = useVirtualizer({
+    count:           flatRows.length,
+    getScrollElement: () => scrollRef.current,
+    estimateSize:    (i) => {
+      const row = flatRows[i];
+      if (!row) return 68;
+      switch (row.kind) {
+        case "loader":    return 48;
+        case "separator": return 48;
+        case "typing":    return 68;
+        case "pending": {
+          const n = row.batch.previews.length;
+          return n === 1 ? 188 : n <= 3 ? 220 : 160;
+        }
+        case "message": {
+          const msg = row.message;
+          if (msg.isDeleted) return 60;
+          if (msg.attachments?.length) {
+            const n = msg.attachments.length;
+            return n === 1 ? 280 : n <= 3 ? 220 : 160;
+          }
+          if (msg.embed) return 168;
+          const len = msg.body?.length ?? 0;
+          return Math.min(76 + Math.ceil(len / 40) * 22, 320);
+        }
+      }
+    },
+    overscan:     5,
+    paddingStart: 16,
+    paddingEnd:   16,
+  });
+
+  // Stick to bottom on new rows.
+  useEffect(() => {
+    if (stickToBottomRef.current && flatRows.length > 0) {
+      const el = scrollRef.current;
+      if (el) el.scrollTop = el.scrollHeight;
+    }
+  }, [flatRows.length]);
 
   return (
     <div className="flex h-dvh flex-col lg:h-[100dvh]">
@@ -576,91 +661,89 @@ export default function ChatThreadPage() {
         </button>
       </header>
 
-      {/* Message scroll */}
+      {/* Message scroll — virtualized */}
       <div ref={scrollRef} className="flex-1 overflow-y-auto" style={{ touchAction: "pan-y" }}>
-        <div className="flex w-full flex-col gap-2 px-4 py-4 lg:px-8 xl:px-12">
-          {grouped === null ? (
-            <div className="flex items-center justify-center py-12">
-              <span
-                className="text-[11px] uppercase tracking-[0.18em] text-[var(--color-text-muted)]"
-                style={{ fontFamily: mono }}
-              >
-                loading
-              </span>
-            </div>
-          ) : grouped.length === 0 ? (
-            <div className="flex flex-col items-center gap-2 py-12 text-center">
-              <span
-                className="text-[11px] uppercase tracking-[0.18em] text-[var(--color-text-muted)]"
-                style={{ fontFamily: mono }}
-              >
-                empty thread
-              </span>
-              <p className="max-w-[260px] text-sm text-[var(--color-text-secondary)]">
-                Say hi to <span className="text-[var(--color-text)]">@{detail?.participant.username}</span>. Messages stay between the two of you.
-              </p>
-            </div>
-          ) : (
-            <>
-              {loadingOlder && (
-                <div className="flex items-center justify-center py-3">
-                  <span
-                    className="text-[10px] uppercase tracking-[0.18em] text-[var(--color-text-muted)]"
-                    style={{ fontFamily: mono }}
-                  >
-                    loading older
-                  </span>
-                </div>
-              )}
-              {grouped.map((group) => (
-                <div key={group.label} className="flex flex-col gap-2">
-                  <DaySeparator date={group.label} />
-                  {group.items.map((m) => {
-                    const partnerRead =
-                      m.senderId === meId && detail
-                        ? m.readBy.find((r) => r.userId === detail.participant.userId)
-                        : undefined;
+        {messages === null ? (
+          <div className="flex items-center justify-center py-12">
+            <span className="text-[11px] uppercase tracking-[0.18em] text-[var(--color-text-muted)]" style={{ fontFamily: mono }}>
+              loading
+            </span>
+          </div>
+        ) : messages.length === 0 && !pendingBatches.length && !partnerTyping ? (
+          <div className="flex flex-col items-center gap-2 py-12 text-center">
+            <span className="text-[11px] uppercase tracking-[0.18em] text-[var(--color-text-muted)]" style={{ fontFamily: mono }}>
+              empty thread
+            </span>
+            <p className="max-w-[260px] text-sm text-[var(--color-text-secondary)]">
+              Say hi to <span className="text-[var(--color-text)]">@{detail?.participant.username}</span>. Messages stay between the two of you.
+            </p>
+          </div>
+        ) : (
+          <div style={{ height: virtualizer.getTotalSize(), position: "relative" }}>
+            {virtualizer.getVirtualItems().map((vi) => {
+              const row = flatRows[vi.index];
+              if (!row) return null;
+              return (
+                <div
+                  key={vi.key}
+                  data-index={vi.index}
+                  ref={virtualizer.measureElement}
+                  style={{ position: "absolute", top: vi.start, left: 0, width: "100%" }}
+                  className="px-4 pt-2 lg:px-8 xl:px-12"
+                >
+                  {row.kind === "loader" && (
+                    <div className="flex items-center justify-center py-3">
+                      <span className="text-[10px] uppercase tracking-[0.18em] text-[var(--color-text-muted)]" style={{ fontFamily: mono }}>
+                        loading older
+                      </span>
+                    </div>
+                  )}
+                  {row.kind === "separator" && <DaySeparator date={row.label} />}
+                  {row.kind === "message" && (() => {
+                    const m = row.message;
+                    const isMine = m.senderId === meId;
+                    const partnerRead = isMine && detail
+                      ? m.readBy.find((r) => r.userId === detail.participant.userId)
+                      : undefined;
                     return (
-                      <MessageBubble
-                        key={m.messageId}
-                        message={m}
-                        isMine={m.senderId === meId}
-                        showReadReceipt={m.senderId === meId}
-                        readAt={partnerRead?.readAt ?? null}
-                        deliveredAt={m.senderId === meId ? m.deliveredAt : null}
-                        onReact={handleReact}
-                        onReply={(msg) => {
-                          setEditing(null);
-                          setReplyTo(msg);
-                        }}
-                        onEdit={(msg) => {
-                          setReplyTo(null);
-                          setEditing(msg);
-                        }}
-                        onDelete={handleDelete}
-                        onOpenLightbox={(atts: MessageAttachment[], idx: number) =>
-                          setLightbox({ images: atts, index: idx })
-                        }
-                      />
+                      <div className={isMine ? "flex justify-end" : "flex justify-start"}>
+                        <MessageBubble
+                          message={m}
+                          isMine={isMine}
+                          showReadReceipt={isMine}
+                          readAt={partnerRead?.readAt ?? null}
+                          deliveredAt={isMine ? m.deliveredAt : null}
+                          onReact={handleReact}
+                          onReply={(msg) => { setEditing(null); setReplyTo(msg); }}
+                          onEdit={(msg) => { setReplyTo(null); setEditing(msg); }}
+                          onDelete={handleDelete}
+                          onOpenLightbox={(atts: MessageAttachment[], idx: number) =>
+                            setLightbox({ images: atts, index: idx })
+                          }
+                        />
+                      </div>
                     );
-                  })}
+                  })()}
+                  {row.kind === "pending" && (
+                    <div className="flex justify-end">
+                      <UploadPreview
+                        previews={row.batch.previews}
+                        status={row.batch.status}
+                        onCancel={() => handleCancelBatch(row.batch.batchId)}
+                        onRetry={() => handleRetryBatch(row.batch.batchId)}
+                      />
+                    </div>
+                  )}
+                  {row.kind === "typing" && (
+                    <div className="flex justify-start">
+                      <TypingBubble username={detail?.participant.username} />
+                    </div>
+                  )}
                 </div>
-              ))}
-            </>
-          )}
-          {pendingUploads.map((p) => (
-            <div key={p.localId} className="flex flex-col items-end gap-1 self-end">
-              <UploadPreview
-                blobUrl={p.blobUrl}
-                status={p.status}
-                isMine
-                width={p.width}
-                height={p.height}
-              />
-            </div>
-          ))}
-          {partnerTyping && <TypingBubble username={detail?.participant.username} />}
-        </div>
+              );
+            })}
+          </div>
+        )}
       </div>
 
       {error && (
@@ -699,7 +782,7 @@ export default function ChatThreadPage() {
           onSend={handleSend}
           onUpdate={handleUpdate}
           onTypingChange={handleTypingChange}
-          onSendImage={handleSendImage}
+          onSendImages={handleSendImages}
           replyTo={replyTo}
           onCancelReply={() => setReplyTo(null)}
           editing={editing}
