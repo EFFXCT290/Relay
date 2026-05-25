@@ -11,6 +11,23 @@ export const MediaUploadResponseSchema = Type.Object({
 });
 export type MediaUploadResponse = Static<typeof MediaUploadResponseSchema>;
 
+// ── Realtime events ───────────────────────────────────────────────────────────
+export const MEDIA_EVENTS = {
+  READY: "media:ready",
+} as const;
+export type MediaEventName = (typeof MEDIA_EVENTS)[keyof typeof MEDIA_EVENTS];
+
+// Emitted by the worker once blur/thumb variants are ready.
+export type MediaReadyEvent = {
+  mediaId:    string;
+  blurUrl:    string | null;
+  thumbUrl:   string | null;
+  blurWidth:  number | null;
+  blurHeight: number | null;
+  thumbWidth:  number | null;
+  thumbHeight: number | null;
+};
+
 // ── Attachment shape (embedded in MessageSchema.attachments) ──────────────────
 export const MessageAttachmentSchema = Type.Object({
   id:   Type.String(),

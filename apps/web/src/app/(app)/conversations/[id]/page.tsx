@@ -19,7 +19,7 @@ import { ChatComposer } from "@/features/messages/components/chat-composer";
 import { UploadPreview } from "@/features/messages/components/upload-preview";
 import { mediaApi } from "@/frontend-core/api-client/media";
 import { ImageLightbox, type LightboxState } from "@/features/messages/components/lightbox/image-lightbox";
-import type { MessageAttachment } from "@relay/contracts";
+import { MEDIA_EVENTS, type MediaReadyEvent, type MessageAttachment } from "@relay/contracts";
 
 const PAGE_SIZE = 30;
 
@@ -280,6 +280,33 @@ export default function ChatThreadPage() {
       );
     };
 
+    const onMediaReady = (payload: MediaReadyEvent) => {
+      setMessages((prev) =>
+        prev?.map((m) => {
+          if (!m.attachments?.some((a) => a.media.id === payload.mediaId)) return m;
+          return {
+            ...m,
+            attachments: m.attachments.map((a) =>
+              a.media.id !== payload.mediaId
+                ? a
+                : {
+                    ...a,
+                    media: {
+                      ...a.media,
+                      blurUrl:    payload.blurUrl,
+                      thumbUrl:   payload.thumbUrl,
+                      blurWidth:  payload.blurWidth,
+                      blurHeight: payload.blurHeight,
+                      thumbWidth:  payload.thumbWidth,
+                      thumbHeight: payload.thumbHeight,
+                    },
+                  },
+            ),
+          };
+        }) ?? null,
+      );
+    };
+
     socket.on("message:new", onMessageNew);
     socket.on("message:edited", onMessageEdited);
     socket.on("message:deleted", onMessageDeleted);
@@ -290,6 +317,7 @@ export default function ChatThreadPage() {
     socket.on("typing:update", onTypingUpdate);
     socket.on("presence:online", onPresenceOnline);
     socket.on("presence:offline", onPresenceOffline);
+    socket.on(MEDIA_EVENTS.READY, onMediaReady);
 
     return () => {
       socket.emit("conversation:leave", { conversationId });
@@ -303,6 +331,7 @@ export default function ChatThreadPage() {
       socket.off("typing:update", onTypingUpdate);
       socket.off("presence:online", onPresenceOnline);
       socket.off("presence:offline", onPresenceOffline);
+      socket.off(MEDIA_EVENTS.READY, onMediaReady);
     };
   }, [conversationId]);
 

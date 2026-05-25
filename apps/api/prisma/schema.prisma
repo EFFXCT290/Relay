@@ -165,6 +165,7 @@ model Media {
   blurHeight      Int?
   thumbWidth      Int?
   thumbHeight     Int?
+  status          String   @default("ready")  // "processing" | "ready" | "failed"
   createdAt       DateTime @default(now())
 
   uploader    User                @relation(fields: [uploaderId], references: [id])

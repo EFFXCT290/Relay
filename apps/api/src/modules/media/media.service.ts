@@ -7,6 +7,7 @@ import type { PrismaClient } from "@prisma/client";
 import { createMediaRepository } from "./media.repository.js";
 import { buildMediaKey } from "./media.keys.js";
 import { env } from "../../backend-core/runtime/env.js";
+import { mediaQueue, PROCESS_IMAGE_JOB } from "../../queues/media.queue.js";
 import type { UploadedMedia } from "./media.types.js";
 
 const ALLOWED_MIME = new Set(["image/jpeg", "image/png", "image/webp", "image/heic"]);
@@ -32,8 +33,7 @@ export async function uploadImage(
     throw Object.assign(new Error("File too large"), { code: "too_large" });
   }
 
-  // .rotate() corrects EXIF orientation on all variants — without it iPhone
-  // photos randomly appear rotated. Must be the first operation in every pipeline.
+  // .rotate() corrects EXIF orientation — must be first in every pipeline.
   let width:  number | null = null;
   let height: number | null = null;
   try {
@@ -44,53 +44,12 @@ export async function uploadImage(
     // Non-fatal — dimensions are optional
   }
 
-  // Blur placeholder: tiny (~few hundred bytes), intentionally blurry JPEG the
-  // client paints instantly while thumb loads. Never displayed sharp.
-  let blurBuffer: Buffer | null = null;
-  let blurWidth:  number | null = null;
-  let blurHeight: number | null = null;
-  try {
-    blurBuffer = await sharp(buffer)
-      .rotate()
-      .resize(32)
-      .blur()
-      .jpeg({ quality: 40 })
-      .toBuffer();
-    const blurMeta = await sharp(blurBuffer).metadata();
-    blurWidth  = blurMeta.width  ?? null;
-    blurHeight = blurMeta.height ?? null;
-  } catch {
-    blurBuffer = null;
-  }
-
-  // Thumbnail: max 480px long edge, high quality — used in chat bubbles.
-  // The original is reserved for lightbox/fullscreen only.
-  let thumbBuffer: Buffer | null = null;
-  let thumbWidth:  number | null = null;
-  let thumbHeight: number | null = null;
-  try {
-    thumbBuffer = await sharp(buffer)
-      .rotate()
-      .resize({ width: 480, height: 480, fit: "inside", withoutEnlargement: true })
-      .jpeg({ quality: 82 })
-      .toBuffer();
-    const thumbMeta = await sharp(thumbBuffer).metadata();
-    thumbWidth  = thumbMeta.width  ?? null;
-    thumbHeight = thumbMeta.height ?? null;
-  } catch {
-    thumbBuffer = null;
-  }
-
   const mediaId    = randomUUID();
   const ext        = MIME_TO_EXT[mimeType] ?? ".jpg";
   const storageKey = buildMediaKey({ kind: "images", id: mediaId, variant: "original", ext });
-  const blurKey    = blurBuffer
-    ? buildMediaKey({ kind: "images", id: mediaId, variant: "blur",  ext: ".jpg" })
-    : null;
-  const thumbKey   = thumbBuffer
-    ? buildMediaKey({ kind: "images", id: mediaId, variant: "thumb", ext: ".jpg" })
-    : null;
 
+  // Upload original — the only synchronous MinIO operation in the request path.
+  // Variant generation (blur, thumb) happens asynchronously in the media worker.
   await s3.send(new PutObjectCommand({
     Bucket:        env.MINIO_BUCKET,
     Key:           storageKey,
@@ -99,41 +58,25 @@ export async function uploadImage(
     ContentLength: buffer.length,
   }));
 
-  if (blurBuffer && blurKey) {
-    await s3.send(new PutObjectCommand({
-      Bucket:        env.MINIO_BUCKET,
-      Key:           blurKey,
-      Body:          blurBuffer,
-      ContentType:   "image/jpeg",
-      ContentLength: blurBuffer.length,
-    }));
-  }
-
-  if (thumbBuffer && thumbKey) {
-    await s3.send(new PutObjectCommand({
-      Bucket:        env.MINIO_BUCKET,
-      Key:           thumbKey,
-      Body:          thumbBuffer,
-      ContentType:   "image/jpeg",
-      ContentLength: thumbBuffer.length,
-    }));
-  }
-
   const repo  = createMediaRepository(prisma);
   const media = await repo.createMedia({
     id: mediaId,
     uploaderId,
     storageKey,
-    blurStorageKey:  blurKey,
-    thumbStorageKey: thumbKey,
     mimeType,
     sizeBytes: buffer.length,
     width,
     height,
-    blurWidth,
-    blurHeight,
-    thumbWidth,
-    thumbHeight,
+    status: "processing",
+  });
+
+  // Enqueue variant generation — worker produces blur + thumb, updates DB,
+  // then emits media:ready over the socket.
+  await mediaQueue.add(PROCESS_IMAGE_JOB, {
+    mediaId,
+    storageKey,
+    mimeType,
+    uploaderId,
   });
 
   return {

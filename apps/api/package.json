@@ -29,6 +29,7 @@
     "@relay/contracts": "workspace:*",
     "@sinclair/typebox": "^0.34.11",
     "argon2": "^0.41.1",
+    "bullmq": "^5.77.2",
     "fastify": "^5.1.0",
     "fastify-plugin": "^5.0.1",
     "ioredis": "^5.4.1",

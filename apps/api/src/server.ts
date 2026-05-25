@@ -20,6 +20,7 @@ import redisPlugin from "./plugins/redis.js";
 import authPlugin from "./plugins/auth.js";
 import socketPlugin from "./plugins/socket.js";
 import minioPlugin from "./plugins/minio.js";
+import { createMediaWorker } from "./queues/media.worker.js";
 
 import healthRoutes from "./modules/health/health.routes.js";
 import mediaRoutes from "./modules/media/media.routes.js";
@@ -70,6 +71,18 @@ export async function buildServer() {
   await app.register(authPlugin);
   await app.register(socketPlugin);
   await app.register(minioPlugin);
+
+  // Start the in-process media worker after all plugins are registered so it
+  // has access to prisma, s3, and io. Closed automatically in onClose below.
+  const mediaWorker = createMediaWorker({
+    s3:     app.s3,
+    prisma: app.prisma,
+    io:     app.io,
+    log:    app.log,
+  });
+  app.addHook("onClose", async () => {
+    await mediaWorker.close();
+  });
   await app.register(multipart, {
     limits: { fileSize: env.MEDIA_MAX_SIZE_MB * 1024 * 1024 },
   });
