@@ -71,7 +71,7 @@ const messageRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
           reactions:   { select: { emoji: true, userId: true } },
           reads:       { select: { readerId: true, readAt: true } },
           embed:       true,
-          attachments: { include: { media: true } },
+          attachments: { include: { media: { include: { variants: true } } } },
         },
         orderBy: { createdAt: "desc" },
         take: limit + 1,
@@ -351,7 +351,7 @@ const messageRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
             messageId:      Type.String({ format: "uuid" }),
             conversationId: Type.String({ format: "uuid" }),
             senderId:       Type.String({ format: "uuid" }),
-            type:           Type.Union([Type.Literal("IMAGE"), Type.Literal("AUDIO")]),
+            type:           Type.Union([Type.Literal("IMAGE"), Type.Literal("VIDEO"), Type.Literal("AUDIO")]),
             body:           Type.Null(),
             replyTo:        Type.Union([Type.Null(), Type.Object({ messageId: Type.String(), preview: Type.Union([Type.String(), Type.Null()]), type: Type.String() })]),
             reactions:      Type.Record(Type.String(), Type.Integer()),
@@ -375,6 +375,7 @@ const messageRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
       // Verify all media belong to the caller
       const mediaItems = await fastify.prisma.media.findMany({
         where: { id: { in: mediaIds } },
+        include: { variants: true },   // video attachments resolve stream/poster/thumb from variants
       });
       if (mediaItems.length !== mediaIds.length) {
         throw new ProblemError("not_found", "One or more media items not found.");
@@ -382,12 +383,15 @@ const messageRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
       const forbidden = mediaItems.find((m) => m.uploaderId !== callerId);
       if (forbidden) throw new ProblemError("forbidden", "Not your media.");
 
-      // Per-media attachment kind, derived from stored MIME. A batch that is all
-      // voice becomes an AUDIO message; anything else stays IMAGE (voice notes
-      // are sent on their own from the recorder, so the mixed case is moot).
+      // Per-media attachment kind, derived from stored MIME. An all-voice batch
+      // becomes AUDIO, all-video becomes VIDEO; anything else stays IMAGE (voice
+      // notes are sent on their own from the recorder, so mixing is rare).
       const mediaMap   = new Map(mediaItems.map((m) => [m.id, m]));
       const kindFor    = (mediaId: string) => mediaKindFromMime(mediaMap.get(mediaId)!.mimeType) ?? "image";
-      const messageType: "IMAGE" | "AUDIO" = mediaIds.every((id) => kindFor(id) === "voice") ? "AUDIO" : "IMAGE";
+      const messageType: "IMAGE" | "AUDIO" | "VIDEO" =
+          mediaIds.every((id) => kindFor(id) === "voice") ? "AUDIO"
+        : mediaIds.every((id) => kindFor(id) === "video") ? "VIDEO"
+        :                                                   "IMAGE";
 
       if (replyToId) {
         const parent = await fastify.prisma.message.findUnique({

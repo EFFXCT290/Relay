@@ -67,16 +67,28 @@ async function parseResponse<T>(res: Response): Promise<T> {
   return data as T;
 }
 
-async function silentRefresh(base: string): Promise<boolean> {
-  try {
-    const res = await fetch(`${base}/api/auth/refresh`, {
-      method: "POST",
-      credentials: "include",
-    });
-    return res.ok;
-  } catch {
-    return false;
-  }
+// Single-flight: when several requests 401 at once (e.g. a burst after the
+// access token lapses mid-session), they must share ONE refresh. Firing parallel
+// POST /api/auth/refresh races rotating refresh tokens — the first rotates the
+// cookie, the rest 401 on a now-stale token. Coalescing into one in-flight
+// promise removes that race (and the console-noise burst).
+let refreshInFlight: Promise<boolean> | null = null;
+
+function silentRefresh(base: string): Promise<boolean> {
+  refreshInFlight ??= (async () => {
+    try {
+      const res = await fetch(`${base}/api/auth/refresh`, {
+        method: "POST",
+        credentials: "include",
+      });
+      return res.ok;
+    } catch {
+      return false;
+    } finally {
+      refreshInFlight = null;
+    }
+  })();
+  return refreshInFlight;
 }
 
 export async function api<T>(path: string, opts: RequestOptions = {}): Promise<T> {

@@ -52,6 +52,13 @@ export const env = {
   // Whisper is CPU-bound; on a small VPS (few ARM cores, no GPU) keep this at
   // 1–2 so concurrent voice uploads don't starve API/socket/Redis latency.
   VOICE_TRANSCRIBE_CONCURRENCY: int("VOICE_TRANSCRIBE_CONCURRENCY", 2),
+
+  // H.264 transcoding (Phase 6B) is the heaviest CPU task — keep concurrency at
+  // 1 on a small VPS so one big video can't saturate every core. CRF 20–22
+  // hits ~85–95% perceptual quality at reasonable cost; preset trades CPU↔size.
+  VIDEO_TRANSCODE_CONCURRENCY: int("VIDEO_TRANSCODE_CONCURRENCY", 1),
+  VIDEO_H264_CRF:    int("VIDEO_H264_CRF", 21),
+  VIDEO_H264_PRESET: optional("VIDEO_H264_PRESET", "medium"),
 } as const;
 
 export const isProd = env.NODE_ENV === "production";

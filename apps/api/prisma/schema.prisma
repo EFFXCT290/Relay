@@ -23,7 +23,7 @@ model User {
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
-  sentMessages  Message[]        @relation("SentMessages")
+  sentMessages  Message[]      @relation("SentMessages")
   conversations Participant[]
   notifications Notification[]
   uploadedMedia Media[]
@@ -70,32 +70,32 @@ model Participant {
 }
 
 model Message {
-  id             String      @id @default(uuid())
-  conversationId String
-  senderId       String
-  type           MessageType
-  body           String?
-  replyToId      String?
-  isEdited       Boolean     @default(false)
-  editedAt       DateTime?
-  isDeleted      Boolean     @default(false)
-  deletedAt      DateTime?
-  deliveredAt    DateTime?
-  clientMessageId String?                    // client-generated UUID for idempotent sends
-  createdAt      DateTime    @default(now())
+  id              String      @id @default(uuid())
+  conversationId  String
+  senderId        String
+  type            MessageType
+  body            String?
+  replyToId       String?
+  isEdited        Boolean     @default(false)
+  editedAt        DateTime?
+  isDeleted       Boolean     @default(false)
+  deletedAt       DateTime?
+  deliveredAt     DateTime?
+  clientMessageId String? // client-generated UUID for idempotent sends
+  createdAt       DateTime    @default(now())
 
-  conversation  Conversation       @relation(fields: [conversationId], references: [id], onDelete: Cascade)
-  sender        User               @relation("SentMessages", fields: [senderId], references: [id])
-  replyTo       Message?           @relation("Replies", fields: [replyToId], references: [id])
-  replies       Message[]          @relation("Replies")
-  attachments   MessageAttachment[]
-  reads         MessageRead[]
-  reactions     Reaction[]
-  embed         MessageEmbed?
+  conversation Conversation        @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  sender       User                @relation("SentMessages", fields: [senderId], references: [id])
+  replyTo      Message?            @relation("Replies", fields: [replyToId], references: [id])
+  replies      Message[]           @relation("Replies")
+  attachments  MessageAttachment[]
+  reads        MessageRead[]
+  reactions    Reaction[]
+  embed        MessageEmbed?
 
+  @@unique([senderId, clientMessageId])
   @@index([conversationId, createdAt])
   @@index([senderId])
-  @@unique([senderId, clientMessageId])
 }
 
 model MessageEmbed {
@@ -124,7 +124,7 @@ model Reaction {
   message Message @relation(fields: [messageId], references: [id], onDelete: Cascade)
   user    User    @relation(fields: [userId], references: [id])
 
-  @@unique([messageId, userId])   // one reaction per user per message; second tap toggles
+  @@unique([messageId, userId]) // one reaction per user per message; second tap toggles
   @@index([messageId])
 }
 
@@ -154,38 +154,136 @@ model MessageRead {
 // ────────────────────────────────────────────────────────────────────────────
 
 model Media {
-  id              String   @id @default(cuid())
-  uploaderId      String
-  storageKey      String   @unique
-  blurStorageKey  String?
-  thumbStorageKey String?
-  mimeType        String
-  sizeBytes       Int
-  width           Int?
-  height          Int?
-  blurWidth       Int?
-  blurHeight      Int?
-  thumbWidth      Int?
-  thumbHeight     Int?
-  status          String   @default("ready")  // "processing" | "ready" | "failed"
-  clientUploadId  String?  @unique            // client-generated UUID for idempotent re-uploads
+  id               String  @id @default(cuid())
+  uploaderId       String
+  storageKey       String  @unique
+  blurStorageKey   String?
+  thumbStorageKey  String?
+  mimeType         String
+  sizeBytes        Int
+  width            Int?
+  height           Int?
+  blurWidth        Int?
+  blurHeight       Int?
+  thumbWidth       Int?
+  thumbHeight      Int?
+  status           String  @default("ready") // "processing" | "ready" | "failed"
+  clientUploadId   String? @unique // client-generated UUID for idempotent re-uploads
   // Voice-note fields (kind = "voice"). durationMs is supplied by the recorder.
   // transcript holds the structured Whisper result {segments,fullText,primaryLanguage};
   // transcriptStatus tracks the async transcription job independently of `status`.
   durationMs       Int?
   transcript       Json?
-  transcriptStatus String?                    // "pending" | "ready" | "failed" (null for non-voice)
-  createdAt       DateTime @default(now())
+  transcriptStatus String? // "pending" | "ready" | "failed" (null for non-voice)
 
-  uploader    User                @relation(fields: [uploaderId], references: [id])
+  // ── Phase 6B (video integration) ──────────────────────────────────────────
+  // kind classifies the asset for routing the right pipeline; legacy rows are
+  // null and treated as "image" by readers. deliveryMode is the user's choice
+  // (or auto-promoted to LSS for HEVC/DNG); isLss mirrors it as a fast badge
+  // flag. isHevcSource records the probed source codec for the auto-LSS rule.
+  // Variants + tasks live in their own tables; manifest.json in MinIO remains
+  // the canonical source of truth — these columns are denormalized for queries.
+  kind         MediaKind? // null = legacy (pre-6B); reader defaults to image
+  deliveryMode MediaDeliveryMode @default(OPTIMIZED)
+  isLss        Boolean           @default(false)
+  isHevcSource Boolean           @default(false)
+
+  createdAt DateTime @default(now())
+
+  uploader    User                  @relation(fields: [uploaderId], references: [id])
   attachments MessageAttachment[]
+  variants    MediaVariant[]
+  tasks       MediaProcessingTask[]
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+//  Phase 6B — normalized variant + processing-task model
+// ────────────────────────────────────────────────────────────────────────────
+// Replaces per-derivative status columns on Media. Each generated rendition is
+// a MediaVariant row (one per type), and each async unit of work is a
+// MediaProcessingTask row with its own state machine. Workers are stateless:
+// they derive every storage key from (mediaId, type) and write results here +
+// into the manifest.
+
+enum MediaKind {
+  IMAGE
+  VIDEO
+  VOICE
+}
+
+enum MediaDeliveryMode {
+  OPTIMIZED
+  LSS
+}
+
+enum MediaVariantType {
+  ORIGINAL
+  OPTIMIZED // image display webp/avif, or video streaming mp4
+  POSTER // video poster frame
+  PREVIEW // animated video preview
+  THUMBNAIL // sm/md/lg chat-list thumbs (label distinguishes size)
+  WAVEFORM // voice waveform json
+}
+
+enum MediaTaskType {
+  TRANSCODE
+  THUMBNAIL
+  POSTER
+  WAVEFORM
+  TRANSCRIPT
+}
+
+enum MediaTaskState {
+  PENDING
+  PROCESSING
+  READY
+  FAILED
+}
+
+model MediaVariant {
+  id         String           @id @default(cuid())
+  mediaId    String
+  type       MediaVariantType
+  label      String           @default("") // disambiguates same-type variants (thumb_sm/md/lg, stream_720p); "" for singletons
+  storageKey String           @unique
+  mimeType   String
+  codec      String?
+  width      Int?
+  height     Int?
+  bitrate    Int? // bits/sec, video only
+  sizeBytes  Int?
+  createdAt  DateTime         @default(now())
+
+  media Media @relation(fields: [mediaId], references: [id], onDelete: Cascade)
+
+  @@unique([mediaId, type, label])
+  @@index([mediaId])
+}
+
+model MediaProcessingTask {
+  id        String         @id @default(cuid())
+  mediaId   String
+  type      MediaTaskType
+  state     MediaTaskState @default(PENDING)
+  attempts  Int            @default(0)
+  error     String? // last failure detail, truncated
+  startedAt DateTime?
+  endedAt   DateTime?
+  createdAt DateTime       @default(now())
+  updatedAt DateTime       @updatedAt
+
+  media Media @relation(fields: [mediaId], references: [id], onDelete: Cascade)
+
+  @@unique([mediaId, type])
+  @@index([mediaId])
+  @@index([state])
 }
 
 model MessageAttachment {
   id        String   @id @default(cuid())
   messageId String
   mediaId   String
-  type      String   // "image"
+  type      String // "image"
   createdAt DateTime @default(now())
 
   message Message @relation(fields: [messageId], references: [id], onDelete: Cascade)
@@ -234,7 +332,7 @@ model EventOutbox {
   id             String    @id @default(uuid())
   eventId        String    @unique
   eventName      String
-  conversationId String?   // scopes replay to a single thread; null = user-global event
+  conversationId String? // scopes replay to a single thread; null = user-global event
   payload        Json
   recipientId    String
   createdAt      DateTime  @default(now())

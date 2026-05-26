@@ -1,22 +1,25 @@
 import { getApiUrl } from "@/frontend-core/runtime-env";
 import { ApiError } from "@/frontend-core/api";
-import type { MediaUploadResponse } from "@relay/contracts";
+import type { MediaUploadResponse, DeliveryMode } from "@relay/contracts";
 
 export const mediaApi = {
   upload: async (
-    file:     File | Blob,
-    uploadId: string,
-    signal?:  AbortSignal,
+    file:         File | Blob,
+    uploadId:     string,
+    signal?:      AbortSignal,
+    deliveryMode: DeliveryMode = "optimized",
   ): Promise<MediaUploadResponse> => {
     const formData = new FormData();
     formData.append("file", file);
 
     // Must NOT set Content-Type — let the browser set the multipart boundary.
     // uploadId sent as a header so the server can deduplicate retried uploads.
+    // X-Delivery-Mode carries the composer's optimized/LSS choice (6B.12); the
+    // server may still auto-promote to LSS (HEVC/DNG).
     const res = await fetch(`${getApiUrl()}/api/media/upload`, {
       method:      "POST",
       credentials: "include",
-      headers:     { "X-Upload-Id": uploadId },
+      headers:     { "X-Upload-Id": uploadId, "X-Delivery-Mode": deliveryMode },
       body:        formData,
       signal,
     });

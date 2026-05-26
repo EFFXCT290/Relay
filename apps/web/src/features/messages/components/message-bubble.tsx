@@ -7,7 +7,8 @@ import { ReactionChips, ReactionPicker } from "./reaction-picker";
 import { EmbedCard } from "./embeds";
 import { ImageGrid } from "./image-grid";
 import { VoiceBubble } from "./voice-bubble";
-import type { Message, ImageAttachment, VoiceAttachment } from "@relay/contracts";
+import { VideoBubble } from "./video-bubble";
+import type { Message, ImageAttachment, VoiceAttachment, VideoAttachment } from "@relay/contracts";
 
 export type { Message };  // re-export so existing consumers still resolve through this module
 
@@ -290,12 +291,16 @@ export function MessageBubble({
           <div className={cn("flex flex-col gap-1", isMine ? "items-end" : "items-start")}>
             {message.attachments && message.attachments.length > 0 && (() => {
               const images = message.attachments.filter((a): a is ImageAttachment => a.type === "image");
+              const videos = message.attachments.filter((a): a is VideoAttachment => a.type === "video");
               const voices = message.attachments.filter((a): a is VoiceAttachment => a.type === "voice");
               return (
                 <>
                   {images.length > 0 && (
                     <ImageGrid attachments={images} isMine={isMine} onOpenLightbox={onOpenLightbox} />
                   )}
+                  {videos.map((v) => (
+                    <VideoBubble key={v.id} attachment={v} isMine={isMine} />
+                  ))}
                   {voices.map((v) => (
                     <VoiceBubble
                       key={v.id}

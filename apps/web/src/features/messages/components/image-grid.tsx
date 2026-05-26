@@ -5,6 +5,7 @@ import { cn } from "@/frontend-core/utils";
 import type { ImageAttachment } from "@relay/contracts";
 import { useInViewport } from "@/shared/hooks/use-in-viewport";
 import { ImageBubble } from "./image-bubble";
+import { LssBadge } from "./lss-badge";
 
 const GAP    = 2;
 const W      = 280;
@@ -155,6 +156,9 @@ function GridTile({ attachment, width, height, onClick, overlayCount = 0 }: Tile
         style={{ background: "rgba(0,0,0,0.2)" }}
         aria-hidden
       />
+
+      {/* LSS badge — original-quality marker (6B.11) */}
+      {attachment.media.isLss && <LssBadge className="absolute left-1.5 top-1.5" />}
 
       {/* Overflow count — shown only on the 4th tile when there are more */}
       {overlayCount > 0 && (

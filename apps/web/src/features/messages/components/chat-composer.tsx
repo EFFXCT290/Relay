@@ -2,9 +2,10 @@
 
 import { useEffect, useRef, useState } from "react";
 import { Camera, Check, Mic, Plus, Send, Trash2, X } from "lucide-react";
-import { TYPING_DEBOUNCE_MS } from "@relay/contracts";
+import { TYPING_DEBOUNCE_MS, type DeliveryMode } from "@relay/contracts";
 import type { Message } from "./message-bubble";
 import { useVoiceRecorder } from "../hooks/use-voice-recorder";
+import { MediaComposerModal } from "./media-composer-modal";
 
 // Discard takes below this — a stray tap rather than a deliberate recording.
 const MIN_VOICE_MS = 700;
@@ -18,7 +19,7 @@ type Props = {
   onSend: (body: string, replyToId?: string | null) => Promise<void> | void;
   onUpdate?: (messageId: string, body: string) => Promise<void> | void;
   onTypingChange?: (isTyping: boolean) => void;
-  onSendImages?: (files: File[]) => void;
+  onSendImages?: (files: File[], deliveryMode: DeliveryMode) => void;
   onSendVoice?: (blob: Blob, durationMs: number) => void;
   /** When set, composer renders in reply mode with the parent preview above. */
   replyTo?: Message | null;
@@ -45,6 +46,9 @@ export function ChatComposer({
 }: Props) {
   const [value, setValue] = useState("");
   const [busy, setBusy] = useState(false);
+  // Files picked but not yet sent — held for the staging modal (6B.1) so the
+  // user can choose a delivery mode before anything uploads.
+  const [staged, setStaged] = useState<File[] | null>(null);
   const recorder = useVoiceRecorder();
   const taRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -225,12 +229,13 @@ export function ChatComposer({
           <input
             ref={fileInputRef}
             type="file"
-            accept="image/jpeg,image/png,image/webp"
+            accept="image/jpeg,image/png,image/webp,image/x-adobe-dng,video/mp4,video/quicktime"
             multiple
             className="hidden"
             onChange={(e) => {
               const files = Array.from(e.target.files ?? []);
-              if (files.length) onSendImages?.(files);
+              // Open the staging modal instead of uploading immediately (6B.1).
+              if (files.length) setStaged(files);
               e.target.value = "";
             }}
           />
@@ -276,6 +281,14 @@ export function ChatComposer({
       >
         {editing ? "Enter to save · Esc to cancel" : "Enter to send · Shift+Enter for newline"}
       </span>
+
+      {staged && (
+        <MediaComposerModal
+          files={staged}
+          onCancel={() => setStaged(null)}
+          onSend={(mode) => { onSendImages?.(staged, mode); setStaged(null); }}
+        />
+      )}
     </div>
   );
 }

@@ -25,7 +25,7 @@ import {
   drainSessions,
 } from "@/frontend-core/upload-session";
 import { ImageLightbox, type LightboxState } from "@/features/messages/components/lightbox/image-lightbox";
-import { ACK_EVENT, MEDIA_EVENTS, VOICE_EVENTS, PRESENCE_EVENTS, SYNC_EVENTS, TYPING_EVENTS, type MediaReadyEvent, type VoiceTranscriptReadyEvent, type ImageAttachment, type PresenceSyncResponse, type ReplayResponse, type TypingSyncResponse } from "@relay/contracts";
+import { ACK_EVENT, MEDIA_EVENTS, VOICE_EVENTS, PRESENCE_EVENTS, SYNC_EVENTS, TYPING_EVENTS, type MediaReadyEvent, type MediaProcessedEvent, type VoiceTranscriptReadyEvent, type ImageAttachment, type DeliveryMode, type PresenceSyncResponse, type ReplayResponse, type TypingSyncResponse } from "@relay/contracts";
 import { formatLastSeen } from "@/frontend-core/format-presence";
 
 const PAGE_SIZE = 30;
@@ -80,13 +80,14 @@ async function uploadPool<T>(tasks: (() => Promise<T>)[], limit: number): Promis
 // Per-file upload with automatic retry on network errors only.
 // Server-side errors (ApiError) are not retried — bubble up for manual retry.
 async function uploadWithRetry(
-  file:     Blob,
-  uploadId: string,
-  signal:   AbortSignal,
+  file:         Blob,
+  uploadId:     string,
+  signal:       AbortSignal,
+  deliveryMode: DeliveryMode,
 ): Promise<string> {
   for (let attempt = 0; ; attempt++) {
     try {
-      const r = await mediaApi.upload(file, uploadId, signal);
+      const r = await mediaApi.upload(file, uploadId, signal, deliveryMode);
       return r.mediaId;
     } catch (err) {
       if (signal.aborted) throw err;
@@ -633,6 +634,25 @@ export default function ChatThreadPage() {
       }
     };
 
+    // Phase 6B unified event — currently used for video: swap the poster/
+    // processing state for the playable stream once transcoding finishes.
+    const onMediaProcessed = (payload: MediaProcessedEvent) => {
+      if (payload.kind !== "video") return;
+      for (const m of Object.values(messagesRef.current)) {
+        if (!m.attachments?.some((a) => a.media.id === payload.mediaId)) continue;
+        messagesRef.current[m.messageId] = {
+          ...m,
+          attachments: m.attachments.map((a) =>
+            a.type !== "video" || a.media.id !== payload.mediaId
+              ? a
+              : { ...a, media: { ...a.media, status: payload.status, streamUrl: payload.streamUrl ?? a.media.streamUrl, posterUrl: payload.posterUrl ?? a.media.posterUrl, thumbUrl: payload.thumbUrl ?? a.media.thumbUrl } },
+          ),
+        };
+        rerender();
+        break;
+      }
+    };
+
     const onVoiceTranscript = (payload: VoiceTranscriptReadyEvent) => {
       const m = messagesRef.current[payload.messageId];
       if (!m?.attachments) return;
@@ -660,6 +680,7 @@ export default function ChatThreadPage() {
     socket.on("presence:online", onPresenceOnline);
     socket.on("presence:offline", onPresenceOffline);
     socket.on(MEDIA_EVENTS.READY, onMediaReady);
+    socket.on(MEDIA_EVENTS.PROCESSED, onMediaProcessed);
     socket.on(VOICE_EVENTS.TRANSCRIPT_READY, onVoiceTranscript);
 
     return () => {
@@ -690,6 +711,7 @@ export default function ChatThreadPage() {
       socket.off("presence:online", onPresenceOnline);
       socket.off("presence:offline", onPresenceOffline);
       socket.off(MEDIA_EVENTS.READY, onMediaReady);
+      socket.off(MEDIA_EVENTS.PROCESSED, onMediaProcessed);
       socket.off(VOICE_EVENTS.TRANSCRIPT_READY, onVoiceTranscript);
     };
   }, [conversationId]);
@@ -896,7 +918,7 @@ export default function ChatThreadPage() {
   );
 
   const handleSendImages = useCallback(
-    async (files: File[], existingUploadIds?: string[]) => {
+    async (files: File[], existingUploadIds?: string[], deliveryMode: DeliveryMode = "optimized") => {
       if (!files.length) return;
       const batchId         = crypto.randomUUID();
       const clientUploadIds = existingUploadIds ?? files.map(() => crypto.randomUUID());
@@ -924,16 +946,21 @@ export default function ChatThreadPage() {
       let succeeded = false;
       let aborted   = false;
       try {
+        // Client-side compression only for OPTIMIZED images. Video is never
+        // compressed in-browser (the server transcodes), and LSS must preserve
+        // the original bytes — both pass through untouched.
         const compressed = await Promise.all(
           files.map((f) =>
-            imageCompression(f, { maxSizeMB: 1, maxWidthOrHeight: 1920, useWebWorker: true, initialQuality: 0.84 }),
+            f.type.startsWith("video/") || deliveryMode === "lss"
+              ? Promise.resolve(f)
+              : imageCompression(f, { maxSizeMB: 1, maxWidthOrHeight: 1920, useWebWorker: true, initialQuality: 0.84 }),
           ),
         );
         if (controller.signal.aborted) { aborted = true; return; }
 
         // Upload with concurrency limit + per-file auto-retry on network errors.
         const uploadTasks = compressed.map((f, i) => () =>
-          uploadWithRetry(f, clientUploadIds[i]!, controller.signal),
+          uploadWithRetry(f, clientUploadIds[i]!, controller.signal, deliveryMode),
         );
         const mediaIds = await uploadPool(uploadTasks, MAX_CONCURRENT_UPLOADS);
 
@@ -1337,7 +1364,7 @@ export default function ChatThreadPage() {
           onSend={handleSend}
           onUpdate={handleUpdate}
           onTypingChange={handleTypingChange}
-          onSendImages={handleSendImages}
+          onSendImages={(files, mode) => handleSendImages(files, undefined, mode)}
           onSendVoice={handleSendVoice}
           replyTo={replyTo}
           onCancelReply={() => setReplyTo(null)}

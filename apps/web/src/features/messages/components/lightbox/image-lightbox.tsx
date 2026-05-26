@@ -6,6 +6,7 @@ import { ChevronLeft, ChevronRight, X } from "lucide-react";
 import type { ImageAttachment } from "@relay/contracts";
 import { LightboxBackdrop } from "./lightbox-backdrop";
 import { LightboxImage } from "./lightbox-image";
+import { LssBadge } from "../lss-badge";
 
 export type LightboxState = {
   images: ImageAttachment[];
@@ -87,6 +88,9 @@ export function ImageLightbox({ state, onClose }: Props) {
       `}</style>
 
       <LightboxBackdrop onClick={onClose} />
+
+      {/* LSS badge — fullscreen header marker (6B.11) */}
+      {attachment.media.isLss && <LssBadge size="md" className="absolute left-4 top-4 z-10" />}
 
       {/* Close button */}
       <button
