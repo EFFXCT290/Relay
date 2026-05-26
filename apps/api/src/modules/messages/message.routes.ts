@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 import { ProblemError } from "../../backend-core/http/errors.js";
 import { MESSAGE_EVENTS, MessageSchema, MessageAttachmentSchema } from "@relay/contracts";
 import { serializeAttachment, mediaKindFromMime } from "../media/media.service.js";
+import { createMediaRepository } from "../media/media.repository.js";
 import { voiceQueue, TRANSCRIBE_VOICE_JOB } from "../../queues/media.queue.js";
 import { SyncService } from "../sync/sync.service.js";
 import { SyncRepository } from "../sync/sync.repository.js";
@@ -536,6 +537,10 @@ const messageRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
         where: { id: attachment.mediaId },
         data:  { transcriptStatus: "pending" },
       });
+      // Phase 6B (6B.18): mirror the request into the shared task model so voice
+      // shares one processing-state machine with image/video. transcriptStatus
+      // remains the wire-facing source of truth for the voice bubble.
+      await createMediaRepository(fastify.prisma).ensureTask(attachment.mediaId, "TRANSCRIPT");
       await voiceQueue.add(TRANSCRIBE_VOICE_JOB, {
         mediaId:        attachment.mediaId,
         attachmentId:   attachment.id,

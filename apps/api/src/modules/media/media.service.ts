@@ -380,6 +380,7 @@ export async function uploadVoice(
     sizeBytes: buffer.length,
     width:  null,
     height: null,
+    kind:   "VOICE",
     status: "ready",            // file is immediately usable
     durationMs,
     transcriptStatus: null,      // transcription is opt-in — triggered by the user, never automatic

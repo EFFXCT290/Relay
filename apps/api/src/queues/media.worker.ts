@@ -139,6 +139,7 @@ export function createVoiceWorker(deps: WorkerDeps) {
     );
     if (job?.data.mediaId) {
       void prisma.media.update({ where: { id: job.data.mediaId }, data: { transcriptStatus: "failed" } }).catch(() => {});
+      void createMediaRepository(prisma).setTaskState(job.data.mediaId, "TRANSCRIPT", "FAILED", String(e.stderr ?? "").slice(0, 500)).catch(() => {});
     }
   });
 
@@ -481,6 +482,13 @@ async function transcribeVoiceJob(deps: WorkerDeps, data: TranscribeVoiceJobData
   const { mediaId, attachmentId, messageId, conversationId, storageKey } = data;
   const jobStart = Date.now();
 
+  // 6B.18: voice shares the MediaProcessingTask state machine. ensureTask is
+  // idempotent (the route already created it); a throw later flips it to FAILED
+  // via the worker's failed handler.
+  const repo = createMediaRepository(prisma);
+  await repo.ensureTask(mediaId, "TRANSCRIPT").catch(() => {});
+  await repo.setTaskState(mediaId, "TRANSCRIPT", "PROCESSING").catch(() => {});
+
   // Reuse an already-computed transcript (e.g. same media re-sent) instead of
   // running Whisper again — just re-emit it to this message's recipients.
   const existing = await prisma.media.findUnique({
@@ -539,4 +547,6 @@ async function transcribeVoiceJob(deps: WorkerDeps, data: TranscribeVoiceJobData
   for (const p of participants) {
     io.to(`user:${p.userId}`).emit(VOICE_EVENTS.TRANSCRIPT_READY, event);
   }
+
+  await repo.setTaskState(mediaId, "TRANSCRIPT", "READY").catch(() => {});
 }
