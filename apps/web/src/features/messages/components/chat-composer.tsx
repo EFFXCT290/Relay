@@ -1,15 +1,25 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { Camera, Check, Plus, Send, X } from "lucide-react";
+import { Camera, Check, Mic, Plus, Send, Trash2, X } from "lucide-react";
 import { TYPING_DEBOUNCE_MS } from "@relay/contracts";
 import type { Message } from "./message-bubble";
+import { useVoiceRecorder } from "../hooks/use-voice-recorder";
+
+// Discard takes below this — a stray tap rather than a deliberate recording.
+const MIN_VOICE_MS = 700;
+
+function fmtElapsed(ms: number): string {
+  const total = Math.floor(ms / 1000);
+  return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, "0")}`;
+}
 
 type Props = {
   onSend: (body: string, replyToId?: string | null) => Promise<void> | void;
   onUpdate?: (messageId: string, body: string) => Promise<void> | void;
   onTypingChange?: (isTyping: boolean) => void;
   onSendImages?: (files: File[]) => void;
+  onSendVoice?: (blob: Blob, durationMs: number) => void;
   /** When set, composer renders in reply mode with the parent preview above. */
   replyTo?: Message | null;
   onCancelReply?: () => void;
@@ -26,6 +36,7 @@ export function ChatComposer({
   onUpdate,
   onTypingChange,
   onSendImages,
+  onSendVoice,
   replyTo,
   onCancelReply,
   editing,
@@ -34,6 +45,7 @@ export function ChatComposer({
 }: Props) {
   const [value, setValue] = useState("");
   const [busy, setBusy] = useState(false);
+  const recorder = useVoiceRecorder();
   const taRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   // Typing emit policy:
@@ -119,6 +131,25 @@ export function ChatComposer({
 
   useEffect(() => () => stopTyping(), []);
 
+  const startRecording = async () => {
+    if (disabled || busy) return;
+    try {
+      await recorder.start();
+    } catch {
+      // Mic permission denied or unavailable — silently no-op.
+    }
+  };
+
+  const sendRecording = async () => {
+    const rec = await recorder.stop();
+    if (rec && rec.durationMs >= MIN_VOICE_MS) onSendVoice?.(rec.blob, rec.durationMs);
+  };
+
+  const cancelRecording = () => { void recorder.cancel(); };
+
+  const canRecord = !!onSendVoice && recorder.supported && !editing;
+  const showMic   = canRecord && !value.trim();
+
   return (
     <div
       className="flex flex-col border-t bg-[var(--color-bg)]/92 px-4 pt-3 pb-2 backdrop-blur-xl"
@@ -132,6 +163,38 @@ export function ChatComposer({
         />
       )}
 
+      {recorder.recording ? (
+        <div className="flex items-center gap-3">
+          <button
+            type="button"
+            onClick={cancelRecording}
+            aria-label="Cancel recording"
+            className="flex h-[38px] w-[38px] shrink-0 items-center justify-center rounded-full border bg-[var(--color-raised)] text-[var(--color-alert)] disabled:opacity-40"
+            style={{ borderColor: "var(--color-hairline)" }}
+          >
+            <Trash2 className="h-[18px] w-[18px]" />
+          </button>
+          <div
+            className="flex flex-1 items-center gap-2 rounded-[20px] border bg-[var(--color-panel)] px-4 py-2.5"
+            style={{ borderColor: "var(--color-hairline)" }}
+          >
+            <span className="relay-typing-dot h-2.5 w-2.5 rounded-full" style={{ background: "var(--color-alert)" }} />
+            <span className="text-[13px] tabular-nums text-[var(--color-text)]" style={{ fontFamily: mono }}>
+              {fmtElapsed(recorder.elapsedMs)}
+            </span>
+            <span className="text-[12px] text-[var(--color-text-muted)]">Recording…</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => void sendRecording()}
+            aria-label="Send voice message"
+            className="flex h-[38px] w-[38px] shrink-0 items-center justify-center rounded-full text-white shadow-[0_4px_12px_rgba(59,130,246,0.30)]"
+            style={{ background: "var(--color-signal)" }}
+          >
+            <Send className="h-4 w-4" />
+          </button>
+        </div>
+      ) : (
       <div className="flex items-end gap-2">
         <button
           type="button"
@@ -182,17 +245,31 @@ export function ChatComposer({
           </button>
         </div>
 
-        <button
-          type="button"
-          onClick={() => void submit()}
-          disabled={!value.trim() || busy || disabled}
-          aria-label={editing ? "Save edit" : "Send"}
-          className="flex h-[38px] w-[38px] shrink-0 items-center justify-center rounded-full text-white shadow-[0_4px_12px_rgba(59,130,246,0.30)] transition-opacity disabled:opacity-40"
-          style={{ background: "var(--color-signal)" }}
-        >
-          {editing ? <Check className="h-4 w-4" /> : <Send className="h-4 w-4" />}
-        </button>
+        {showMic ? (
+          <button
+            type="button"
+            onClick={() => void startRecording()}
+            disabled={busy || disabled}
+            aria-label="Record voice message"
+            className="flex h-[38px] w-[38px] shrink-0 items-center justify-center rounded-full text-white shadow-[0_4px_12px_rgba(59,130,246,0.30)] transition-opacity disabled:opacity-40"
+            style={{ background: "var(--color-signal)" }}
+          >
+            <Mic className="h-[18px] w-[18px]" />
+          </button>
+        ) : (
+          <button
+            type="button"
+            onClick={() => void submit()}
+            disabled={!value.trim() || busy || disabled}
+            aria-label={editing ? "Save edit" : "Send"}
+            className="flex h-[38px] w-[38px] shrink-0 items-center justify-center rounded-full text-white shadow-[0_4px_12px_rgba(59,130,246,0.30)] transition-opacity disabled:opacity-40"
+            style={{ background: "var(--color-signal)" }}
+          >
+            {editing ? <Check className="h-4 w-4" /> : <Send className="h-4 w-4" />}
+          </button>
+        )}
       </div>
+      )}
       <span
         className="px-1 pt-1 text-[10px] text-[var(--color-text-muted)]"
         style={{ fontFamily: mono }}

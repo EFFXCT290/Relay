@@ -2,7 +2,9 @@ import type { FastifyPluginAsyncTypebox } from "@fastify/type-provider-typebox";
 import { Type } from "@sinclair/typebox";
 import { randomUUID } from "node:crypto";
 import { ProblemError } from "../../backend-core/http/errors.js";
-import { MESSAGE_EVENTS, MessageSchema } from "@relay/contracts";
+import { MESSAGE_EVENTS, MessageSchema, MessageAttachmentSchema } from "@relay/contracts";
+import { serializeAttachment, mediaKindFromMime } from "../media/media.service.js";
+import { voiceQueue, TRANSCRIBE_VOICE_JOB } from "../../queues/media.queue.js";
 import { SyncService } from "../sync/sync.service.js";
 import { SyncRepository } from "../sync/sync.repository.js";
 import {
@@ -89,24 +91,9 @@ const messageRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
         }
 
         const attachments = await Promise.all(
-          (m.attachments ?? []).map(async (att) => ({
-            id:   att.id,
-            type: "image" as const,
-            media: {
-              id:          att.media.id,
-              url:         await fastify.getMediaUrl(att.media.storageKey),
-              blurUrl:     att.media.blurStorageKey  ? await fastify.getMediaUrl(att.media.blurStorageKey)  : null,
-              thumbUrl:    att.media.thumbStorageKey ? await fastify.getMediaUrl(att.media.thumbStorageKey) : null,
-              width:       att.media.width,
-              height:      att.media.height,
-              blurWidth:   att.media.blurWidth,
-              blurHeight:  att.media.blurHeight,
-              thumbWidth:  att.media.thumbWidth,
-              thumbHeight: att.media.thumbHeight,
-              mimeType:    att.media.mimeType,
-              sizeBytes:   att.media.sizeBytes,
-            },
-          })),
+          (m.attachments ?? []).map((att) =>
+            serializeAttachment(att.id, att.type, att.media, (key) => fastify.getMediaUrl(key)),
+          ),
         );
 
         return {
@@ -364,7 +351,7 @@ const messageRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
             messageId:      Type.String({ format: "uuid" }),
             conversationId: Type.String({ format: "uuid" }),
             senderId:       Type.String({ format: "uuid" }),
-            type:           Type.Literal("IMAGE"),
+            type:           Type.Union([Type.Literal("IMAGE"), Type.Literal("AUDIO")]),
             body:           Type.Null(),
             replyTo:        Type.Union([Type.Null(), Type.Object({ messageId: Type.String(), preview: Type.Union([Type.String(), Type.Null()]), type: Type.String() })]),
             reactions:      Type.Record(Type.String(), Type.Integer()),
@@ -372,24 +359,7 @@ const messageRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
             readBy:         Type.Array(Type.Object({ userId: Type.String({ format: "uuid" }), readAt: Type.String({ format: "date-time" }) })),
             deliveredAt:    Type.Union([Type.String({ format: "date-time" }), Type.Null()]),
             createdAt:      Type.String({ format: "date-time" }),
-            attachments:    Type.Array(Type.Object({
-              id:   Type.String(),
-              type: Type.Literal("image"),
-              media: Type.Object({
-                id:          Type.String(),
-                url:         Type.String(),
-                blurUrl:     Type.Optional(Type.Union([Type.String(), Type.Null()])),
-                thumbUrl:    Type.Optional(Type.Union([Type.String(), Type.Null()])),
-                width:       Type.Optional(Type.Union([Type.Number(), Type.Null()])),
-                height:      Type.Optional(Type.Union([Type.Number(), Type.Null()])),
-                blurWidth:   Type.Optional(Type.Union([Type.Number(), Type.Null()])),
-                blurHeight:  Type.Optional(Type.Union([Type.Number(), Type.Null()])),
-                thumbWidth:  Type.Optional(Type.Union([Type.Number(), Type.Null()])),
-                thumbHeight: Type.Optional(Type.Union([Type.Number(), Type.Null()])),
-                mimeType:    Type.String(),
-                sizeBytes:   Type.Number(),
-              }),
-            })),
+            attachments:    Type.Array(MessageAttachmentSchema),
           }),
         },
       },
@@ -412,6 +382,13 @@ const messageRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
       const forbidden = mediaItems.find((m) => m.uploaderId !== callerId);
       if (forbidden) throw new ProblemError("forbidden", "Not your media.");
 
+      // Per-media attachment kind, derived from stored MIME. A batch that is all
+      // voice becomes an AUDIO message; anything else stays IMAGE (voice notes
+      // are sent on their own from the recorder, so the mixed case is moot).
+      const mediaMap   = new Map(mediaItems.map((m) => [m.id, m]));
+      const kindFor    = (mediaId: string) => mediaKindFromMime(mediaMap.get(mediaId)!.mimeType) ?? "image";
+      const messageType: "IMAGE" | "AUDIO" = mediaIds.every((id) => kindFor(id) === "voice") ? "AUDIO" : "IMAGE";
+
       if (replyToId) {
         const parent = await fastify.prisma.message.findUnique({
           where: { id: replyToId },
@@ -433,13 +410,13 @@ const messageRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
       const deliveredAt = allRecipientsOnline ? new Date() : null;
 
       // Create message + all attachment rows in a single transaction.
-      const attachmentRecords: { id: string; mediaId: string }[] = [];
+      const attachmentRecords: { id: string; mediaId: string; type: string }[] = [];
       const created = await fastify.prisma.$transaction(async (tx) => {
         const msg = await tx.message.create({
           data: {
             conversationId,
             senderId: callerId,
-            type: "IMAGE",
+            type: messageType,
             body: null,
             ...(replyToId ? { replyToId } : {}),
             ...(deliveredAt ? { deliveredAt } : {}),
@@ -450,11 +427,12 @@ const messageRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
           },
         });
         for (const mediaId of mediaIds) {
-          const id = randomUUID();
+          const id   = randomUUID();
+          const type = kindFor(mediaId);
           await tx.messageAttachment.create({
-            data: { id, messageId: msg.id, mediaId, type: "image" },
+            data: { id, messageId: msg.id, mediaId, type },
           });
-          attachmentRecords.push({ id, mediaId });
+          attachmentRecords.push({ id, mediaId, type });
         }
         await tx.conversation.update({
           where: { id: conversationId },
@@ -463,37 +441,21 @@ const messageRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
         return msg;
       });
 
+      // Transcription is NOT kicked off here — it's opt-in, triggered later by a
+      // user via POST …/attachments/:id/transcribe.
+
       // Sign URLs for all attachments in parallel.
-      const mediaMap = new Map(mediaItems.map((m) => [m.id, m]));
       const attachments = await Promise.all(
-        attachmentRecords.map(async ({ id, mediaId }) => {
-          const media = mediaMap.get(mediaId)!;
-          return {
-            id,
-            type: "image" as const,
-            media: {
-              id:          media.id,
-              url:         await fastify.getMediaUrl(media.storageKey),
-              blurUrl:     media.blurStorageKey  ? await fastify.getMediaUrl(media.blurStorageKey)  : null,
-              thumbUrl:    media.thumbStorageKey ? await fastify.getMediaUrl(media.thumbStorageKey) : null,
-              width:       media.width,
-              height:      media.height,
-              blurWidth:   media.blurWidth,
-              blurHeight:  media.blurHeight,
-              thumbWidth:  media.thumbWidth,
-              thumbHeight: media.thumbHeight,
-              mimeType:    media.mimeType,
-              sizeBytes:   media.sizeBytes,
-            },
-          };
-        }),
+        attachmentRecords.map(({ id, mediaId, type }) =>
+          serializeAttachment(id, type, mediaMap.get(mediaId)!, (key) => fastify.getMediaUrl(key)),
+        ),
       );
 
       const httpPayload = {
         messageId:      created.id,
         conversationId: created.conversationId,
         senderId:       created.senderId,
-        type:           "IMAGE" as const,
+        type:           messageType,
         body:           null,
         replyTo: created.replyTo
           ? {
@@ -524,6 +486,61 @@ const messageRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
       }
 
       return reply.code(201).send(httpPayload);
+    },
+  );
+
+  // ── POST /api/messages/:messageId/attachments/:attachmentId/transcribe ─────
+  // On-demand voice transcription. Transcription never runs automatically; a
+  // participant explicitly requests it here, which enqueues the Whisper job.
+  fastify.post(
+    "/messages/:messageId/attachments/:attachmentId/transcribe",
+    {
+      preHandler: [fastify.authenticate],
+      schema: {
+        params: Type.Object({
+          messageId:    Type.String({ format: "uuid" }),
+          attachmentId: Type.String(),
+        }),
+        response: {
+          202: Type.Object({ status: Type.Union([Type.Literal("pending"), Type.Literal("ready")]) }),
+        },
+      },
+      config: { rateLimit: { max: 30, timeWindow: "1 minute" } },
+    },
+    async (request, reply) => {
+      const callerId = request.userId!;
+      const { messageId, attachmentId } = request.params;
+
+      const attachment = await fastify.prisma.messageAttachment.findUnique({
+        where:   { id: attachmentId },
+        include: { media: true, message: { select: { conversationId: true } } },
+      });
+      if (!attachment || attachment.messageId !== messageId) {
+        throw new ProblemError("not_found", "Attachment not found.");
+      }
+      await assertParticipant(fastify, callerId, attachment.message.conversationId);
+      if (attachment.type !== "voice") {
+        throw new ProblemError("bad_request", "Attachment is not a voice note.");
+      }
+
+      // Already transcribed → nothing to do (idempotent).
+      if (attachment.media.transcriptStatus === "ready" && attachment.media.transcript) {
+        return reply.code(202).send({ status: "ready" });
+      }
+
+      await fastify.prisma.media.update({
+        where: { id: attachment.mediaId },
+        data:  { transcriptStatus: "pending" },
+      });
+      await voiceQueue.add(TRANSCRIBE_VOICE_JOB, {
+        mediaId:        attachment.mediaId,
+        attachmentId:   attachment.id,
+        messageId,
+        conversationId: attachment.message.conversationId,
+        storageKey:     attachment.media.storageKey,
+      });
+
+      return reply.code(202).send({ status: "pending" });
     },
   );
 

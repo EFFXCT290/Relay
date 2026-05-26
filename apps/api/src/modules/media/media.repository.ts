@@ -5,19 +5,31 @@ import type { PrismaClient } from "@prisma/client";
 export function createMediaRepository(db: PrismaClient) {
   return {
     createMedia: (data: {
-      id:             string;
-      uploaderId:     string;
-      storageKey:     string;
-      mimeType:       string;
-      sizeBytes:      number;
-      width:          number | null;
-      height:         number | null;
-      status:         string;
-      clientUploadId?: string | null;
+      id:                string;
+      uploaderId:        string;
+      storageKey:        string;
+      mimeType:          string;
+      sizeBytes:         number;
+      width:             number | null;
+      height:            number | null;
+      status:            string;
+      durationMs?:       number | null;
+      transcriptStatus?: string | null;
+      clientUploadId?:   string | null;
     }) => db.media.create({ data }),
 
     findByClientUploadId: (clientUploadId: string) =>
       db.media.findUnique({ where: { clientUploadId } }),
+
+    // Store the Whisper result for a voice note and flip its transcript status.
+    updateTranscript: (
+      id: string,
+      data: { transcript: unknown; transcriptStatus: string },
+    ) =>
+      db.media.update({
+        where: { id },
+        data: { transcript: data.transcript as never, transcriptStatus: data.transcriptStatus },
+      }),
 
     createAttachment: (data: {
       id:        string;

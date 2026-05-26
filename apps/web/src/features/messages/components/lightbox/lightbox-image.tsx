@@ -1,9 +1,9 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import type { MessageAttachment } from "@relay/contracts";
+import type { ImageAttachment } from "@relay/contracts";
 
-type Props = { attachment: MessageAttachment };
+type Props = { attachment: ImageAttachment };
 
 export function LightboxImage({ attachment }: Props) {
   const { url, thumbUrl, width, height, thumbWidth, thumbHeight } = attachment.media;

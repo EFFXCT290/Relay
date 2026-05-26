@@ -6,7 +6,8 @@ import { Avatar } from "@/shared/components/avatar";
 import { ReactionChips, ReactionPicker } from "./reaction-picker";
 import { EmbedCard } from "./embeds";
 import { ImageGrid } from "./image-grid";
-import type { Message, MessageAttachment } from "@relay/contracts";
+import { VoiceBubble } from "./voice-bubble";
+import type { Message, ImageAttachment, VoiceAttachment } from "@relay/contracts";
 
 export type { Message };  // re-export so existing consumers still resolve through this module
 
@@ -30,7 +31,8 @@ type Props = {
   onEdit?: (message: Message) => void;
   onDelete?: (message: Message) => void;
   onDismiss?: () => void;
-  onOpenLightbox?: (attachments: MessageAttachment[], index: number) => void;
+  onOpenLightbox?: (attachments: ImageAttachment[], index: number) => void;
+  onRequestTranscript?: (messageId: string, attachmentId: string) => Promise<void> | void;
 };
 
 export function MessageBubble({
@@ -46,6 +48,7 @@ export function MessageBubble({
   onDelete,
   onDismiss,
   onOpenLightbox,
+  onRequestTranscript,
 }: Props) {
   const [pickerOpen, setPickerOpen] = useState(false);
   const [longMenuOpen, setLongMenuOpen] = useState(false);
@@ -285,13 +288,25 @@ export function MessageBubble({
             </>
           )}
           <div className={cn("flex flex-col gap-1", isMine ? "items-end" : "items-start")}>
-            {message.attachments && message.attachments.length > 0 && (
-              <ImageGrid
-                attachments={message.attachments}
-                isMine={isMine}
-                onOpenLightbox={onOpenLightbox}
-              />
-            )}
+            {message.attachments && message.attachments.length > 0 && (() => {
+              const images = message.attachments.filter((a): a is ImageAttachment => a.type === "image");
+              const voices = message.attachments.filter((a): a is VoiceAttachment => a.type === "voice");
+              return (
+                <>
+                  {images.length > 0 && (
+                    <ImageGrid attachments={images} isMine={isMine} onOpenLightbox={onOpenLightbox} />
+                  )}
+                  {voices.map((v) => (
+                    <VoiceBubble
+                      key={v.id}
+                      attachment={v}
+                      isMine={isMine}
+                      onRequestTranscript={() => onRequestTranscript?.(message.messageId, v.id)}
+                    />
+                  ))}
+                </>
+              );
+            })()}
             {message.embed && <EmbedCard embed={message.embed} isMine={isMine} />}
             {/* Hide the bubble when the entire body is just the URL — show only the embed card */}
             {message.body && !(message.embed && message.body.trim() === message.embed.url) && (

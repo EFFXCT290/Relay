@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { cn } from "@/frontend-core/utils";
-import type { MessageAttachment } from "@relay/contracts";
+import type { ImageAttachment } from "@relay/contracts";
 import { useInViewport } from "@/shared/hooks/use-in-viewport";
 
 const MAX_W = 280;
@@ -18,9 +18,9 @@ function clampDimensions(w?: number | null, h?: number | null) {
 }
 
 type Props = {
-  attachment:      MessageAttachment;
+  attachment:      ImageAttachment;
   isMine:          boolean;
-  onOpenLightbox?: (attachment: MessageAttachment) => void;
+  onOpenLightbox?: (attachment: ImageAttachment) => void;
 };
 
 export function ImageBubble({ attachment, isMine, onOpenLightbox }: Props) {

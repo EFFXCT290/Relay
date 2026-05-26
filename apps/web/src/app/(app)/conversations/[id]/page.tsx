@@ -25,7 +25,7 @@ import {
   drainSessions,
 } from "@/frontend-core/upload-session";
 import { ImageLightbox, type LightboxState } from "@/features/messages/components/lightbox/image-lightbox";
-import { ACK_EVENT, MEDIA_EVENTS, PRESENCE_EVENTS, SYNC_EVENTS, TYPING_EVENTS, type MediaReadyEvent, type MessageAttachment, type PresenceSyncResponse, type ReplayResponse, type TypingSyncResponse } from "@relay/contracts";
+import { ACK_EVENT, MEDIA_EVENTS, VOICE_EVENTS, PRESENCE_EVENTS, SYNC_EVENTS, TYPING_EVENTS, type MediaReadyEvent, type VoiceTranscriptReadyEvent, type ImageAttachment, type PresenceSyncResponse, type ReplayResponse, type TypingSyncResponse } from "@relay/contracts";
 import { formatLastSeen } from "@/frontend-core/format-presence";
 
 const PAGE_SIZE = 30;
@@ -623,7 +623,7 @@ export default function ChatThreadPage() {
         messagesRef.current[m.messageId] = {
           ...m,
           attachments: m.attachments.map((a) =>
-            a.media.id !== payload.mediaId
+            a.type !== "image" || a.media.id !== payload.mediaId
               ? a
               : { ...a, media: { ...a.media, blurUrl: payload.blurUrl, thumbUrl: payload.thumbUrl, blurWidth: payload.blurWidth, blurHeight: payload.blurHeight, thumbWidth: payload.thumbWidth, thumbHeight: payload.thumbHeight } },
           ),
@@ -631,6 +631,20 @@ export default function ChatThreadPage() {
         rerender();
         break; // mediaId is unique per upload
       }
+    };
+
+    const onVoiceTranscript = (payload: VoiceTranscriptReadyEvent) => {
+      const m = messagesRef.current[payload.messageId];
+      if (!m?.attachments) return;
+      messagesRef.current[payload.messageId] = {
+        ...m,
+        attachments: m.attachments.map((a) =>
+          a.type !== "voice" || a.id !== payload.attachmentId
+            ? a
+            : { ...a, media: { ...a.media, transcript: payload.transcript, transcriptStatus: payload.transcriptStatus } },
+        ),
+      };
+      rerender();
     };
 
     socket.on("message:new", onMessageNew);
@@ -646,6 +660,7 @@ export default function ChatThreadPage() {
     socket.on("presence:online", onPresenceOnline);
     socket.on("presence:offline", onPresenceOffline);
     socket.on(MEDIA_EVENTS.READY, onMediaReady);
+    socket.on(VOICE_EVENTS.TRANSCRIPT_READY, onVoiceTranscript);
 
     return () => {
       // Leave the room and clear all barriers — prevents stale state from
@@ -675,6 +690,7 @@ export default function ChatThreadPage() {
       socket.off("presence:online", onPresenceOnline);
       socket.off("presence:offline", onPresenceOffline);
       socket.off(MEDIA_EVENTS.READY, onMediaReady);
+      socket.off(VOICE_EVENTS.TRANSCRIPT_READY, onVoiceTranscript);
     };
   }, [conversationId]);
 
@@ -953,6 +969,35 @@ export default function ChatThreadPage() {
     [conversationId],
   );
 
+  // Voice notes are short and single — skip the batch/optimistic machinery used
+  // for images. Upload the Opus blob, then post the message; the message:new
+  // echo renders the bubble (transcript fills in later via voice:transcript_ready).
+  const handleSendVoice = useCallback(
+    async (blob: Blob, durationMs: number) => {
+      stickToBottomRef.current = true;
+      try {
+        const uploadId = crypto.randomUUID();
+        const { mediaId } = await mediaApi.uploadVoice(blob, uploadId, durationMs);
+        await api(`/api/conversations/${conversationId}/messages/media`, {
+          method: "POST",
+          body:   { mediaIds: [mediaId] },
+        });
+      } catch {
+        setError("Couldn't send voice message. Try again.");
+      }
+    },
+    [conversationId],
+  );
+
+  // Opt-in transcription — fires only when the user taps Transcribe on a voice
+  // bubble. The worker emits voice:transcript_ready, which onVoiceTranscript
+  // patches in. Rejection propagates so the bubble can reset its pending state.
+  const handleRequestTranscript = useCallback(
+    (messageId: string, attachmentId: string): Promise<void> =>
+      api(`/api/messages/${messageId}/attachments/${attachmentId}/transcribe`, { method: "POST" }).then(() => undefined),
+    [],
+  );
+
   const handleCancelBatch = useCallback((batchId: string) => {
     batchControllersRef.current.get(batchId)?.abort();
     setPendingBatches((prev) => {
@@ -1226,9 +1271,10 @@ export default function ChatThreadPage() {
                           onEdit={m._failed ? undefined : (msg) => { setReplyTo(null); setEditing(msg); }}
                           onDelete={m._failed ? undefined : handleDelete}
                           onDismiss={m._failed ? () => handleDismissFailed(m.messageId) : undefined}
-                          onOpenLightbox={(atts: MessageAttachment[], idx: number) =>
+                          onOpenLightbox={(atts: ImageAttachment[], idx: number) =>
                             setLightbox({ images: atts, index: idx })
                           }
+                          onRequestTranscript={handleRequestTranscript}
                         />
                       </div>
                     );
@@ -1292,6 +1338,7 @@ export default function ChatThreadPage() {
           onUpdate={handleUpdate}
           onTypingChange={handleTypingChange}
           onSendImages={handleSendImages}
+          onSendVoice={handleSendVoice}
           replyTo={replyTo}
           onCancelReply={() => setReplyTo(null)}
           editing={editing}

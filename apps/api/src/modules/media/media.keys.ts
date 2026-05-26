@@ -46,3 +46,18 @@ export function buildMediaKey(opts: {
   const { kind, id, variant, ext } = opts;
   return `${kind}/${datePath(opts.date ?? new Date())}/${id}_${variant}${ext}`;
 }
+
+/**
+ * Recover the UTC date partition baked into an existing media key, e.g.
+ * `images/2026/05/24/<id>_original.jpg` → 2026-05-24T00:00:00Z.
+ *
+ * Variants (blur/thumb/preview/...) MUST share the original's partition, so the
+ * async worker derives its date from the original key rather than `new Date()`
+ * — otherwise jobs that run (or retry) on a later UTC day scatter variants
+ * across date folders. Returns null for legacy flat keys without a date path.
+ */
+export function parseMediaKeyDate(key: string): Date | null {
+  const m = key.match(/^[a-z]+\/(\d{4})\/(\d{2})\/(\d{2})\//);
+  if (!m) return null;
+  return new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3])));
+}

@@ -169,6 +169,12 @@ model Media {
   thumbHeight     Int?
   status          String   @default("ready")  // "processing" | "ready" | "failed"
   clientUploadId  String?  @unique            // client-generated UUID for idempotent re-uploads
+  // Voice-note fields (kind = "voice"). durationMs is supplied by the recorder.
+  // transcript holds the structured Whisper result {segments,fullText,primaryLanguage};
+  // transcriptStatus tracks the async transcription job independently of `status`.
+  durationMs       Int?
+  transcript       Json?
+  transcriptStatus String?                    // "pending" | "ready" | "failed" (null for non-voice)
   createdAt       DateTime @default(now())
 
   uploader    User                @relation(fields: [uploaderId], references: [id])

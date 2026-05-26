@@ -43,6 +43,15 @@ export const env = {
   MINIO_BUCKET:            optional("MINIO_BUCKET_MEDIA", "relay-media"),
   MEDIA_MAX_SIZE_MB:       int("MEDIA_MAX_SIZE_MB", 50),
   MEDIA_SIGNED_URL_EXPIRY: int("MEDIA_SIGNED_URL_EXPIRY", 3600),
+
+  // Voice-note transcription (openai-whisper CLI + ffmpeg).
+  WHISPER_BIN:    optional("WHISPER_BIN", "whisper"),
+  WHISPER_MODEL:  optional("WHISPER_MODEL", "medium"),   // medium (cached) | large-v3 (prod)
+  FFMPEG_BIN:     optional("FFMPEG_BIN", "ffmpeg"),
+  VOICE_MAX_DURATION_MS: int("VOICE_MAX_DURATION_MS", 5 * 60 * 1000),
+  // Whisper is CPU-bound; on a small VPS (few ARM cores, no GPU) keep this at
+  // 1–2 so concurrent voice uploads don't starve API/socket/Redis latency.
+  VOICE_TRANSCRIBE_CONCURRENCY: int("VOICE_TRANSCRIBE_CONCURRENCY", 2),
 } as const;
 
 export const isProd = env.NODE_ENV === "production";

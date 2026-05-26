@@ -3,12 +3,12 @@
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { ChevronLeft, ChevronRight, X } from "lucide-react";
-import type { MessageAttachment } from "@relay/contracts";
+import type { ImageAttachment } from "@relay/contracts";
 import { LightboxBackdrop } from "./lightbox-backdrop";
 import { LightboxImage } from "./lightbox-image";
 
 export type LightboxState = {
-  images: MessageAttachment[];
+  images: ImageAttachment[];
   index:  number;
 };
 

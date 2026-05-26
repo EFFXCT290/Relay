@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { cn } from "@/frontend-core/utils";
-import type { MessageAttachment } from "@relay/contracts";
+import type { ImageAttachment } from "@relay/contracts";
 import { useInViewport } from "@/shared/hooks/use-in-viewport";
 import { ImageBubble } from "./image-bubble";
 
@@ -17,9 +17,9 @@ const H3_SM  = Math.floor((H3_BIG - GAP) / 2);        // 99 — each small
 const H4     = HALF_W;                                 // 139 — square-ish
 
 type Props = {
-  attachments:     MessageAttachment[];
+  attachments:     ImageAttachment[];
   isMine:          boolean;
-  onOpenLightbox?: (attachments: MessageAttachment[], index: number) => void;
+  onOpenLightbox?: (attachments: ImageAttachment[], index: number) => void;
 };
 
 export function ImageGrid({ attachments, isMine, onOpenLightbox }: Props) {
@@ -96,7 +96,7 @@ export function ImageGrid({ attachments, isMine, onOpenLightbox }: Props) {
 // ─── GridTile ────────────────────────────────────────────────────────────────
 
 type TileProps = {
-  attachment:   MessageAttachment;
+  attachment:   ImageAttachment;
   width:        number;
   height:       number;
   onClick:      () => void;

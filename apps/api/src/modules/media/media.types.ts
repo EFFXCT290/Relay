@@ -5,4 +5,5 @@ export type UploadedMedia = {
   sizeBytes:  number;
   width:      number | null;
   height:     number | null;
+  durationMs: number | null;   // voice notes only; null for images
 };
