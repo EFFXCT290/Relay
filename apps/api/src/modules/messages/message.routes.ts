@@ -276,6 +276,7 @@ const messageRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
         messageType:    "TEXT",
         recipientIds:   otherIds,
         onlineIds:      otherIds.filter((uid) => (fastify.io.sockets.adapter.rooms.get(`user:${uid}`)?.size ?? 0) > 0),
+        log:            fastify.log,
       });
 
       // Record in outbox per recipient, scoped to this conversation, so
@@ -505,6 +506,7 @@ const messageRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
         messageType:    messageType,
         recipientIds:   otherIds,
         onlineIds:      otherIds.filter((uid) => (fastify.io.sockets.adapter.rooms.get(`user:${uid}`)?.size ?? 0) > 0),
+        log:            fastify.log,
       });
 
       return reply.code(201).send(httpPayload);
