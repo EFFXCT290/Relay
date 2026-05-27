@@ -14,6 +14,7 @@ import {
 import { PresenceService } from "../presence/presence.service.js";
 import { CallRepository } from "./calls.repository.js";
 import { callRuntime, type ActiveCallSession } from "./calls.runtime.js";
+import { callDebug } from "./calls.debug.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Call orchestration. Signaling is fire-and-forget over user rooms (raw emit,
@@ -93,6 +94,7 @@ export class CallService {
       conversationId,
     };
     this.emitTo(targetUserId, CALL_EVENTS.RINGING, ringing);
+    callDebug(this.fastify.log, "ringing", { callId, callerId, recipientId: targetUserId, type });
     return { ok: true, callId };
   }
 
@@ -109,6 +111,7 @@ export class CallService {
     session.answeredAt = Date.now();
 
     this.emitTo(session.callerId, CALL_EVENTS.ACCEPTED, { callId });
+    callDebug(this.fastify.log, "ringing → active", { callId, acceptedBy: userId });
   }
 
   // ── Signaling relay (verbatim, to the other peer) ───────────────────────────
@@ -117,12 +120,14 @@ export class CallService {
     const session = callRuntime.get(input.callId);
     if (!session || !callRuntime.isParticipant(session, userId)) return;
     this.emitTo(callRuntime.peerOf(session, userId), CALL_EVENTS.OFFER, input);
+    callDebug(this.fastify.log, "relay offer", { callId: input.callId, from: userId });
   }
 
   relayAnswer(userId: string, input: CallSdpInbound): void {
     const session = callRuntime.get(input.callId);
     if (!session || !callRuntime.isParticipant(session, userId)) return;
     this.emitTo(callRuntime.peerOf(session, userId), CALL_EVENTS.ANSWER, input);
+    callDebug(this.fastify.log, "relay answer", { callId: input.callId, from: userId });
   }
 
   relayIce(userId: string, input: CallIceInbound): void {
@@ -194,11 +199,24 @@ export class CallService {
     },
   ): Promise<void> {
     const session = callRuntime.get(callId);
-    if (!session) return;
+    if (!session) {
+      // Idempotent no-op — a later terminal path lost the race. Tracing this
+      // makes double-fires (disconnect vs. explicit end, stale ring timer)
+      // visible instead of invisible.
+      callDebug(this.fastify.log, "terminate (no-op, already gone)", { callId, status: opts.status });
+      return;
+    }
 
     const durationSec = session.answeredAt
       ? Math.round((Date.now() - session.answeredAt) / 1000)
       : 0;
+    callDebug(this.fastify.log, "terminate", {
+      callId,
+      status: opts.status,
+      fromState: session.state,
+      durationSec,
+      endedByUserId: opts.endedByUserId ?? null,
+    });
 
     try {
       await this.repo.markEnded(callId, opts.status, durationSec, opts.endedByUserId);
