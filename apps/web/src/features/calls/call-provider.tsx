@@ -81,6 +81,8 @@ export function CallProvider({ children }: { children: ReactNode }) {
   const remoteAudioRef = useRef<HTMLAudioElement | null>(null);
   const localVideoRef  = useRef<HTMLVideoElement | null>(null);
   const remoteVideoRef = useRef<HTMLVideoElement | null>(null);
+  // Blurred fill behind the centered remote feed (muted — main video has audio).
+  const remoteBgVideoRef = useRef<HTMLVideoElement | null>(null);
   // The streams are captured here too, so we can re-attach them once the matching
   // media elements actually mount (they don't exist while phase === "idle").
   const localStreamRef  = useRef<MediaStream | null>(null);
@@ -98,6 +100,7 @@ export function CallProvider({ children }: { children: ReactNode }) {
     remoteStreamRef.current = null;
     if (remoteAudioRef.current) remoteAudioRef.current.srcObject = null;
     if (remoteVideoRef.current) remoteVideoRef.current.srcObject = null;
+    if (remoteBgVideoRef.current) remoteBgVideoRef.current.srcObject = null;
     if (localVideoRef.current) localVideoRef.current.srcObject = null;
     dispatch({ t: "terminated", phase });
     if (resetTimer.current) clearTimeout(resetTimer.current);
@@ -122,6 +125,7 @@ export function CallProvider({ children }: { children: ReactNode }) {
         // AUDIO), so only one ref is non-null — no double audio.
         remoteStreamRef.current = stream;
         attachStream(remoteVideoRef.current, stream);
+        attachStream(remoteBgVideoRef.current, stream);
         attachStream(remoteAudioRef.current, stream);
       },
       onConnectionState: (s) => {
@@ -262,6 +266,7 @@ export function CallProvider({ children }: { children: ReactNode }) {
     if (localStreamRef.current) attachStream(localVideoRef.current, localStreamRef.current);
     if (remoteStreamRef.current) {
       attachStream(remoteVideoRef.current, remoteStreamRef.current);
+      attachStream(remoteBgVideoRef.current, remoteStreamRef.current);
       attachStream(remoteAudioRef.current, remoteStreamRef.current);
     }
   }, [state.phase]);
@@ -277,6 +282,7 @@ export function CallProvider({ children }: { children: ReactNode }) {
         remoteAudioRef={remoteAudioRef}
         localVideoRef={localVideoRef}
         remoteVideoRef={remoteVideoRef}
+        remoteBgVideoRef={remoteBgVideoRef}
         onAccept={accept}
         onReject={reject}
         onHangup={hangup}

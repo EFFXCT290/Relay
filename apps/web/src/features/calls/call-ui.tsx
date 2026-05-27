@@ -19,8 +19,9 @@ const display = "var(--font-display)";
 type Props = {
   state:          CallState;
   remoteAudioRef: RefObject<HTMLAudioElement | null>;
-  localVideoRef:  RefObject<HTMLVideoElement | null>;
-  remoteVideoRef: RefObject<HTMLVideoElement | null>;
+  localVideoRef:    RefObject<HTMLVideoElement | null>;
+  remoteVideoRef:   RefObject<HTMLVideoElement | null>;
+  remoteBgVideoRef: RefObject<HTMLVideoElement | null>;
   onAccept:       () => void;
   onReject:       () => void;
   onHangup:       () => void;
@@ -43,7 +44,7 @@ function statusLabel(state: CallState): string {
 }
 
 export function CallUI({
-  state, remoteAudioRef, localVideoRef, remoteVideoRef,
+  state, remoteAudioRef, localVideoRef, remoteVideoRef, remoteBgVideoRef,
   onAccept, onReject, onHangup, onToggleMute, onToggleCamera, onSwitchCamera,
 }: Props) {
   const { phase } = state;
@@ -88,24 +89,38 @@ export function CallUI({
       <style>{`@keyframes callFadeIn{from{opacity:0}to{opacity:1}}
         @keyframes callPulse{0%,100%{transform:scale(1);opacity:1}50%{transform:scale(1.06);opacity:0.85}}`}</style>
 
-      {/* Remote video — full-screen background; it carries the remote audio too. */}
+      {/* Remote stage — centered object-contain feed (never crops faces) over a
+          blurred object-cover fill, so any camera aspect ratio frames cleanly on
+          any screen. The bg layer is muted; the main feed carries the audio. */}
       {isVideo && (
-        <video
-          ref={remoteVideoRef}
-          autoPlay
-          playsInline
-          className="absolute inset-0 h-full w-full bg-black object-cover"
-        />
+        <div className="absolute inset-0 overflow-hidden bg-black">
+          <video
+            ref={remoteBgVideoRef}
+            autoPlay
+            playsInline
+            muted
+            className="absolute inset-0 h-full w-full scale-110 object-cover opacity-40 blur-2xl"
+          />
+          <div className="absolute inset-0 flex items-center justify-center">
+            <video
+              ref={remoteVideoRef}
+              autoPlay
+              playsInline
+              className="max-h-full max-w-full object-contain"
+            />
+          </div>
+        </div>
       )}
 
-      {/* Self-preview — corner, mirrored while front-facing. */}
+      {/* Self-preview — corner thumbnail, mirrored while front-facing. Responsive
+          width + fixed aspect so it never gets clipped by the breakpoint. */}
       {isVideo && (
         <video
           ref={localVideoRef}
           autoPlay
           playsInline
           muted
-          className="absolute z-[2] h-40 w-28 rounded-2xl border border-white/15 object-cover shadow-xl"
+          className="absolute z-[2] aspect-[3/4] w-[30vw] max-w-[150px] rounded-2xl border border-white/15 object-cover shadow-xl sm:max-w-[180px]"
           style={{
             right: "calc(env(safe-area-inset-right) + 16px)",
             bottom: "calc(env(safe-area-inset-bottom) + 124px)",
