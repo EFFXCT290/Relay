@@ -19,6 +19,7 @@ import {
 } from "./message.socket.js";
 import { extractUrls } from "./utils/extract-urls.js";
 import { fetchEmbed } from "./services/embed.service.js";
+import { maybeNotifyDiscord } from "./services/discord-notify.js";
 
 // Guards that the caller is a participant of conversationId. Returns the
 // conversation row when authorized; throws ProblemError otherwise.
@@ -269,6 +270,14 @@ const messageRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
       emitMessageNew(fastify.io, conversationId, { message: broadcastMessage });
       for (const p of participants) emitMessageNewToUser(fastify.io, p.userId, { message: broadcastMessage });
 
+      void maybeNotifyDiscord({
+        senderUsername: created.sender.username,
+        body:           body,
+        messageType:    "TEXT",
+        recipientIds:   otherIds,
+        onlineIds:      otherIds.filter((uid) => (fastify.io.sockets.adapter.rooms.get(`user:${uid}`)?.size ?? 0) > 0),
+      });
+
       // Record in outbox per recipient, scoped to this conversation, so
       // replay requests can be narrowed without returning unrelated events.
       // Each recipient gets a unique eventId so their ACK is independent.
@@ -489,6 +498,14 @@ const messageRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
       for (const p of participants) {
         emitMessageNewToUser(fastify.io, p.userId, { message: broadcastMessage });
       }
+
+      void maybeNotifyDiscord({
+        senderUsername: created.sender.username,
+        body:           null,
+        messageType:    messageType,
+        recipientIds:   otherIds,
+        onlineIds:      otherIds.filter((uid) => (fastify.io.sockets.adapter.rooms.get(`user:${uid}`)?.size ?? 0) > 0),
+      });
 
       return reply.code(201).send(httpPayload);
     },
