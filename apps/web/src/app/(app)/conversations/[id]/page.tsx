@@ -1251,10 +1251,17 @@ export default function ChatThreadPage() {
         </button>
         <button
           type="button"
-          aria-label="Video call (coming soon)"
-          disabled
-          title="Video calls coming soon"
-          className="flex h-10 w-10 items-center justify-center rounded-full opacity-40"
+          aria-label="Video call"
+          disabled={!detail}
+          onClick={() =>
+            detail &&
+            startCall(
+              { id: detail.participant.userId, username: detail.participant.username },
+              "VIDEO",
+              conversationId,
+            )
+          }
+          className="flex h-10 w-10 items-center justify-center rounded-full hover:bg-white/5 disabled:opacity-40"
         >
           <Video className="h-5 w-5 text-[var(--color-text)]" />
         </button>

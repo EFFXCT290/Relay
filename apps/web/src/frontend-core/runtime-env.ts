@@ -12,12 +12,12 @@ export function getApiUrl(): string {
   if (typeof window !== "undefined" && window.__ENV__?.API_URL !== undefined) {
     return window.__ENV__.API_URL;
   }
-  return process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3001";
+  return process.env.NEXT_PUBLIC_API_URL ?? "http://192.168.40.183:3001";
 }
 
 export function getWsUrl(): string {
   if (typeof window !== "undefined" && window.__ENV__?.WS_URL !== undefined) {
     return window.__ENV__.WS_URL;
   }
-  return process.env.NEXT_PUBLIC_WS_URL ?? "http://localhost:3001";
+  return process.env.NEXT_PUBLIC_WS_URL ?? "ws://192.168.40.183:3001";
 }

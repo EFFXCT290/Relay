@@ -15,8 +15,18 @@ import type {
 
 const ICE_SERVERS: RTCIceServer[] = [{ urls: "stun:stun.l.google.com:19302" }];
 
+// 720p ideal — the browser negotiates down on weaker links. The 1080p bump and
+// adaptive bitrate live in 6D Step 3 (deferred).
+const VIDEO_CONSTRAINTS: MediaTrackConstraints = {
+  width:      { ideal: 1280 },
+  height:     { ideal: 720 },
+  frameRate:  { ideal: 30 },
+  facingMode: "user",
+};
+
 export type WebRtcCallbacks = {
   onIceCandidate:    (candidate: RTCIceCandidateInitLike) => void;
+  onLocalStream:     (stream: MediaStream) => void;
   onRemoteStream:    (stream: MediaStream) => void;
   onConnectionState: (state: RTCPeerConnectionState) => void;
 };
@@ -28,16 +38,21 @@ export class WebRtcController {
   private hasRemoteDesc = false;
   private pendingIce: RTCIceCandidateInitLike[] = [];
   private closed = false;
+  private facingMode: "user" | "environment" = "user";
 
   constructor(private cb: WebRtcCallbacks) {}
 
-  // Acquire the mic and attach its track. Throws if permission is denied — the
-  // caller must close() and abort the call.
-  async startLocalAudio(): Promise<void> {
+  // Acquire the mic (and camera for video calls) and attach the tracks. Throws if
+  // permission is denied — the caller must close() and abort the call.
+  async startLocalMedia(opts: { video: boolean }): Promise<void> {
     if (this.localStream || this.closed) return;
-    this.localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+    this.localStream = await navigator.mediaDevices.getUserMedia({
+      audio: true,
+      video: opts.video ? VIDEO_CONSTRAINTS : false,
+    });
     const pc = this.ensurePc();
     for (const track of this.localStream.getTracks()) pc.addTrack(track, this.localStream);
+    this.cb.onLocalStream(this.localStream);
   }
 
   private ensurePc(): RTCPeerConnection {
@@ -114,6 +129,49 @@ export class WebRtcController {
 
   setMuted(muted: boolean): void {
     for (const track of this.localStream?.getAudioTracks() ?? []) track.enabled = !muted;
+  }
+
+  // Camera on/off without dropping the sender — disabling keeps the track in the
+  // connection (remote sees black), so it's instant and reversible.
+  setCameraEnabled(enabled: boolean): void {
+    for (const track of this.localStream?.getVideoTracks() ?? []) track.enabled = enabled;
+  }
+
+  // Flip front/back. replaceTrack is the authoritative network swap (no SDP
+  // renegotiation); localStream is kept in sync so the self-preview reflects the
+  // new camera. Exactly one video track in the stream at all times.
+  async switchCamera(): Promise<void> {
+    if (!this.localStream || !this.pc || this.closed) return;
+    const next = this.facingMode === "user" ? "environment" : "user";
+
+    let newStream: MediaStream;
+    try {
+      newStream = await navigator.mediaDevices.getUserMedia({
+        audio: false,
+        video: { ...VIDEO_CONSTRAINTS, facingMode: next },
+      });
+    } catch {
+      return; // no second camera / permission denied — stay on the current one
+    }
+    if (this.closed) {
+      for (const t of newStream.getTracks()) t.stop();
+      return;
+    }
+
+    const newTrack = newStream.getVideoTracks()[0];
+    if (!newTrack) return;
+
+    const sender = this.pc.getSenders().find((s) => s.track?.kind === "video");
+    await sender?.replaceTrack(newTrack);
+
+    const oldTrack = this.localStream.getVideoTracks()[0];
+    if (oldTrack) {
+      oldTrack.stop();
+      this.localStream.removeTrack(oldTrack);
+    }
+    this.localStream.addTrack(newTrack);
+    this.facingMode = next;
+    this.cb.onLocalStream(this.localStream);
   }
 
   // Idempotent full teardown. Stops EVERY local track (releases the mic), stops
