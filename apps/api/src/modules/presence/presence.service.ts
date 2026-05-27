@@ -12,7 +12,9 @@ import { PresenceRepository } from "./presence.repository.js";
 //
 // Presence model:
 //   isOnline  = Redis heartbeat key exists (refreshed by client pings)
-//   lastSeen  = timestamp of last confirmed offline (written only on transition)
+//   lastSeen  = UserPresence.lastSeenAt in Postgres — written by THIS service on
+//               heartbeats (throttled) and flushed on the offline transition.
+//               Durable (survives Redis flush); this service is the sole writer.
 //
 // Timer model:
 //   One pending offline check per userId maximum (offlineTimers map below).
@@ -47,15 +49,20 @@ export class PresenceService {
 
     const wasOnline = await this.repo.heartbeatExists(userId);
     await this.repo.setHeartbeat(userId);
+    await this.repo.touchPresence(userId, true); // durable lastSeen + ensure row exists
     if (!wasOnline) {
       this.fastify.log.debug({ userId }, "presence: online transition");
       this.broadcastOnline(userId);
     }
   }
 
-  // Called on presence:ping. Silently refreshes heartbeat TTL — no broadcast.
+  // Called on presence:ping. Refreshes heartbeat TTL (no broadcast) and writes the
+  // durable lastSeen — throttled so steady-state pings touch Postgres ≤1×/window.
   async pulse(userId: string): Promise<void> {
     await this.repo.setHeartbeat(userId);
+    if (await this.repo.claimLastSeenWrite(userId)) {
+      await this.repo.touchPresence(userId, true);
+    }
   }
 
   // Schedules the offline check after PRESENCE_GRACE_MS. Always replaces the
@@ -78,16 +85,23 @@ export class PresenceService {
     this.fastify.log.debug({ userId, graceMs: PRESENCE_GRACE_MS, timerMapSize: offlineTimers.size }, "presence: offline timer started");
   }
 
-  // Double-checks heartbeat before writing. Guards the narrow race where
-  // markOnline couldn't cancel the timer (already fired) but DID refresh
-  // the heartbeat before this async check completes.
+  // Double-checks heartbeat before writing. A live heartbeat here means one of
+  // two things, indistinguishable from the key alone: (a) the user genuinely
+  // reconnected and markOnline refreshed it, or (b) the grace window elapsed
+  // before the heartbeat's TTL did. Rather than give up (which stranded the
+  // user "online" with a stale lastSeen — the ~30% disconnect bug), we RE-ARM.
+  // If the user is truly back, markOnline cancels the timer; if they're gone,
+  // the heartbeat expires and a later check writes lastSeen. Correct regardless
+  // of the GRACE_MS / HEARTBEAT_TTL_S relationship. See SAFEGUARD 9.
   async checkAndMarkOffline(userId: string): Promise<void> {
     if (await this.repo.heartbeatExists(userId)) {
-      this.fastify.log.debug({ userId }, "presence: offline check skipped (heartbeat alive after grace)");
+      this.fastify.log.debug({ userId }, "presence: heartbeat alive after grace — re-arming offline check");
+      this.scheduleOffline(userId);
       return;
     }
-    const lastSeen = new Date().toISOString();
-    await this.repo.setLastSeen(userId, lastSeen);
+    // Durable flush — sole writer of lastSeenAt. touchPresence returns the
+    // timestamp it wrote, so we broadcast it without a re-read.
+    const lastSeen = (await this.repo.touchPresence(userId, false)).toISOString();
     this.fastify.log.debug({ userId, lastSeen }, "presence: offline confirmed, lastSeen written");
     this.broadcastOffline(userId, lastSeen);
   }
@@ -100,13 +114,17 @@ export class PresenceService {
     return { isOnline, lastSeen };
   }
 
+  // Online from Redis (one pipelined round-trip); lastSeen from Postgres (one
+  // batched query). No per-user N+1.
   async getMany(userIds: string[]): Promise<Array<{ userId: string; isOnline: boolean; lastSeen: string | null }>> {
-    return Promise.all(userIds.map(async (userId) => {
-      const [isOnline, lastSeen] = await Promise.all([
-        this.repo.heartbeatExists(userId),
-        this.repo.getLastSeen(userId),
-      ]);
-      return { userId, isOnline, lastSeen };
+    const [onlineFlags, lastSeenMap] = await Promise.all([
+      this.repo.heartbeatExistsMany(userIds),
+      this.repo.getLastSeenMany(userIds),
+    ]);
+    return userIds.map((userId, i) => ({
+      userId,
+      isOnline: onlineFlags[i] ?? false,
+      lastSeen: lastSeenMap.get(userId) ?? null,
     }));
   }
 

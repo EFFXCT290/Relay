@@ -34,9 +34,15 @@ model User {
   @@index([username])
 }
 
+// Durable "last seen" history. The presence service is the SOLE writer of
+// lastSeenAt and sets it explicitly (no @updatedAt) — so the timestamp can't be
+// re-stamped by unrelated row updates. @default(now()) is an INSERT-only fallback
+// for the NOT NULL column (never fires on UPDATE, so it can't re-stamp). isOnline
+// is written best-effort for debugging but is NEVER read for status; online is
+// derived from the Redis heartbeat key. See apps/api/src/modules/presence/.
 model UserPresence {
   userId     String   @id
-  lastSeenAt DateTime @updatedAt
+  lastSeenAt DateTime @default(now())
   isOnline   Boolean  @default(false)
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)

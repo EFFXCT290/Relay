@@ -649,16 +649,18 @@ Returns the last-read message per participant. Useful on initial load to render 
 
 ## Last Seen
 
-### Behaviour
+### Behaviour (shipped)
 
-- `lastSeenAt` updates on every authenticated request via a Fastify `onRequest` hook — no client action needed, zero API surface.
-- `isOnline` is `true` while a Socket.IO connection is active, `false` on disconnect.
-- Visibility is gated: only users who share at least one conversation can see each other's presence.
-- Presence is not globally public.
+Implemented in `apps/api/src/modules/presence/` — heartbeat-driven, **not** the request-hook design sketched below. See `docs/task-5-presence.md` for the end-to-end flow.
+
+- **Online** = a Redis `presence:heartbeat:{userId}` key exists (`EX 30s`, refreshed by the client's `presence:ping` every 10s). Existence ⇒ online; never a stored boolean.
+- **`lastSeenAt`** is durable in Postgres `UserPresence`, written **only** by the presence service (throttled on heartbeats, flushed on the offline transition) — there is no `onRequest` hook updating it.
+- Events are `presence:online {userId}` / `presence:offline {userId, lastSeen}`, broadcast via `io.emit` to all clients.
+- ⚠️ **Not yet implemented:** per-conversation visibility gating, targeted (`user:<id>`-room) fan-out, the single `presence:update` event, and `GET /api/users/:userId/presence`. The code blocks below are the original aspirational sketch, retained for reference only.
 
 ---
 
-### Fastify Hook
+### Fastify Hook *(superseded sketch — not implemented)*
 
 ```typescript
 // plugins/presence.ts
