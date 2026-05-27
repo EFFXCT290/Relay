@@ -1,6 +1,7 @@
 import type { Socket } from "socket.io";
 import type { FastifyInstance } from "fastify";
 
+import { registerCallSocket }         from "../modules/calls/calls.socket.js";
 import { registerConversationSocket } from "../modules/conversations/conversation.socket.js";
 import { registerMessageSocket }      from "../modules/messages/message.socket.js";
 import { registerNotificationSocket } from "../modules/notifications/notification.socket.js";
@@ -23,6 +24,7 @@ export function registerAllSocketHandlers(
   userId:  string,
 ) {
   registerConversationSocket(socket, fastify, userId);
+  registerCallSocket(socket, fastify, userId);
   registerMessageSocket(socket, fastify, userId);
   registerNotificationSocket(socket, fastify, userId);
   registerPresenceSocket(socket, fastify, userId);

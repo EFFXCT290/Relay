@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
-import { ArrowLeft, ImagePlus, MoreHorizontal } from "lucide-react";
+import { ArrowLeft, ImagePlus, MoreHorizontal, Phone, Video } from "lucide-react";
 import imageCompression from "browser-image-compression";
 import { ApiError, api } from "@/frontend-core/api";
 import { getSocket, getReconnectEpoch } from "@/frontend-core/socket";
@@ -27,6 +27,7 @@ import {
 import { ImageLightbox, type LightboxState } from "@/features/messages/components/lightbox/image-lightbox";
 import { ACK_EVENT, MEDIA_EVENTS, VOICE_EVENTS, PRESENCE_EVENTS, SYNC_EVENTS, TYPING_EVENTS, type MediaReadyEvent, type MediaProcessedEvent, type VoiceTranscriptReadyEvent, type ImageAttachment, type DeliveryMode, type PresenceSyncResponse, type ReplayResponse, type TypingSyncResponse } from "@relay/contracts";
 import { formatLastSeen } from "@/frontend-core/format-presence";
+import { useCall } from "@/features/calls/call-provider";
 
 const PAGE_SIZE = 30;
 
@@ -129,6 +130,7 @@ export default function ChatThreadPage() {
   const params = useParams<{ id: string }>();
   const router = useRouter();
   const conversationId = params.id;
+  const { startCall } = useCall();
 
   const [, setTick] = useState(0);
   useEffect(() => {
@@ -1231,6 +1233,31 @@ export default function ChatThreadPage() {
             <div className="h-9 w-32 animate-pulse rounded bg-white/5" />
           )}
         </div>
+        <button
+          type="button"
+          aria-label="Audio call"
+          disabled={!detail}
+          onClick={() =>
+            detail &&
+            startCall(
+              { id: detail.participant.userId, username: detail.participant.username },
+              "AUDIO",
+              conversationId,
+            )
+          }
+          className="flex h-10 w-10 items-center justify-center rounded-full hover:bg-white/5 disabled:opacity-40"
+        >
+          <Phone className="h-5 w-5 text-[var(--color-text)]" />
+        </button>
+        <button
+          type="button"
+          aria-label="Video call (coming soon)"
+          disabled
+          title="Video calls coming soon"
+          className="flex h-10 w-10 items-center justify-center rounded-full opacity-40"
+        >
+          <Video className="h-5 w-5 text-[var(--color-text)]" />
+        </button>
         <button
           type="button"
           aria-label="More"

@@ -30,6 +30,8 @@ model User {
   reads         MessageRead[]
   reactions     Reaction[]
   presence      UserPresence?
+  outgoingCalls Call[]         @relation("OutgoingCalls")
+  incomingCalls Call[]         @relation("IncomingCalls")
 
   @@index([username])
 }
@@ -59,6 +61,7 @@ model Conversation {
 
   participants Participant[]
   messages     Message[]
+  calls        Call[]
 }
 
 model Participant {
@@ -153,6 +156,55 @@ model MessageRead {
   @@unique([messageId, readerId])
   @@index([messageId])
   @@index([readerId])
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+//  Calls (Phase 6C — durable history; runtime state is ephemeral, see
+//  apps/api/src/modules/calls/calls.runtime.ts)
+// ────────────────────────────────────────────────────────────────────────────
+// Calls are NOT messages and never live in the Message table. This table is the
+// durable record only (missed/answered/duration/timestamps); active ringing/
+// negotiation state is held in-memory. The row is created at call:init (status
+// RINGING) so a missed call survives a crash/disconnect/refresh. durationSec
+// counts CONNECTED media time — measured from the runtime answeredAt, never
+// from startedAt. conversationId/endedByUserId are nullable and recorded now to
+// avoid future migrations (call-again, in-conversation history, who-hung-up).
+
+enum CallType {
+  AUDIO
+  VIDEO
+}
+
+enum CallStatus {
+  RINGING
+  ANSWERED
+  MISSED
+  REJECTED
+  FAILED
+  ENDED
+}
+
+model Call {
+  id             String     @id @default(uuid())
+  callerId       String
+  recipientId    String
+  conversationId String?
+  type           CallType
+  status         CallStatus @default(RINGING)
+  startedAt      DateTime?
+  answeredAt     DateTime?
+  endedAt        DateTime?
+  durationSec    Int        @default(0)
+  endedByUserId  String? // who ended/rejected; null = system (e.g. ring timeout)
+  createdAt      DateTime   @default(now())
+
+  caller       User          @relation("OutgoingCalls", fields: [callerId], references: [id], onDelete: Cascade)
+  recipient    User          @relation("IncomingCalls", fields: [recipientId], references: [id], onDelete: Cascade)
+  conversation Conversation? @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+
+  @@index([callerId, createdAt])
+  @@index([recipientId, createdAt])
+  @@index([conversationId, createdAt])
 }
 
 // ────────────────────────────────────────────────────────────────────────────

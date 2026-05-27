@@ -27,6 +27,7 @@ import mediaRoutes from "./modules/media/media.routes.js";
 import authRoutes from "./modules/auth/auth.routes.js";
 import userRoutes from "./modules/users/user.routes.js";
 import conversationRoutes from "./modules/conversations/conversation.routes.js";
+import callRoutes from "./modules/calls/calls.routes.js";
 import messageRoutes from "./modules/messages/message.routes.js";
 import notificationRoutes from "./modules/notifications/notification.routes.js";
 import syncRoutes from "./modules/sync/sync.routes.js";
@@ -115,6 +116,7 @@ export async function buildServer() {
   await app.register(authRoutes,   { prefix: "/api" });
   await app.register(userRoutes, { prefix: "/api" });
   await app.register(conversationRoutes, { prefix: "/api" });
+  await app.register(callRoutes, { prefix: "/api" });
   await app.register(messageRoutes, { prefix: "/api" });
   await app.register(notificationRoutes, { prefix: "/api" });
   await app.register(syncRoutes, { prefix: "/api" });

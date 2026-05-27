@@ -6,6 +6,7 @@ import { ApiError, api } from "@/frontend-core/api";
 import { SidebarNav } from "./sidebar-nav";
 import { BottomTabBar } from "./bottom-tab-bar";
 import { NotificationsProvider } from "@/providers/notifications-provider";
+import { CallProvider } from "@/features/calls/call-provider";
 
 // Wraps every authenticated route. Fetches /auth/me on mount, redirects to
 // /sign-in on 401, otherwise renders the chrome (sidebar on desktop, bottom
@@ -58,11 +59,13 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
   return (
     <NotificationsProvider>
-      <div className="flex min-h-dvh flex-col lg:flex-row">
-        <SidebarNav username={username} />
-        <ChatAwareMain>{children}</ChatAwareMain>
-        <BottomTabBar />
-      </div>
+      <CallProvider>
+        <div className="flex min-h-dvh flex-col lg:flex-row">
+          <SidebarNav username={username} />
+          <ChatAwareMain>{children}</ChatAwareMain>
+          <BottomTabBar />
+        </div>
+      </CallProvider>
     </NotificationsProvider>
   );
 }

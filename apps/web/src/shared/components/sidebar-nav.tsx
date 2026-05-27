@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Bell, Inbox, LogOut, User } from "lucide-react";
+import { Bell, Inbox, LogOut, Phone, User } from "lucide-react";
 import { Wordmark } from "./wordmark";
 import { cn } from "@/frontend-core/utils";
 import { api } from "@/frontend-core/api";
@@ -18,6 +18,7 @@ type NavItem = {
 
 const ITEMS: NavItem[] = [
   { href: "/conversations", label: "Inbox", icon: Inbox },
+  { href: "/calls", label: "Calls", icon: Phone },
   { href: "/alerts", label: "Alerts", icon: Bell, badgeRef: "alerts" },
   { href: "/profile", label: "Profile", icon: User },
 ];
