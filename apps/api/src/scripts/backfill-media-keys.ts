@@ -1,21 +1,29 @@
-// Migrate Phase-1 (flat) and Phase-2 (dated-flat) storage keys to the
-// Phase-6B per-mediaId folder layout, for all media kinds (IMAGE, VIDEO, VOICE).
+// Enforce Phase-6B storage layout for all media rows (IMAGE, VIDEO, VOICE).
+//
+// Every row is inspected — not just legacy ones. For each row the script
+// derives the canonical Phase-6B key deterministically from the DB (id, kind,
+// createdAt / date embedded in the existing key). It then:
+//
+//   • Row already at canonical key → verify the MinIO object actually exists.
+//     Logs a warning if the DB points to a key with no backing object.
+//   • Row at a legacy key (flat or dated-flat) → COPY to canonical key,
+//     verify, update DB, optionally delete old object.
 //
 // The DB is the source of truth — only objects referenced by a row are touched.
 // Prod and dev share one MinIO bucket; rows whose source object is absent in
-// MinIO are silently skipped so one environment's run can't break the other.
+// MinIO are logged as missing and skipped without failing the run.
 //
 // S3/MinIO has no rename: each object is COPYed to its new key, verified, then
 // the DB row is updated. Deletion is a separate opt-in pass so a crash mid-run
 // can never orphan a row from its object.
 //
-// Idempotent: rows already on a Phase-6B key (has <id>/ subfolder) are skipped.
+// Fully idempotent: safe to re-run at any time.
 //
-//   Dry run (default):
+//   Dry run (default, no MinIO calls):
 //     npm run backfill:media-keys
-//   Copy + DB update, leave old objects in place:
+//   Verify + migrate (copy + DB update, old objects left in place):
 //     npm run backfill:media-keys -- --apply
-//   Copy + DB update + delete old objects:
+//   Verify + migrate + delete old objects:
 //     npm run backfill:media-keys -- --apply --delete-stale
 //   Scope to one or more kinds:
 //     npm run backfill:media-keys -- --apply --kind=images
@@ -107,19 +115,15 @@ async function main() {
   console.log(`[backfill] ${rows.length} rows to check\n`);
 
   for (const row of rows) {
-    // Already in Phase-6B folder layout (<id>/ subfolder present) — skip.
-    if (parseMediaPrefix(row.storageKey) !== null) {
-      skipped++;
-      continue;
-    }
-
     if (!row.kind) { skipped++; continue; }
     const meta = KIND_META[row.kind];
-    // Derive partition date: Phase-2 dated keys carry it in the path; legacy
-    // flat keys fall back to the row's createdAt.
-    const partitionDate = parseMediaKeyDate(row.storageKey) ?? row.createdAt;
-    const ext    = path.extname(row.storageKey) || meta.defaultExt;
-    const newKey = buildVariantKey({
+
+    // Derive the canonical Phase-6B key for this row.
+    // For keys that already carry a date partition, recover it from the key so
+    // the partition is preserved exactly. Flat legacy keys fall back to createdAt.
+    const partitionDate  = parseMediaKeyDate(row.storageKey) ?? row.createdAt;
+    const ext            = path.extname(row.storageKey) || meta.defaultExt;
+    const canonicalKey   = buildVariantKey({
       kind:     meta.pathKind,
       id:       row.id,
       group:    "original",
@@ -127,53 +131,56 @@ async function main() {
       date:     partitionDate,
     });
 
-    assertPhase6BKey(newKey);
+    assertPhase6BKey(canonicalKey);
 
-    // Guard against accidental self-copy (key generation bug or schema drift).
-    if (row.storageKey === newKey) {
-      skipped++;
+    // ── Already at the canonical key ───────────────────────────────────────
+    if (row.storageKey === canonicalKey) {
+      if (!APPLY) { skipped++; continue; } // dry-run: trust it, no HEAD call
+      // Verify the object actually exists — DB row could point to a key with
+      // no backing object if a previous migration crashed after the DB write.
+      if (await objectExists(s3, bucket, canonicalKey)) {
+        skipped++;
+      } else {
+        missing++;
+        console.warn(`  MISSING  ${row.kind} ${row.id.slice(0, 8)}  no object at canonical key: ${canonicalKey}`);
+      }
       continue;
     }
 
+    // ── Needs migration ────────────────────────────────────────────────────
     console.log(`  ${row.kind.padEnd(5)} ${row.id.slice(0, 8)}  ${row.storageKey}`);
-    console.log(`         ->  ${newKey}`);
+    console.log(`         ->  ${canonicalKey}`);
 
-    if (!APPLY) {
-      migrated++;
-      continue;
-    }
+    if (!APPLY) { migrated++; continue; }
 
     try {
-      // Shared-bucket safety: if the source object isn't in MinIO, this row
-      // belongs to a different DB environment (prod vs dev) — skip silently.
+      // Shared-bucket safety: source absent means this row belongs to a
+      // different DB environment (prod vs dev) — skip without failing.
       if (!await objectExists(s3, bucket, row.storageKey)) {
-        console.warn(`         SKIP — not found in MinIO`);
+        console.warn(`         SKIP — source not found in MinIO`);
         missing++;
         continue;
       }
 
-      // Skip the copy if the destination already exists — makes retries safe.
-      if (await objectExists(s3, bucket, newKey)) {
+      // Destination may already exist on a retry — skip the copy, still fix DB.
+      if (await objectExists(s3, bucket, canonicalKey)) {
         console.log(`         destination already exists — skipping copy`);
       } else {
         await s3.send(new CopyObjectCommand({
           Bucket:     bucket,
-          Key:        newKey,
+          Key:        canonicalKey,
           CopySource: encodeURI(`${bucket}/${row.storageKey}`),
         }));
-
-        // Verify the destination landed before touching the DB.
-        if (!await objectExists(s3, bucket, newKey)) {
-          throw new Error(`copy reported success but destination not found: ${newKey}`);
+        if (!await objectExists(s3, bucket, canonicalKey)) {
+          throw new Error(`copy reported success but destination not found: ${canonicalKey}`);
         }
       }
 
-      // Update DB: point storageKey at the new Phase-6B key.
-      // blurStorageKey is dead architecture — null it out unconditionally.
+      // Update DB. blurStorageKey is dead architecture — null it unconditionally.
       await prisma.media.update({
         where: { id: row.id },
         data:  {
-          storageKey:     newKey,
+          storageKey:     canonicalKey,
           blurStorageKey: null,
           blurWidth:      null,
           blurHeight:     null,
