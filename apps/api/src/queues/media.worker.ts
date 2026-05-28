@@ -9,7 +9,7 @@ import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import type { PrismaClient } from "@prisma/client";
 import type { Server as IOServer } from "socket.io";
 import type { FastifyBaseLogger } from "fastify";
-import { buildVariantKey, parseMediaKeyDate } from "../modules/media/media.keys.js";
+import { buildVariantKey, parseMediaKeyDate, assertPhase6BKey, isPhase6BKeyError } from "../modules/media/media.keys.js";
 import { patchManifest } from "../modules/media/media.manifest.js";
 import { createMediaRepository } from "../modules/media/media.repository.js";
 import {
@@ -69,7 +69,12 @@ export function createMediaWorker(deps: WorkerDeps) {
   );
 
   worker.on("failed", (job, err) => {
-    log.error({ err, jobId: job?.id, mediaId: job?.data.mediaId }, "[media-worker] image job failed");
+    const isSchemaViolation = isPhase6BKeyError(err);
+    log.error(
+      { err, jobId: job?.id, mediaId: job?.data.mediaId,
+        ...(isSchemaViolation ? { phase6bCode: err.code, rejectedKey: err.key } : {}) },
+      isSchemaViolation ? "[media-worker] image job failed — Phase-6B key violation" : "[media-worker] image job failed",
+    );
     if (job?.data.mediaId) {
       void prisma.media.update({ where: { id: job.data.mediaId }, data: { status: "failed" } }).catch(() => {});
     }
@@ -96,10 +101,12 @@ export function createVideoWorker(deps: WorkerDeps) {
   );
 
   worker.on("failed", (job, err) => {
+    const isSchemaViolation = isPhase6BKeyError(err);
     const e = err as { stderr?: string; code?: number };
     log.error(
-      { err, jobId: job?.id, mediaId: job?.data.mediaId, exitCode: e.code ?? null, stderr: e.stderr?.slice(0, 2000) },
-      "[video-worker] video job failed",
+      { err, jobId: job?.id, mediaId: job?.data.mediaId,
+        ...(isSchemaViolation ? { phase6bCode: err.code, rejectedKey: err.key } : { exitCode: e.code ?? null, stderr: e.stderr?.slice(0, 2000) }) },
+      isSchemaViolation ? "[video-worker] video job failed — Phase-6B key violation" : "[video-worker] video job failed",
     );
     if (job?.data.mediaId) {
       void prisma.media.update({ where: { id: job.data.mediaId }, data: { status: "failed" } }).catch(() => {});
@@ -179,6 +186,7 @@ async function processImage(deps: WorkerDeps, data: ProcessImageJobData) {
           .toBuffer();
         const thumbMeta = await sharp(thumbBuf).metadata();
         thumbKey    = buildVariantKey({ kind: "images", id: mediaId, group: "thumbnails", filename: "thumb_md.webp", date: partitionDate });
+        assertPhase6BKey(thumbKey);
         thumbWidth  = thumbMeta.width  ?? null;
         thumbHeight = thumbMeta.height ?? null;
         await s3.send(new PutObjectCommand({
@@ -258,6 +266,7 @@ async function generateImageVariants(
     mime:     string;
   }) => {
     const key = buildVariantKey({ kind: "images", id: mediaId, group: opts.group, filename: opts.filename, date: partitionDate });
+    assertPhase6BKey(key);
     const meta = await sharp(opts.buf).metadata();
     await s3.send(new PutObjectCommand({
       Bucket: env.MINIO_BUCKET, Key: key, Body: opts.buf,
@@ -345,6 +354,7 @@ async function processVideo(deps: WorkerDeps, data: ProcessVideoJobData) {
     buf: Buffer; mime: string; codec?: string | null; width?: number | null; height?: number | null;
   }) => {
     const key = buildVariantKey({ kind: "videos", id: mediaId, group: opts.group, filename: opts.filename, date: partitionDate });
+    assertPhase6BKey(key);
     await s3.send(new PutObjectCommand({
       Bucket: env.MINIO_BUCKET, Key: key, Body: opts.buf,
       ContentType: opts.mime, ContentLength: opts.buf.length,

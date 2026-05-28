@@ -112,3 +112,91 @@ export function parseMediaPrefix(
 export function kindToPath(kind: "IMAGE" | "VIDEO" | "VOICE"): MediaKind {
   return kind === "IMAGE" ? "images" : kind === "VIDEO" ? "videos" : "voice";
 }
+
+// ────────────────────────────────────────────────────────────────────────────
+//  Phase-6B enforcement
+// ────────────────────────────────────────────────────────────────────────────
+
+const _ALLOWED_KINDS  = new Set<string>(["images", "videos", "voice"]);
+// Exhaustive: adding a new MediaGroup without updating this set is a compile-time
+// omission but a runtime catch — the assertion will reject the unknown group.
+const _ALLOWED_GROUPS = new Set<string>([
+  "original", "optimized", "thumbnails", "previews", "waveforms", "transcripts", "metadata",
+]);
+const _UUID_RE      = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const _DATE2_RE     = /^\d{2}$/;
+const _SAFE_FILE_RE = /^[^/\\]+$/; // no slashes, no backslashes
+
+export const PHASE6B_ERROR_NAMESPACE = "media.phase6b" as const;
+
+// Short violation names used internally; the public code is always namespaced.
+type _Phase6BViolation =
+  | "INVALID_SEGMENT_COUNT"
+  | "UNKNOWN_KIND"
+  | "INVALID_DATE_PARTITION"
+  | "INVALID_MEDIA_ID"
+  | "UNKNOWN_GROUP"
+  | "UNSAFE_FILENAME";
+
+/** Fully-qualified error code, e.g. `"media.phase6b.UNKNOWN_GROUP"`.
+ *  The namespace prefix makes log filtering unambiguous in Grafana / Datadog
+ *  and avoids collisions if other pipelines introduce similar violation names. */
+export type Phase6BKeyErrorCode = `${typeof PHASE6B_ERROR_NAMESPACE}.${_Phase6BViolation}`;
+
+/** Thrown by assertPhase6BKey. Carries a machine-readable `code` and the
+ *  `key` that was rejected so callers can branch and log without string parsing. */
+export class Phase6BKeyError extends Error {
+  readonly code: Phase6BKeyErrorCode;
+  readonly key:  string;
+
+  constructor(violation: _Phase6BViolation, key: string, detail: string) {
+    super(`[media] ${detail} — key: "${key}"`);
+    this.name = "Phase6BKeyError";
+    this.code = `${PHASE6B_ERROR_NAMESPACE}.${violation}`;
+    this.key  = key;
+  }
+}
+
+/**
+ * Type guard that identifies Phase6BKeyError by name rather than instanceof,
+ * which is unreliable across ESM module boundaries and bundled workers where
+ * two separate class references can exist for the same logical class.
+ */
+export function isPhase6BKeyError(err: unknown): err is Phase6BKeyError {
+  return (
+    typeof err === "object" &&
+    err !== null &&
+    (err as { name?: unknown }).name === "Phase6BKeyError"
+  );
+}
+
+/**
+ * Throws a Phase6BKeyError if `key` does not conform to the Phase-6B layout.
+ * Validates each segment semantically:
+ *   - kind     ∈ {images, videos, voice}
+ *   - YYYY/MM/DD — numeric date partition
+ *   - id       — UUID (randomUUID() output)
+ *   - group    ∈ known MediaGroup values
+ *   - filename — no path separators or traversal sequences
+ *
+ * Call before every PutObjectCommand so a regression is caught at write time
+ * with a precise, structured error rather than silently landing a non-6B key.
+ */
+export function assertPhase6BKey(key: string): void {
+  const parts = key.split("/");
+  if (parts.length !== 7)
+    throw new Phase6BKeyError("INVALID_SEGMENT_COUNT", key, `expected 7 segments, got ${parts.length}`);
+
+  const [kind, yyyy, mm, dd, id, group, filename] = parts as [string, string, string, string, string, string, string];
+
+  if (!_ALLOWED_KINDS.has(kind))
+    throw new Phase6BKeyError("UNKNOWN_KIND", key, `unknown kind "${kind}"`);
+  if (!/^\d{4}$/.test(yyyy) || !_DATE2_RE.test(mm) || !_DATE2_RE.test(dd))
+    throw new Phase6BKeyError("INVALID_DATE_PARTITION", key, `invalid date partition "${yyyy}/${mm}/${dd}"`);
+  if (!_UUID_RE.test(id))
+    throw new Phase6BKeyError("INVALID_MEDIA_ID", key, `mediaId is not a UUID ("${id}")`);
+  if (!_ALLOWED_GROUPS.has(group))
+    throw new Phase6BKeyError("UNKNOWN_GROUP", key, `unknown group "${group}"`);
+  if (!filename || !_SAFE_FILE_RE.test(filename) || filename.includes(".."))
+    throw new Phase6BKeyError("UNSAFE_FILENAME", key, `unsafe filename "${filename}"`);
+}

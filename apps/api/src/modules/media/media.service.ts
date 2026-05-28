@@ -6,7 +6,7 @@ import { PutObjectCommand, type S3Client } from "@aws-sdk/client-s3";
 import type { PrismaClient, Media, MediaVariant } from "@prisma/client";
 import type { MessageAttachment, Transcript } from "@relay/contracts";
 import { createMediaRepository } from "./media.repository.js";
-import { buildVariantKey } from "./media.keys.js";
+import { buildVariantKey, assertPhase6BKey } from "./media.keys.js";
 import { buildInitialManifest, writeManifest } from "./media.manifest.js";
 import { resolveDeliveryMode, probeVideo } from "./media.probe.js";
 import { env } from "../../backend-core/runtime/env.js";
@@ -118,6 +118,7 @@ export async function uploadImage(
   // Phase-6B per-mediaId layout: original lives at <id>/original/source.ext so
   // every derivative the worker produces is colocated under one prefix.
   const storageKey = buildVariantKey({ kind: "images", id: mediaId, group: "original", filename: `source${ext}` });
+  assertPhase6BKey(storageKey);
 
   // Upload original — the only synchronous MinIO operation in the request path.
   // Derivative generation happens asynchronously in the media worker.
@@ -253,6 +254,7 @@ export async function uploadVideo(
   const mediaId    = randomUUID();
   const ext        = VIDEO_EXT[mimeType] ?? ".mp4";
   const storageKey = buildVariantKey({ kind: "videos", id: mediaId, group: "original", filename: `source${ext}` });
+  assertPhase6BKey(storageKey);
 
   await s3.send(new PutObjectCommand({
     Bucket:        env.MINIO_BUCKET,
@@ -363,6 +365,7 @@ export async function uploadVoice(
 
   const mediaId    = randomUUID();
   const storageKey = buildVariantKey({ kind: "voice", id: mediaId, group: "original", filename: "source.opus" });
+  assertPhase6BKey(storageKey);
 
   await s3.send(new PutObjectCommand({
     Bucket:        env.MINIO_BUCKET,

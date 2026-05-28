@@ -32,7 +32,7 @@ import {
 } from "@aws-sdk/client-s3";
 import { PrismaClient } from "@prisma/client";
 import { env } from "../backend-core/runtime/env.js";
-import { buildVariantKey, parseMediaPrefix, parseMediaKeyDate } from "../modules/media/media.keys.js";
+import { buildVariantKey, parseMediaPrefix, parseMediaKeyDate, assertPhase6BKey } from "../modules/media/media.keys.js";
 
 const APPLY        = process.argv.includes("--apply");
 const DELETE_STALE = process.argv.includes("--delete-stale");
@@ -126,6 +126,8 @@ async function main() {
       filename: `source${ext}`,
       date:     partitionDate,
     });
+
+    assertPhase6BKey(newKey);
 
     // Guard against accidental self-copy (key generation bug or schema drift).
     if (row.storageKey === newKey) {
