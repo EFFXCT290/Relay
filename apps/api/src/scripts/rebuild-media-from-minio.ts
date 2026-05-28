@@ -262,7 +262,20 @@ async function main() {
     REWRITE                 ? "APPLY+REWRITE"         :
                               "APPLY (DB-only)";
 
-  console.log(`[rebuild] mode=${mode}  bucket=${bucket}  kinds=${pathKinds.join(",")}`);
+  // Prominent target banner — the bucket name is the single most important
+  // piece of context for a destructive run. Print it first, before any other
+  // diagnostic noise, so a misconfigured .env is caught at a glance.
+  const endpointHost = `${env.MINIO_USE_SSL ? "https" : "http"}://${env.MINIO_ENDPOINT}:${env.MINIO_PORT}`;
+  console.log("");
+  console.log("┌─────────────────────────────────────────────────────────────┐");
+  console.log("│  MinIO → DB rebuild                                         │");
+  console.log("├─────────────────────────────────────────────────────────────┤");
+  console.log(`│  bucket:    ${bucket.padEnd(48)}│`);
+  console.log(`│  endpoint:  ${endpointHost.padEnd(48)}│`);
+  console.log(`│  mode:      ${mode.padEnd(48)}│`);
+  console.log(`│  kinds:     ${pathKinds.join(",").padEnd(48)}│`);
+  console.log("└─────────────────────────────────────────────────────────────┘");
+  console.log("");
   if (APPLY && !REWRITE) {
     console.warn("[rebuild] WARNING: --apply without --rewrite-minio. DB will point at canonical keys");
     console.warn("[rebuild]          regardless of whether MinIO objects live there. Only safe if the");
@@ -447,6 +460,8 @@ async function main() {
 
   // ── Summary ──────────────────────────────────────────────────────────────
   console.log("\n──────── summary ────────");
+  console.log(`bucket:              ${bucket}`);
+  console.log(`endpoint:            ${endpointHost}`);
   console.log(`mode:                ${mode}`);
   console.log(`scanned kinds:       ${pathKinds.join(", ")}`);
   console.log(`objects discovered:  ${objectsDiscovered}`);
@@ -472,11 +487,13 @@ async function main() {
   }
 
   if (!APPLY) {
-    console.log("\n[rebuild] DRY-RUN — no MinIO or DB writes. Re-run with --apply (and probably --rewrite-minio).");
+    console.log(`\n[rebuild] DRY-RUN — no writes to bucket=${bucket} or DB. Re-run with --apply (and probably --rewrite-minio).`);
   } else if (!REWRITE) {
-    console.log("\n[rebuild] DB rewritten but MinIO not touched. If non-canonical objects exist, app reads will 404.");
+    console.log(`\n[rebuild] DB rewritten. Bucket=${bucket} not touched. If non-canonical objects exist, app reads will 404.`);
   } else if (!DELETE_STALE) {
-    console.log("\n[rebuild] Non-canonical objects preserved. Re-run with --delete-stale once verified.");
+    console.log(`\n[rebuild] WROTE to bucket=${bucket}. Non-canonical objects preserved — re-run with --delete-stale once verified.`);
+  } else {
+    console.log(`\n[rebuild] WROTE + DELETED in bucket=${bucket}. Cleanup complete.`);
   }
 
   await prisma.$disconnect();
