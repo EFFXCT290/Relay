@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { createContext, useContext, useEffect, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import { ApiError, api } from "@/frontend-core/api";
 import { SidebarNav } from "./sidebar-nav";
@@ -8,12 +8,16 @@ import { BottomTabBar } from "./bottom-tab-bar";
 import { NotificationsProvider } from "@/providers/notifications-provider";
 import { CallProvider } from "@/features/calls/call-provider";
 
+type UserCtxValue = { userId: string; username: string };
+const UserCtx = createContext<UserCtxValue | null>(null);
+export function useUser(): UserCtxValue | null { return useContext(UserCtx); }
+
 // Wraps every authenticated route. Fetches /auth/me on mount, redirects to
 // /sign-in on 401, otherwise renders the chrome (sidebar on desktop, bottom
 // tab bar on mobile) around the page content.
 export function AppShell({ children }: { children: React.ReactNode }) {
   const router = useRouter();
-  const [username, setUsername] = useState<string | null>(null);
+  const [user, setUser] = useState<UserCtxValue | null>(null);
   const [ready, setReady] = useState(false);
 
   useEffect(() => {
@@ -22,7 +26,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       try {
         const me = await api<{ userId: string; username: string; createdAt: string }>("/api/auth/me");
         if (!cancelled) {
-          setUsername(me.username);
+          setUser({ userId: me.userId, username: me.username });
           setReady(true);
         }
       } catch (err) {
@@ -58,15 +62,17 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   }
 
   return (
-    <NotificationsProvider>
-      <CallProvider>
-        <div className="flex min-h-dvh flex-col lg:flex-row">
-          <SidebarNav username={username} />
-          <ChatAwareMain>{children}</ChatAwareMain>
-          <BottomTabBar />
-        </div>
-      </CallProvider>
-    </NotificationsProvider>
+    <UserCtx.Provider value={user}>
+      <NotificationsProvider>
+        <CallProvider>
+          <div className="flex min-h-dvh flex-col lg:flex-row">
+            <SidebarNav username={user?.username ?? null} />
+            <ChatAwareMain>{children}</ChatAwareMain>
+            <BottomTabBar />
+          </div>
+        </CallProvider>
+      </NotificationsProvider>
+    </UserCtx.Provider>
   );
 }
 
