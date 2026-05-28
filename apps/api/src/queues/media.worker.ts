@@ -9,7 +9,7 @@ import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import type { PrismaClient } from "@prisma/client";
 import type { Server as IOServer } from "socket.io";
 import type { FastifyBaseLogger } from "fastify";
-import { buildMediaKey, buildVariantKey, parseMediaKeyDate } from "../modules/media/media.keys.js";
+import { buildVariantKey, parseMediaKeyDate } from "../modules/media/media.keys.js";
 import { patchManifest } from "../modules/media/media.manifest.js";
 import { createMediaRepository } from "../modules/media/media.repository.js";
 import {
@@ -165,98 +165,71 @@ async function processImage(deps: WorkerDeps, data: ProcessImageJobData) {
       // keys (no date path), which never have variants generated anyway.
       const partitionDate = parseMediaKeyDate(storageKey) ?? undefined;
 
-      let blurKey:    string | null = null;
-      let blurWidth:  number | null = null;
-      let blurHeight: number | null = null;
-      let thumbKey:   string | null = null;
+      let thumbKey:    string | null = null;
       let thumbWidth:  number | null = null;
       let thumbHeight: number | null = null;
 
-      // Blur variant
-      try {
-        const blurBuf  = await sharp(original).rotate().resize(32).blur().jpeg({ quality: 40 }).toBuffer();
-        const blurMeta = await sharp(blurBuf).metadata();
-        blurKey    = buildMediaKey({ kind: "images", id: mediaId, variant: "blur",  ext: ".jpg", date: partitionDate });
-        blurWidth  = blurMeta.width  ?? null;
-        blurHeight = blurMeta.height ?? null;
-        await s3.send(new PutObjectCommand({
-          Bucket:        env.MINIO_BUCKET,
-          Key:           blurKey,
-          Body:          blurBuf,
-          ContentType:   "image/jpeg",
-          ContentLength: blurBuf.length,
-        }));
-      } catch (err) {
-        log.warn({ err, mediaId }, "[media-worker] blur generation failed");
-      }
-
-      // Thumb variant
+      // Thumb variant — Phase 6B hierarchical key; WebP for consistency with
+      // the new-model variants generateImageVariants also produces.
       try {
         const thumbBuf  = await sharp(original)
           .rotate()
           .resize({ width: 480, height: 480, fit: "inside", withoutEnlargement: true })
-          .jpeg({ quality: 82 })
+          .webp({ quality: 82 })
           .toBuffer();
         const thumbMeta = await sharp(thumbBuf).metadata();
-        thumbKey    = buildMediaKey({ kind: "images", id: mediaId, variant: "thumb", ext: ".jpg", date: partitionDate });
+        thumbKey    = buildVariantKey({ kind: "images", id: mediaId, group: "thumbnails", filename: "thumb_md.webp", date: partitionDate });
         thumbWidth  = thumbMeta.width  ?? null;
         thumbHeight = thumbMeta.height ?? null;
         await s3.send(new PutObjectCommand({
           Bucket:        env.MINIO_BUCKET,
           Key:           thumbKey,
           Body:          thumbBuf,
-          ContentType:   "image/jpeg",
+          ContentType:   "image/webp",
           ContentLength: thumbBuf.length,
         }));
       } catch (err) {
         log.warn({ err, mediaId }, "[media-worker] thumb generation failed");
       }
 
-      // Update DB row with variant keys + status.
+      // Update DB row with variant key + status.
       await prisma.media.update({
         where: { id: mediaId },
         data: {
-          blurStorageKey:  blurKey,
           thumbStorageKey: thumbKey,
-          blurWidth,
-          blurHeight,
           thumbWidth,
           thumbHeight,
           status: "ready",
         },
       });
 
-      // Sign URLs and emit media:ready to the uploader's user room.
-      const [blurUrl, thumbUrl] = await Promise.all([
-        blurKey  ? getSignedUrl(s3, new GetObjectCommand({ Bucket: env.MINIO_BUCKET, Key: blurKey }),  { expiresIn: env.MEDIA_SIGNED_URL_EXPIRY }) : Promise.resolve(null),
-        thumbKey ? getSignedUrl(s3, new GetObjectCommand({ Bucket: env.MINIO_BUCKET, Key: thumbKey }), { expiresIn: env.MEDIA_SIGNED_URL_EXPIRY }) : Promise.resolve(null),
-      ]);
+      // Sign URL and emit media:ready to the uploader's user room.
+      const thumbUrl = thumbKey
+        ? await getSignedUrl(s3, new GetObjectCommand({ Bucket: env.MINIO_BUCKET, Key: thumbKey }), { expiresIn: env.MEDIA_SIGNED_URL_EXPIRY })
+        : null;
 
       const event: MediaReadyEvent = {
         mediaId,
-        blurUrl,
+        blurUrl:    null,
         thumbUrl,
-        blurWidth,
-        blurHeight,
+        blurWidth:  null,
+        blurHeight: null,
         thumbWidth,
         thumbHeight,
       };
   io.to(`user:${uploaderId}`).emit(MEDIA_EVENTS.READY, event);
 
-  // ── Phase 6B: new-model derivatives on the per-mediaId layout ──────────────
-  // Runs alongside the legacy blur/thumb above (which keep the current frontend
-  // working). Produces WebP/AVIF display variants + sm/md/lg thumbnails, records
-  // them as MediaVariant rows, patches the manifest, and transitions tasks. A
-  // failure here never affects the legacy media:ready already emitted, so it's
-  // fully isolated — a throw must not fail the job (that would flip status back
-  // to "failed" after the legacy path already succeeded).
+  // ── Phase 6B: per-mediaId folder layout — display variants + extra thumbnails ─
+  // Produces WebP/AVIF display variants and sm/md/lg thumbnails, records them as
+  // MediaVariant rows, and patches the manifest. Isolated so a failure here never
+  // flips status back to "failed" after media:ready has already been emitted.
   try {
     await generateImageVariants(deps, data, original, partitionDate);
   } catch (err) {
     log.error({ err, mediaId }, "[media-worker] new-model variant generation failed (legacy variants unaffected)");
   }
 
-  log.info({ mediaId, blurKey, thumbKey }, "[media-worker] done");
+  log.info({ mediaId, thumbKey }, "[media-worker] done");
 }
 
 // Logical variant name → produced key, accumulated so we can patch the manifest

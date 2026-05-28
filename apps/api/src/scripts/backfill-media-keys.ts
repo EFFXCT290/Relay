@@ -1,18 +1,25 @@
-// One-time backfill: relocate legacy flat media keys (images/<uuid>.jpg) into
-// the dated layout (images/YYYY/MM/DD/<id>_original.jpg) using each row's
-// createdAt for the partition.
+// Migrate Phase-1 (flat) and Phase-2 (dated-flat) storage keys to the
+// Phase-6B per-mediaId folder layout, for all media kinds (IMAGE, VIDEO, VOICE).
 //
-// S3/MinIO has no rename, so each object is COPIED to its new key, the DB row's
-// storageKey is updated, then the old object is DELETED. The order matters:
-// copy + DB update happen first, so a crash mid-run never orphans a row from
-// its object — at worst an old object lingers and gets swept on re-run.
+// The DB is the source of truth — only objects referenced by a row are touched.
+// Prod and dev share one MinIO bucket; rows whose source object is absent in
+// MinIO are silently skipped so one environment's run can't break the other.
 //
-// Idempotent: rows already on a dated key are skipped, so it's safe to re-run.
+// S3/MinIO has no rename: each object is COPYed to its new key, verified, then
+// the DB row is updated. Deletion is a separate opt-in pass so a crash mid-run
+// can never orphan a row from its object.
 //
-//   Dry run (default, no writes):
+// Idempotent: rows already on a Phase-6B key (has <id>/ subfolder) are skipped.
+//
+//   Dry run (default):
 //     npm run backfill:media-keys
-//   Execute:
+//   Copy + DB update, leave old objects in place:
 //     npm run backfill:media-keys -- --apply
+//   Copy + DB update + delete old objects:
+//     npm run backfill:media-keys -- --apply --delete-stale
+//   Scope to one or more kinds:
+//     npm run backfill:media-keys -- --apply --kind=images
+//     npm run backfill:media-keys -- --apply --kind=images,voice
 //
 // Run from apps/api so --env-file resolves the repo .env.
 
@@ -21,15 +28,40 @@ import {
   S3Client,
   CopyObjectCommand,
   DeleteObjectCommand,
+  HeadObjectCommand,
 } from "@aws-sdk/client-s3";
 import { PrismaClient } from "@prisma/client";
 import { env } from "../backend-core/runtime/env.js";
-import { buildMediaKey } from "../modules/media/media.keys.js";
+import { buildVariantKey, parseMediaPrefix, parseMediaKeyDate } from "../modules/media/media.keys.js";
 
-const APPLY = process.argv.includes("--apply");
+const APPLY        = process.argv.includes("--apply");
+const DELETE_STALE = process.argv.includes("--delete-stale");
 
-// A key is already in the new layout if it starts with images/YYYY/MM/DD/.
-const DATED_KEY = /^images\/\d{4}\/\d{2}\/\d{2}\//;
+// --kind=images,voice,videos  (maps to Prisma enum values)
+const KIND_ARG = process.argv.find((a) => a.startsWith("--kind="))?.split("=")[1];
+const PATH_TO_PRISMA: Record<string, "IMAGE" | "VIDEO" | "VOICE"> = {
+  images: "IMAGE", videos: "VIDEO", voice: "VOICE",
+};
+const kindFilter: Array<"IMAGE" | "VIDEO" | "VOICE"> | null = (() => {
+  if (!KIND_ARG) return null;
+  const result: Array<"IMAGE" | "VIDEO" | "VOICE"> = [];
+  for (const p of KIND_ARG.toLowerCase().split(",")) {
+    const k = PATH_TO_PRISMA[p];
+    if (!k) { console.error(`[backfill] unknown kind "${p}" — valid: images, videos, voice`); process.exit(1); }
+    result.push(k);
+  }
+  return result;
+})();
+
+// Storage path segment + fallback ext when the key has no extension.
+const KIND_META: Record<"IMAGE" | "VIDEO" | "VOICE", {
+  pathKind:   "images" | "videos" | "voice";
+  defaultExt: string;
+}> = {
+  IMAGE: { pathKind: "images", defaultExt: ".jpg"  },
+  VIDEO: { pathKind: "videos", defaultExt: ".mp4"  },
+  VOICE: { pathKind: "voice",  defaultExt: ".opus" },
+};
 
 function makeS3(): S3Client {
   const protocol = env.MINIO_USE_SSL ? "https" : "http";
@@ -44,38 +76,65 @@ function makeS3(): S3Client {
   });
 }
 
+async function objectExists(s3: S3Client, bucket: string, key: string): Promise<boolean> {
+  try {
+    await s3.send(new HeadObjectCommand({ Bucket: bucket, Key: key }));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function main() {
   const prisma = new PrismaClient();
   const s3     = makeS3();
   const bucket = env.MINIO_BUCKET;
 
+  const modeStr = !APPLY ? "DRY-RUN" : DELETE_STALE ? "APPLY+DELETE" : "APPLY";
+  console.log(`[backfill] mode=${modeStr}  bucket=${bucket}  kind=${kindFilter?.join(",") ?? "all"}`);
+
   let migrated = 0;
   let skipped  = 0;
+  let missing  = 0;
   let failed   = 0;
 
-  console.log(`[backfill] mode=${APPLY ? "APPLY" : "DRY-RUN"} bucket=${bucket}`);
-
   const rows = await prisma.media.findMany({
-    select: { id: true, storageKey: true, createdAt: true },
+    where:   kindFilter ? { kind: { in: kindFilter } } : undefined,
+    select:  { id: true, storageKey: true, createdAt: true, kind: true },
     orderBy: { createdAt: "asc" },
   });
 
+  console.log(`[backfill] ${rows.length} rows to check\n`);
+
   for (const row of rows) {
-    if (DATED_KEY.test(row.storageKey)) {
+    // Already in Phase-6B folder layout (<id>/ subfolder present) — skip.
+    if (parseMediaPrefix(row.storageKey) !== null) {
       skipped++;
       continue;
     }
 
-    const ext    = path.extname(row.storageKey) || ".jpg";
-    const newKey = buildMediaKey({
-      kind:    "images",
-      id:      row.id,
-      variant: "original",
-      ext,
-      date:    row.createdAt,
+    if (!row.kind) { skipped++; continue; }
+    const meta = KIND_META[row.kind];
+    // Derive partition date: Phase-2 dated keys carry it in the path; legacy
+    // flat keys fall back to the row's createdAt.
+    const partitionDate = parseMediaKeyDate(row.storageKey) ?? row.createdAt;
+    const ext    = path.extname(row.storageKey) || meta.defaultExt;
+    const newKey = buildVariantKey({
+      kind:     meta.pathKind,
+      id:       row.id,
+      group:    "original",
+      filename: `source${ext}`,
+      date:     partitionDate,
     });
 
-    console.log(`[backfill] ${row.storageKey}  ->  ${newKey}`);
+    // Guard against accidental self-copy (key generation bug or schema drift).
+    if (row.storageKey === newKey) {
+      skipped++;
+      continue;
+    }
+
+    console.log(`  ${row.kind.padEnd(5)} ${row.id.slice(0, 8)}  ${row.storageKey}`);
+    console.log(`         ->  ${newKey}`);
 
     if (!APPLY) {
       migrated++;
@@ -83,35 +142,62 @@ async function main() {
     }
 
     try {
-      // CopySource is the URL-encoded "bucket/key" path; the leading segment
-      // must survive special characters in the key.
-      await s3.send(new CopyObjectCommand({
-        Bucket:     bucket,
-        Key:        newKey,
-        CopySource: encodeURI(`${bucket}/${row.storageKey}`),
-      }));
+      // Shared-bucket safety: if the source object isn't in MinIO, this row
+      // belongs to a different DB environment (prod vs dev) — skip silently.
+      if (!await objectExists(s3, bucket, row.storageKey)) {
+        console.warn(`         SKIP — not found in MinIO`);
+        missing++;
+        continue;
+      }
 
+      // Skip the copy if the destination already exists — makes retries safe.
+      if (await objectExists(s3, bucket, newKey)) {
+        console.log(`         destination already exists — skipping copy`);
+      } else {
+        await s3.send(new CopyObjectCommand({
+          Bucket:     bucket,
+          Key:        newKey,
+          CopySource: encodeURI(`${bucket}/${row.storageKey}`),
+        }));
+
+        // Verify the destination landed before touching the DB.
+        if (!await objectExists(s3, bucket, newKey)) {
+          throw new Error(`copy reported success but destination not found: ${newKey}`);
+        }
+      }
+
+      // Update DB: point storageKey at the new Phase-6B key.
+      // blurStorageKey is dead architecture — null it out unconditionally.
       await prisma.media.update({
         where: { id: row.id },
-        data:  { storageKey: newKey },
+        data:  {
+          storageKey:     newKey,
+          blurStorageKey: null,
+          blurWidth:      null,
+          blurHeight:     null,
+        },
       });
 
-      await s3.send(new DeleteObjectCommand({
-        Bucket: bucket,
-        Key:    row.storageKey,
-      }));
+      if (DELETE_STALE) {
+        await s3.send(new DeleteObjectCommand({ Bucket: bucket, Key: row.storageKey }));
+        console.log(`         deleted old object`);
+      }
 
       migrated++;
     } catch (err) {
       failed++;
-      console.error(`[backfill] FAILED ${row.id}:`, err);
+      console.error(`         FAILED:`, err);
     }
   }
 
   console.log(
-    `[backfill] done. migrated=${migrated} skipped=${skipped} failed=${failed} total=${rows.length}`,
+    `\n[backfill] done.  migrated=${migrated}  skipped=${skipped}  missing=${missing}  failed=${failed}  total=${rows.length}`,
   );
-  if (!APPLY) console.log("[backfill] DRY-RUN — no changes written. Re-run with --apply to execute.");
+  if (!APPLY) {
+    console.log("[backfill] DRY-RUN — no changes written. Re-run with --apply to execute.");
+  } else if (!DELETE_STALE) {
+    console.log("[backfill] Old objects left in MinIO. Re-run with --delete-stale to garbage-collect after you have verified the migration.");
+  }
 
   await prisma.$disconnect();
   if (failed > 0) process.exit(1);

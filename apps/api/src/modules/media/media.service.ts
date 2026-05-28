@@ -6,7 +6,7 @@ import { PutObjectCommand, type S3Client } from "@aws-sdk/client-s3";
 import type { PrismaClient, Media, MediaVariant } from "@prisma/client";
 import type { MessageAttachment, Transcript } from "@relay/contracts";
 import { createMediaRepository } from "./media.repository.js";
-import { buildMediaKey, buildVariantKey } from "./media.keys.js";
+import { buildVariantKey } from "./media.keys.js";
 import { buildInitialManifest, writeManifest } from "./media.manifest.js";
 import { resolveDeliveryMode, probeVideo } from "./media.probe.js";
 import { env } from "../../backend-core/runtime/env.js";
@@ -362,7 +362,7 @@ export async function uploadVoice(
   }
 
   const mediaId    = randomUUID();
-  const storageKey = buildMediaKey({ kind: "voice", id: mediaId, variant: "original", ext: ".opus" });
+  const storageKey = buildVariantKey({ kind: "voice", id: mediaId, group: "original", filename: "source.opus" });
 
   await s3.send(new PutObjectCommand({
     Bucket:        env.MINIO_BUCKET,
