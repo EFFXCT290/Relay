@@ -13,7 +13,8 @@
     "prisma:migrate": "dotenv -e ../../.env -- prisma migrate dev",
     "prisma:deploy": "dotenv -e ../../.env -- prisma migrate deploy",
     "prisma:studio": "dotenv -e ../../.env -- prisma studio",
-    "backfill:media-keys": "tsx --env-file=../../.env src/scripts/backfill-media-keys.ts"
+    "backfill:media-keys": "tsx --env-file=../../.env src/scripts/backfill-media-keys.ts",
+    "rebuild:media-from-minio": "tsx --env-file=../../.env src/scripts/rebuild-media-from-minio.ts"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1053.0",
