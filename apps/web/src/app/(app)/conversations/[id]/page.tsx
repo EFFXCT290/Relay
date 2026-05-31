@@ -28,6 +28,7 @@ import { ImageLightbox, type LightboxState } from "@/features/messages/component
 import { ACK_EVENT, MEDIA_EVENTS, VOICE_EVENTS, PRESENCE_EVENTS, SYNC_EVENTS, TYPING_EVENTS, type MediaReadyEvent, type MediaProcessedEvent, type VoiceTranscriptReadyEvent, type ImageAttachment, type DeliveryMode, type PresenceSyncResponse, type ReplayResponse, type TypingSyncResponse } from "@relay/contracts";
 import { formatLastSeen } from "@/frontend-core/format-presence";
 import { useCall } from "@/features/calls/call-provider";
+import { useMe } from "@/providers/me-provider";
 
 const PAGE_SIZE = 30;
 
@@ -131,6 +132,7 @@ export default function ChatThreadPage() {
   const router = useRouter();
   const conversationId = params.id;
   const { startCall } = useCall();
+  const { userId: meId } = useMe();
 
   const [, setTick] = useState(0);
   useEffect(() => {
@@ -138,7 +140,6 @@ export default function ChatThreadPage() {
     return () => clearInterval(id);
   }, []);
 
-  const [meId, setMeId] = useState<string | null>(null);
   const [detail, setDetail] = useState<ConversationDetail | null>(null);
   // Normalized message store: keyed by messageId for O(1) lookup and atomic
   // swaps (optimistic tempId → server realId without re-ordering the array).
@@ -170,9 +171,8 @@ export default function ChatThreadPage() {
   const dragCounterRef = useRef(0);
 
   const scrollRef = useRef<HTMLDivElement>(null);
-  // meId resolves async from /api/auth/me. The WS effect must not re-subscribe
-  // when it lands (the join/leave churn dropped events on first mount). Read it
-  // through a ref so handlers always see the current value.
+  // meId comes from MeContext (resolved by AppShell before this page mounts).
+  // Keep a ref so WS handlers always see the current value without re-subscribing.
   const meIdRef = useRef<string | null>(null);
   useEffect(() => { meIdRef.current = meId; }, [meId]);
 
@@ -203,20 +203,18 @@ export default function ChatThreadPage() {
       return t !== 0 ? t : a.messageId.localeCompare(b.messageId);
     });
 
-  // Initial loads — me, detail, history — fired in parallel.
+  // Initial loads — detail and history — fired in parallel. meId comes from MeContext.
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
-        const [me, det, hist] = await Promise.all([
-          api<{ userId: string }>("/api/auth/me"),
+        const [det, hist] = await Promise.all([
           api<ConversationDetail>(`/api/conversations/${conversationId}`),
           api<{ messages: Message[]; nextCursor: string | null }>(
             `/api/conversations/${conversationId}/messages?limit=${PAGE_SIZE}`,
           ),
         ]);
         if (cancelled) return;
-        setMeId(me.userId);
         setDetail(det);
         // API returns newest-first; reverse so DOM order is oldest-first.
         const ordered = [...hist.messages].reverse();

@@ -7,22 +7,23 @@ import { SidebarNav } from "./sidebar-nav";
 import { BottomTabBar } from "./bottom-tab-bar";
 import { NotificationsProvider } from "@/providers/notifications-provider";
 import { CallProvider } from "@/features/calls/call-provider";
+import { MeContext } from "@/providers/me-provider";
 
 // Wraps every authenticated route. Fetches /auth/me on mount, redirects to
 // /sign-in on 401, otherwise renders the chrome (sidebar on desktop, bottom
 // tab bar on mobile) around the page content.
 export function AppShell({ children }: { children: React.ReactNode }) {
   const router = useRouter();
-  const [username, setUsername] = useState<string | null>(null);
+  const [me, setMe] = useState<{ userId: string; username: string } | null>(null);
   const [ready, setReady] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
-        const me = await api<{ userId: string; username: string; createdAt: string }>("/api/auth/me");
+        const res = await api<{ userId: string; username: string; createdAt: string }>("/api/auth/me");
         if (!cancelled) {
-          setUsername(me.username);
+          setMe({ userId: res.userId, username: res.username });
           setReady(true);
         }
       } catch (err) {
@@ -58,15 +59,17 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   }
 
   return (
-    <NotificationsProvider>
-      <CallProvider selfUsername={username}>
-        <div className="flex min-h-dvh flex-col lg:flex-row">
-          <SidebarNav username={username} />
-          <ChatAwareMain>{children}</ChatAwareMain>
-          <BottomTabBar />
-        </div>
-      </CallProvider>
-    </NotificationsProvider>
+    <MeContext.Provider value={me ?? { userId: "", username: "" }}>
+      <NotificationsProvider>
+        <CallProvider selfUsername={me?.username ?? null}>
+          <div className="flex min-h-dvh flex-col lg:flex-row">
+            <SidebarNav username={me?.username ?? null} />
+            <ChatAwareMain>{children}</ChatAwareMain>
+            <BottomTabBar />
+          </div>
+        </CallProvider>
+      </NotificationsProvider>
+    </MeContext.Provider>
   );
 }
 
