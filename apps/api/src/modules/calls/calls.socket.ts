@@ -7,6 +7,7 @@ import {
   type CallSdpInbound,
   type CallIceInbound,
   type CallInitAck,
+  type CallMediaStateInbound,
 } from "@relay/contracts";
 import { CallService } from "./calls.service.js";
 
@@ -76,6 +77,11 @@ export function registerCallSocket(
   socket.on(CALL_EVENTS.ICE, (payload: CallIceInbound) => {
     if (!isNonEmptyString(payload?.callId) || !payload?.candidate) return;
     service.relayIce(userId, payload);
+  });
+
+  socket.on(CALL_EVENTS.MEDIA_STATE, (payload: CallMediaStateInbound) => {
+    if (!isNonEmptyString(payload?.callId) || typeof payload?.cameraOn !== "boolean") return;
+    service.relayMediaState(userId, payload);
   });
 
   socket.on("disconnect", () => {

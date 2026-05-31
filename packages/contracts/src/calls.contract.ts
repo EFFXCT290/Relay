@@ -34,20 +34,26 @@ export const CALL_RING_TIMEOUT_MS = 30_000;
 // independent, so there is no collision.
 export const CALL_EVENTS = {
   // client → server
-  INIT:   "call:init",          // { targetUserId, type, conversationId? }; ack → CallInitAck
-  ACCEPT: "call:accept",        // { callId }
-  REJECT: "call:reject",        // { callId }
-  OFFER:  "call:offer",         // { callId, sdp }       caller → server → recipient
-  ANSWER: "call:answer",        // { callId, sdp }       recipient → server → caller
-  ICE:    "call:ice-candidate", // { callId, candidate } either → server → other peer
-  END:    "call:end",           // { callId }
+  INIT:        "call:init",          // { targetUserId, type, conversationId? }; ack → CallInitAck
+  ACCEPT:      "call:accept",        // { callId }
+  REJECT:      "call:reject",        // { callId }
+  OFFER:       "call:offer",         // { callId, sdp }       caller → server → recipient
+  ANSWER:      "call:answer",        // { callId, sdp }       recipient → server → caller
+  ICE:         "call:ice-candidate", // { callId, candidate } either → server → other peer
+  END:         "call:end",           // { callId }
+  // UI-state hint relayed verbatim between peers (Phase 7D). Ephemeral, no DB
+  // write. NOT a SDP/ICE substitute — purely tells the peer "I toggled my
+  // camera" so they can swap the remote stage to a frozen-frame + badge instead
+  // of looking at a black <video>.
+  MEDIA_STATE: "call:media-state",   // { callId, cameraOn }  either → server → other peer
   // server → client
-  RINGING:  "call:ringing",  // → recipient: incoming call
-  ACCEPTED: "call:accepted", // → caller: recipient accepted; begin createOffer()
-  BUSY:     "call:busy",     // → caller: recipient already in a call
-  TIMEOUT:  "call:timeout",  // → both: unanswered past CALL_RING_TIMEOUT_MS (MISSED)
-  ENDED:    "call:ended",    // → peer: other side hung up / rejected
-  FAILED:   "call:failed",   // → peer: disconnect / negotiation failure
+  RINGING:           "call:ringing",           // → recipient: incoming call
+  ACCEPTED:          "call:accepted",          // → caller: recipient accepted; begin createOffer()
+  BUSY:              "call:busy",              // → caller: recipient already in a call
+  TIMEOUT:           "call:timeout",           // → both: unanswered past CALL_RING_TIMEOUT_MS (MISSED)
+  ENDED:             "call:ended",             // → peer: other side hung up / rejected
+  FAILED:            "call:failed",            // → peer: disconnect / negotiation failure
+  PEER_MEDIA_STATE:  "call:peer-media-state",  // → peer: relayed { callId, cameraOn } from the other side
 } as const;
 export type CallEventName = (typeof CALL_EVENTS)[keyof typeof CALL_EVENTS];
 
@@ -60,6 +66,9 @@ export type CallInitInbound = {
 export type CallByIdInbound  = { callId: string };          // ACCEPT, REJECT, END
 export type CallSdpInbound   = { callId: string; sdp: RTCSessionDescriptionInitLike };
 export type CallIceInbound   = { callId: string; candidate: RTCIceCandidateInitLike };
+// Phase 7D media-state hint (client → server → other peer). Camera only for now;
+// the envelope leaves room for `micOn?` if/when a peer-mute indicator lands.
+export type CallMediaStateInbound = { callId: string; cameraOn: boolean };
 
 // call:init ack (returned via the Socket.IO ack callback).
 export type CallInitAck =
@@ -80,6 +89,7 @@ export type CallBusyEvent     = { callId: string };
 export type CallTimeoutEvent  = { callId: string };
 export type CallEndedEvent    = { callId: string; status: CallStatus };
 export type CallFailedEvent   = { callId: string };
+export type CallPeerMediaStateEvent = { callId: string; cameraOn: boolean };
 
 // SDP/ICE are relayed verbatim; we avoid depending on lib.dom types in shared
 // code by mirroring just the fields WebRTC sends over the wire.

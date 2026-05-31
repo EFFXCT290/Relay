@@ -144,6 +144,12 @@ async function main() {
   process.on("SIGINT", () => void shutdown("SIGINT"));
   process.on("SIGTERM", () => void shutdown("SIGTERM"));
 
+  console.log("=== DEBUG ENVIRONMENT BINDING ===");
+  console.log("process.env.HOST:", process.env.HOST);
+  console.log("env.HOST from file:", env.HOST);
+  console.log("env.PORT:", env.PORT);
+  console.log("=========================================");
+  
   try {
     await app.listen({ port: env.PORT, host: env.HOST });
   } catch (err) {

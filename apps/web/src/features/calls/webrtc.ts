@@ -15,12 +15,13 @@ import type {
 
 const ICE_SERVERS: RTCIceServer[] = [{ urls: "stun:stun.l.google.com:19302" }];
 
-// 720p ideal — the browser negotiates down on weaker links. The 1080p bump and
-// adaptive bitrate live in 6D Step 3 (deferred).
+// 1080p / 30fps ideal — the browser negotiates down on weaker links, so this is
+// a ceiling, not a floor. Adaptive bitrate (the old 6D Step 3) is still
+// deferred — relying on the browser's automatic degradation for now.
 const VIDEO_CONSTRAINTS: MediaTrackConstraints = {
-  width:      { ideal: 1280 },
-  height:     { ideal: 720 },
-  frameRate:  { ideal: 30 },
+  width:      { ideal: 1920 },
+  height:     { ideal: 1080 },
+  frameRate:  { ideal: 30, max: 60 },
   facingMode: "user",
 };
 
@@ -29,6 +30,9 @@ export type WebRtcCallbacks = {
   onLocalStream:     (stream: MediaStream) => void;
   onRemoteStream:    (stream: MediaStream) => void;
   onConnectionState: (state: RTCPeerConnectionState) => void;
+  // Fires after the initial getUserMedia and after every successful flip, so the
+  // UI knows whether to mirror the self-preview (front camera) or not (rear).
+  onFacingChange:    (facing: "user" | "environment") => void;
 };
 
 export class WebRtcController {
@@ -53,6 +57,9 @@ export class WebRtcController {
     const pc = this.ensurePc();
     for (const track of this.localStream.getTracks()) pc.addTrack(track, this.localStream);
     this.cb.onLocalStream(this.localStream);
+    // facingMode defaults to "user" via VIDEO_CONSTRAINTS; mirror that to the UI
+    // for video calls so the self-preview mirrors correctly from the first frame.
+    if (opts.video) this.cb.onFacingChange(this.facingMode);
   }
 
   private ensurePc(): RTCPeerConnection {
@@ -172,6 +179,7 @@ export class WebRtcController {
     this.localStream.addTrack(newTrack);
     this.facingMode = next;
     this.cb.onLocalStream(this.localStream);
+    this.cb.onFacingChange(next);
   }
 
   // Idempotent full teardown. Stops EVERY local track (releases the mic), stops

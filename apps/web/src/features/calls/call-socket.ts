@@ -7,6 +7,7 @@ import {
   type CallByIdInbound,
   type CallSdpInbound,
   type CallIceInbound,
+  type CallMediaStateInbound,
   type CallRingingEvent,
   type CallAcceptedEvent,
   type CallSdpEvent,
@@ -14,6 +15,7 @@ import {
   type CallTimeoutEvent,
   type CallEndedEvent,
   type CallFailedEvent,
+  type CallPeerMediaStateEvent,
 } from "@relay/contracts";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -24,35 +26,38 @@ import {
 // ─────────────────────────────────────────────────────────────────────────────
 
 export type CallSocketHandlers = {
-  onRinging:  (e: CallRingingEvent) => void;
-  onAccepted: (e: CallAcceptedEvent) => void;
-  onOffer:    (e: CallSdpEvent) => void;
-  onAnswer:   (e: CallSdpEvent) => void;
-  onIce:      (e: CallIceEvent) => void;
-  onTimeout:  (e: CallTimeoutEvent) => void;
-  onEnded:    (e: CallEndedEvent) => void;
-  onFailed:   (e: CallFailedEvent) => void;
+  onRinging:         (e: CallRingingEvent) => void;
+  onAccepted:        (e: CallAcceptedEvent) => void;
+  onOffer:           (e: CallSdpEvent) => void;
+  onAnswer:          (e: CallSdpEvent) => void;
+  onIce:             (e: CallIceEvent) => void;
+  onTimeout:         (e: CallTimeoutEvent) => void;
+  onEnded:           (e: CallEndedEvent) => void;
+  onFailed:          (e: CallFailedEvent) => void;
+  onPeerMediaState:  (e: CallPeerMediaStateEvent) => void;
 };
 
 export function bindCallSocket(socket: Socket, h: CallSocketHandlers): () => void {
-  socket.on(CALL_EVENTS.RINGING,  h.onRinging);
-  socket.on(CALL_EVENTS.ACCEPTED, h.onAccepted);
-  socket.on(CALL_EVENTS.OFFER,    h.onOffer);
-  socket.on(CALL_EVENTS.ANSWER,   h.onAnswer);
-  socket.on(CALL_EVENTS.ICE,      h.onIce);
-  socket.on(CALL_EVENTS.TIMEOUT,  h.onTimeout);
-  socket.on(CALL_EVENTS.ENDED,    h.onEnded);
-  socket.on(CALL_EVENTS.FAILED,   h.onFailed);
+  socket.on(CALL_EVENTS.RINGING,          h.onRinging);
+  socket.on(CALL_EVENTS.ACCEPTED,         h.onAccepted);
+  socket.on(CALL_EVENTS.OFFER,            h.onOffer);
+  socket.on(CALL_EVENTS.ANSWER,           h.onAnswer);
+  socket.on(CALL_EVENTS.ICE,              h.onIce);
+  socket.on(CALL_EVENTS.TIMEOUT,          h.onTimeout);
+  socket.on(CALL_EVENTS.ENDED,            h.onEnded);
+  socket.on(CALL_EVENTS.FAILED,           h.onFailed);
+  socket.on(CALL_EVENTS.PEER_MEDIA_STATE, h.onPeerMediaState);
 
   return () => {
-    socket.off(CALL_EVENTS.RINGING,  h.onRinging);
-    socket.off(CALL_EVENTS.ACCEPTED, h.onAccepted);
-    socket.off(CALL_EVENTS.OFFER,    h.onOffer);
-    socket.off(CALL_EVENTS.ANSWER,   h.onAnswer);
-    socket.off(CALL_EVENTS.ICE,      h.onIce);
-    socket.off(CALL_EVENTS.TIMEOUT,  h.onTimeout);
-    socket.off(CALL_EVENTS.ENDED,    h.onEnded);
-    socket.off(CALL_EVENTS.FAILED,   h.onFailed);
+    socket.off(CALL_EVENTS.RINGING,          h.onRinging);
+    socket.off(CALL_EVENTS.ACCEPTED,         h.onAccepted);
+    socket.off(CALL_EVENTS.OFFER,            h.onOffer);
+    socket.off(CALL_EVENTS.ANSWER,           h.onAnswer);
+    socket.off(CALL_EVENTS.ICE,              h.onIce);
+    socket.off(CALL_EVENTS.TIMEOUT,          h.onTimeout);
+    socket.off(CALL_EVENTS.ENDED,            h.onEnded);
+    socket.off(CALL_EVENTS.FAILED,           h.onFailed);
+    socket.off(CALL_EVENTS.PEER_MEDIA_STATE, h.onPeerMediaState);
   };
 }
 
@@ -89,4 +94,7 @@ export function emitAnswer(socket: Socket, payload: CallSdpInbound): void {
 }
 export function emitIce(socket: Socket, payload: CallIceInbound): void {
   socket.emit(CALL_EVENTS.ICE, payload);
+}
+export function emitMediaState(socket: Socket, payload: CallMediaStateInbound): void {
+  socket.emit(CALL_EVENTS.MEDIA_STATE, payload);
 }

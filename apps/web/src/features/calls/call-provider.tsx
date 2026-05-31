@@ -25,6 +25,7 @@ import {
   emitEnd,
   emitIce,
   emitInit,
+  emitMediaState,
   emitOffer,
   emitReject,
 } from "./call-socket";
@@ -70,7 +71,16 @@ export function useCall(): CallContextValue {
   return ctx;
 }
 
-export function CallProvider({ children }: { children: ReactNode }) {
+export function CallProvider({
+  children,
+  selfUsername,
+}: {
+  children: ReactNode;
+  // Local user's username — used for the camera-off Avatar in the self-preview
+  // slot. Null while /auth/me is in flight; the call UI falls back to a "?" tile
+  // until it resolves (rare race).
+  selfUsername?: string | null;
+}) {
   const [state, dispatch] = useReducer(callReducer, initialCallState);
 
   // Refs read inside async socket / WebRTC callbacks, where `state` would be stale.
@@ -132,6 +142,7 @@ export function CallProvider({ children }: { children: ReactNode }) {
         if (s === "connected") dispatch({ t: "connected" });
         else if (s === "failed") teardown("failed");
       },
+      onFacingChange: (facing) => dispatch({ t: "facing", value: facing }),
     });
     webrtcRef.current = controller;
     return controller;
@@ -209,6 +220,11 @@ export function CallProvider({ children }: { children: ReactNode }) {
     const next = !stateRef.current.isCameraOff;
     webrtcRef.current?.setCameraEnabled(!next);
     dispatch({ t: "cameraOff", value: next });
+    // Tell the peer so they can swap the remote stage to last-frame + badge
+    // instead of a black video. Best-effort: if no callId yet (race with a
+    // teardown) we just skip — the next toggle will reconcile.
+    const callId = callIdRef.current;
+    if (callId) emitMediaState(getSocket(), { callId, cameraOn: !next });
   }, []);
 
   const switchCamera = useCallback(() => {
@@ -254,6 +270,9 @@ export function CallProvider({ children }: { children: ReactNode }) {
       onTimeout: () => teardown("ended"),
       onEnded:   () => teardown("ended"),
       onFailed:  () => teardown("failed"),
+      onPeerMediaState: ({ cameraOn }) => {
+        dispatch({ t: "peerCameraOff", value: !cameraOn });
+      },
     });
     return cleanup;
   }, [teardown]);
@@ -262,6 +281,11 @@ export function CallProvider({ children }: { children: ReactNode }) {
   // stream is acquired while phase is still "idle" (before its <video> exists),
   // so the onLocalStream attach is a no-op then; this runs once the element is in
   // the DOM. attachStream's identity guard makes the repeat harmless.
+  //
+  // Also re-runs on isCameraOff transitions: the call-ui unmounts the local
+  // <video> when the user turns their camera off (swapped for an Avatar). When
+  // they turn it back on, the element re-mounts with srcObject=null — without
+  // this dep, the freshly-mounted element would never get the stream re-bound.
   useEffect(() => {
     if (localStreamRef.current) attachStream(localVideoRef.current, localStreamRef.current);
     if (remoteStreamRef.current) {
@@ -269,7 +293,7 @@ export function CallProvider({ children }: { children: ReactNode }) {
       attachStream(remoteBgVideoRef.current, remoteStreamRef.current);
       attachStream(remoteAudioRef.current, remoteStreamRef.current);
     }
-  }, [state.phase]);
+  }, [state.phase, state.isCameraOff]);
 
   // Release the mic if the provider ever unmounts.
   useEffect(() => () => { webrtcRef.current?.close(); }, []);
@@ -279,6 +303,7 @@ export function CallProvider({ children }: { children: ReactNode }) {
       {children}
       <CallUI
         state={state}
+        selfUsername={selfUsername ?? null}
         remoteAudioRef={remoteAudioRef}
         localVideoRef={localVideoRef}
         remoteVideoRef={remoteVideoRef}

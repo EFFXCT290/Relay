@@ -59,7 +59,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
   return (
     <NotificationsProvider>
-      <CallProvider>
+      <CallProvider selfUsername={username}>
         <div className="flex min-h-dvh flex-col lg:flex-row">
           <SidebarNav username={username} />
           <ChatAwareMain>{children}</ChatAwareMain>

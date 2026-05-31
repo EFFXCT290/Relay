@@ -29,17 +29,24 @@ export type CallState = {
   type:            CallType;
   isMuted:         boolean;
   isCameraOff:     boolean;
+  // UI-only fields (not signaling state). selfFacing drives the self-preview
+  // mirror; peerCameraOff drives the remote-stage "camera off" overlay. Both are
+  // reset to defaults on every transition into outgoing/incoming.
+  selfFacing:      "user" | "environment";
+  peerCameraOff:   boolean;
   conversationId?: string;
 };
 
 export const initialCallState: CallState = {
-  phase:       "idle",
-  callId:      null,
-  direction:   null,
-  peer:        null,
-  type:        "AUDIO",
-  isMuted:     false,
-  isCameraOff: false,
+  phase:         "idle",
+  callId:        null,
+  direction:     null,
+  peer:          null,
+  type:          "AUDIO",
+  isMuted:       false,
+  isCameraOff:   false,
+  selfFacing:    "user",
+  peerCameraOff: false,
 };
 
 export type CallAction =
@@ -50,6 +57,8 @@ export type CallAction =
   | { t: "terminated"; phase: "ended" | "failed" }
   | { t: "muted"; value: boolean }
   | { t: "cameraOff"; value: boolean }
+  | { t: "facing"; value: "user" | "environment" }
+  | { t: "peerCameraOff"; value: boolean }
   | { t: "reset" };
 
 const isLive = (p: CallPhase) => p !== "idle" && p !== "ended" && p !== "failed";
@@ -66,6 +75,8 @@ export function callReducer(state: CallState, action: CallAction): CallState {
         type: action.callType,
         isMuted: false,
         isCameraOff: false,
+        selfFacing: "user",
+        peerCameraOff: false,
         conversationId: action.conversationId,
       };
 
@@ -79,6 +90,8 @@ export function callReducer(state: CallState, action: CallAction): CallState {
         type: action.callType,
         isMuted: false,
         isCameraOff: false,
+        selfFacing: "user",
+        peerCameraOff: false,
         conversationId: action.conversationId,
       };
 
@@ -100,6 +113,12 @@ export function callReducer(state: CallState, action: CallAction): CallState {
 
     case "cameraOff":
       return { ...state, isCameraOff: action.value };
+
+    case "facing":
+      return { ...state, selfFacing: action.value };
+
+    case "peerCameraOff":
+      return { ...state, peerCameraOff: action.value };
 
     case "reset":
       return initialCallState;

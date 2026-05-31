@@ -10,6 +10,7 @@ import {
   type CallStatus,
   type CallSdpInbound,
   type CallIceInbound,
+  type CallMediaStateInbound,
 } from "@relay/contracts";
 import { PresenceService } from "../presence/presence.service.js";
 import { CallRepository } from "./calls.repository.js";
@@ -134,6 +135,15 @@ export class CallService {
     const session = callRuntime.get(input.callId);
     if (!session || !callRuntime.isParticipant(session, userId)) return;
     this.emitTo(callRuntime.peerOf(session, userId), CALL_EVENTS.ICE, input);
+  }
+
+  // UI-state hint (Phase 7D). Relayed verbatim to the other peer so they can
+  // show a "camera off" badge instead of a black frame. Ephemeral, fire-and-
+  // forget, identical envelope to ICE — no DB write, no reliability layer.
+  relayMediaState(userId: string, input: CallMediaStateInbound): void {
+    const session = callRuntime.get(input.callId);
+    if (!session || !callRuntime.isParticipant(session, userId)) return;
+    this.emitTo(callRuntime.peerOf(session, userId), CALL_EVENTS.PEER_MEDIA_STATE, input);
   }
 
   // ── Terminal paths (all funnel through terminate) ───────────────────────────
