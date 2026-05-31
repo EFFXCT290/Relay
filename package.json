@@ -12,6 +12,7 @@
     "dev": "pnpm -r --parallel run dev",
     "dev:api": "pnpm --filter @relay/api run dev",
     "dev:web": "pnpm --filter @relay/web run dev",
+    "start": "pnpm -r --parallel run start",
     "build": "pnpm -r run build",
     "lint": "pnpm -r run lint",
     "typecheck": "pnpm -r run typecheck",
