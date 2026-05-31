@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "tsx watch src/index.ts",
-    "build": "tsc"
+    "build": "tsc",
+    "start": "node --env-file=../../.env dist/index.js"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
