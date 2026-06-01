@@ -252,6 +252,30 @@ model Media {
   attachments MessageAttachment[]
   variants    MediaVariant[]
   tasks       MediaProcessingTask[]
+  temporary   TemporaryMedia?
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+//  Phase 6E — ephemeral / view-once media (Instagram-style, view-COUNT based)
+// ────────────────────────────────────────────────────────────────────────────
+// Sidecar on Media (1:1) that makes an attachment disappear after the recipient
+// has opened it maxViews times. There is NO timer — expiry is a view count. Only
+// ephemeral media gets a row; "unlimited" (normal) media has none. The server is
+// the sole authority: it never serializes a URL for ephemeral media (the only URL
+// is a short-lived one minted by POST /media/:id/view, which increments viewCount),
+// and a background sweep purges the MinIO bytes once consumed.
+model TemporaryMedia {
+  id         String    @id @default(uuid())
+  mediaId    String    @unique
+  maxViews   Int // 1..5 ("view once" = 1); unlimited media gets no row
+  viewCount  Int       @default(0)
+  consumedAt DateTime? // stamped when viewCount reaches maxViews
+  purgedAt   DateTime? // stamped after MinIO bytes removed by the sweep
+  createdAt  DateTime  @default(now())
+
+  media Media @relation(fields: [mediaId], references: [id], onDelete: Cascade)
+
+  @@index([consumedAt, purgedAt]) // sweep: consumed && not yet purged
 }
 
 // ────────────────────────────────────────────────────────────────────────────

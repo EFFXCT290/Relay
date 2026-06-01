@@ -14,6 +14,7 @@ export function LightboxImage({ attachment }: Props) {
   // Preload original off-screen before committing to render.
   useEffect(() => {
     setOriginalReady(false);
+    if (!url) { setOriginalReady(true); return; }
     const img = new window.Image();
     img.onload  = () => setOriginalReady(true);
     img.onerror = () => setOriginalReady(true); // reveal whatever we have on error
@@ -51,7 +52,7 @@ export function LightboxImage({ attachment }: Props) {
 
       {/* Original — fades in once preloaded */}
       <img
-        src={url}
+        src={url ?? undefined}
         alt=""
         className="relative block h-full max-h-[88dvh] w-full max-w-full rounded-xl object-contain transition-opacity duration-300"
         style={{ opacity: originalReady ? 1 : 0 }}

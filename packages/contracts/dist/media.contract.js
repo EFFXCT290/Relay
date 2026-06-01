@@ -7,6 +7,29 @@ export const DeliveryModeSchema = Type.Union([
     Type.Literal("optimized"),
     Type.Literal("lss"),
 ]);
+// ── Ephemeral / view-once (Phase 6E) ──────────────────────────────────────────
+// View-COUNT based (Instagram-style), not a timer. The sender picks maxViews
+// (1 = "view once" … 5); "unlimited" sends no ephemeral block and behaves as
+// normal media. When an attachment is ephemeral the server serializes NO signed
+// URL (see ImageAttachment.media.url becoming optional) — the client renders a
+// locked "tap to view" card and mints a short-lived URL on explicit open via
+// POST /media/:id/view. `consumedAt` is set once viewCount reaches maxViews.
+export const EphemeralSendSchema = Type.Object({
+    maxViews: Type.Integer({ minimum: 1, maximum: 5 }),
+});
+export const EphemeralStateSchema = Type.Object({
+    maxViews: Type.Integer(),
+    viewCount: Type.Integer(),
+    consumedAt: Type.Union([Type.String({ format: "date-time" }), Type.Null()]),
+});
+// Response of POST /api/media/:mediaId/view. `url` is the freshly-minted short
+// lived link, omitted once the media is consumed.
+export const MediaViewResponseSchema = Type.Object({
+    consumed: Type.Boolean(),
+    viewCount: Type.Integer(),
+    maxViews: Type.Integer(),
+    url: Type.Optional(Type.String()),
+});
 // ── Upload response ───────────────────────────────────────────────────────────
 export const MediaUploadResponseSchema = Type.Object({
     mediaId: Type.String(),
@@ -42,6 +65,7 @@ export const TranscriptSchema = Type.Object({
 export const MEDIA_EVENTS = {
     READY: "media:ready", // legacy image blur/thumb (kept for back-compat)
     PROCESSED: "media:processed", // Phase 6B: any media's derivatives finished
+    VIEWED: "media:viewed", // Phase 6E: ephemeral view-count ticked / consumed
 };
 export const VOICE_EVENTS = {
     TRANSCRIPT_READY: "voice:transcript_ready",
@@ -54,7 +78,9 @@ export const ImageAttachmentSchema = Type.Object({
     type: Type.Literal("image"),
     media: Type.Object({
         id: Type.String(),
-        url: Type.String(),
+        // Optional since Phase 6E: ephemeral (locked) media carries NO url/blur/thumb
+        // until the recipient opens it via POST /media/:id/view.
+        url: Type.Optional(Type.Union([Type.String(), Type.Null()])),
         blurUrl: Type.Optional(Type.Union([Type.String(), Type.Null()])),
         thumbUrl: Type.Optional(Type.Union([Type.String(), Type.Null()])),
         width: Type.Optional(Type.Union([Type.Number(), Type.Null()])),
@@ -69,6 +95,9 @@ export const ImageAttachmentSchema = Type.Object({
         // pre-6B attachments, which render without a badge.
         isLss: Type.Optional(Type.Boolean()),
         deliveryMode: Type.Optional(DeliveryModeSchema),
+        // Phase 6E: present iff this media is ephemeral. When set, url/blur/thumb are
+        // absent and the bubble renders a locked "tap to view" card.
+        ephemeral: Type.Optional(Type.Union([Type.Null(), EphemeralStateSchema])),
     }),
 });
 export const VoiceAttachmentSchema = Type.Object({
@@ -93,7 +122,9 @@ export const VideoAttachmentSchema = Type.Object({
     type: Type.Literal("video"),
     media: Type.Object({
         id: Type.String(),
-        url: Type.String(), // original / highest quality
+        // Optional since Phase 6E (see ImageAttachment): ephemeral video is locked
+        // until opened via POST /media/:id/view.
+        url: Type.Optional(Type.Union([Type.String(), Type.Null()])), // original / highest quality
         streamUrl: Type.Optional(Type.Union([Type.String(), Type.Null()])), // feed-safe optimized stream
         posterUrl: Type.Optional(Type.Union([Type.String(), Type.Null()])),
         thumbUrl: Type.Optional(Type.Union([Type.String(), Type.Null()])),
@@ -106,6 +137,8 @@ export const VideoAttachmentSchema = Type.Object({
         isLss: Type.Optional(Type.Boolean()),
         deliveryMode: Type.Optional(DeliveryModeSchema),
         status: Type.Optional(Type.String()), // "processing" | "ready" | "failed"
+        // Phase 6E: present iff this video is ephemeral (locked until opened).
+        ephemeral: Type.Optional(Type.Union([Type.Null(), EphemeralStateSchema])),
     }),
 });
 export const MessageAttachmentSchema = Type.Union([

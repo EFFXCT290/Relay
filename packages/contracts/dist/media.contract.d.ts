@@ -1,6 +1,23 @@
 import { type Static } from "@sinclair/typebox";
 export declare const DeliveryModeSchema: import("@sinclair/typebox").TUnion<[import("@sinclair/typebox").TLiteral<"optimized">, import("@sinclair/typebox").TLiteral<"lss">]>;
 export type DeliveryMode = Static<typeof DeliveryModeSchema>;
+export declare const EphemeralSendSchema: import("@sinclair/typebox").TObject<{
+    maxViews: import("@sinclair/typebox").TInteger;
+}>;
+export type EphemeralSend = Static<typeof EphemeralSendSchema>;
+export declare const EphemeralStateSchema: import("@sinclair/typebox").TObject<{
+    maxViews: import("@sinclair/typebox").TInteger;
+    viewCount: import("@sinclair/typebox").TInteger;
+    consumedAt: import("@sinclair/typebox").TUnion<[import("@sinclair/typebox").TString, import("@sinclair/typebox").TNull]>;
+}>;
+export type EphemeralState = Static<typeof EphemeralStateSchema>;
+export declare const MediaViewResponseSchema: import("@sinclair/typebox").TObject<{
+    consumed: import("@sinclair/typebox").TBoolean;
+    viewCount: import("@sinclair/typebox").TInteger;
+    maxViews: import("@sinclair/typebox").TInteger;
+    url: import("@sinclair/typebox").TOptional<import("@sinclair/typebox").TString>;
+}>;
+export type MediaViewResponse = Static<typeof MediaViewResponseSchema>;
 export declare const MediaUploadResponseSchema: import("@sinclair/typebox").TObject<{
     mediaId: import("@sinclair/typebox").TString;
     mimeType: import("@sinclair/typebox").TString;
@@ -35,8 +52,17 @@ export type Transcript = Static<typeof TranscriptSchema>;
 export declare const MEDIA_EVENTS: {
     readonly READY: "media:ready";
     readonly PROCESSED: "media:processed";
+    readonly VIEWED: "media:viewed";
 };
 export type MediaEventName = (typeof MEDIA_EVENTS)[keyof typeof MEDIA_EVENTS];
+export type MediaViewedEvent = {
+    mediaId: string;
+    messageId: string;
+    viewCount: number;
+    maxViews: number;
+    consumed: boolean;
+    viewedAt: string;
+};
 export type MediaReadyEvent = {
     mediaId: string;
     blurUrl: string | null;
@@ -73,7 +99,7 @@ export declare const ImageAttachmentSchema: import("@sinclair/typebox").TObject<
     type: import("@sinclair/typebox").TLiteral<"image">;
     media: import("@sinclair/typebox").TObject<{
         id: import("@sinclair/typebox").TString;
-        url: import("@sinclair/typebox").TString;
+        url: import("@sinclair/typebox").TOptional<import("@sinclair/typebox").TUnion<[import("@sinclair/typebox").TString, import("@sinclair/typebox").TNull]>>;
         blurUrl: import("@sinclair/typebox").TOptional<import("@sinclair/typebox").TUnion<[import("@sinclair/typebox").TString, import("@sinclair/typebox").TNull]>>;
         thumbUrl: import("@sinclair/typebox").TOptional<import("@sinclair/typebox").TUnion<[import("@sinclair/typebox").TString, import("@sinclair/typebox").TNull]>>;
         width: import("@sinclair/typebox").TOptional<import("@sinclair/typebox").TUnion<[import("@sinclair/typebox").TNumber, import("@sinclair/typebox").TNull]>>;
@@ -86,6 +112,11 @@ export declare const ImageAttachmentSchema: import("@sinclair/typebox").TObject<
         sizeBytes: import("@sinclair/typebox").TNumber;
         isLss: import("@sinclair/typebox").TOptional<import("@sinclair/typebox").TBoolean>;
         deliveryMode: import("@sinclair/typebox").TOptional<import("@sinclair/typebox").TUnion<[import("@sinclair/typebox").TLiteral<"optimized">, import("@sinclair/typebox").TLiteral<"lss">]>>;
+        ephemeral: import("@sinclair/typebox").TOptional<import("@sinclair/typebox").TUnion<[import("@sinclair/typebox").TNull, import("@sinclair/typebox").TObject<{
+            maxViews: import("@sinclair/typebox").TInteger;
+            viewCount: import("@sinclair/typebox").TInteger;
+            consumedAt: import("@sinclair/typebox").TUnion<[import("@sinclair/typebox").TString, import("@sinclair/typebox").TNull]>;
+        }>]>>;
     }>;
 }>;
 export type ImageAttachment = Static<typeof ImageAttachmentSchema>;
@@ -117,7 +148,7 @@ export declare const VideoAttachmentSchema: import("@sinclair/typebox").TObject<
     type: import("@sinclair/typebox").TLiteral<"video">;
     media: import("@sinclair/typebox").TObject<{
         id: import("@sinclair/typebox").TString;
-        url: import("@sinclair/typebox").TString;
+        url: import("@sinclair/typebox").TOptional<import("@sinclair/typebox").TUnion<[import("@sinclair/typebox").TString, import("@sinclair/typebox").TNull]>>;
         streamUrl: import("@sinclair/typebox").TOptional<import("@sinclair/typebox").TUnion<[import("@sinclair/typebox").TString, import("@sinclair/typebox").TNull]>>;
         posterUrl: import("@sinclair/typebox").TOptional<import("@sinclair/typebox").TUnion<[import("@sinclair/typebox").TString, import("@sinclair/typebox").TNull]>>;
         thumbUrl: import("@sinclair/typebox").TOptional<import("@sinclair/typebox").TUnion<[import("@sinclair/typebox").TString, import("@sinclair/typebox").TNull]>>;
@@ -130,6 +161,11 @@ export declare const VideoAttachmentSchema: import("@sinclair/typebox").TObject<
         isLss: import("@sinclair/typebox").TOptional<import("@sinclair/typebox").TBoolean>;
         deliveryMode: import("@sinclair/typebox").TOptional<import("@sinclair/typebox").TUnion<[import("@sinclair/typebox").TLiteral<"optimized">, import("@sinclair/typebox").TLiteral<"lss">]>>;
         status: import("@sinclair/typebox").TOptional<import("@sinclair/typebox").TString>;
+        ephemeral: import("@sinclair/typebox").TOptional<import("@sinclair/typebox").TUnion<[import("@sinclair/typebox").TNull, import("@sinclair/typebox").TObject<{
+            maxViews: import("@sinclair/typebox").TInteger;
+            viewCount: import("@sinclair/typebox").TInteger;
+            consumedAt: import("@sinclair/typebox").TUnion<[import("@sinclair/typebox").TString, import("@sinclair/typebox").TNull]>;
+        }>]>>;
     }>;
 }>;
 export type VideoAttachment = Static<typeof VideoAttachmentSchema>;
@@ -138,7 +174,7 @@ export declare const MessageAttachmentSchema: import("@sinclair/typebox").TUnion
     type: import("@sinclair/typebox").TLiteral<"image">;
     media: import("@sinclair/typebox").TObject<{
         id: import("@sinclair/typebox").TString;
-        url: import("@sinclair/typebox").TString;
+        url: import("@sinclair/typebox").TOptional<import("@sinclair/typebox").TUnion<[import("@sinclair/typebox").TString, import("@sinclair/typebox").TNull]>>;
         blurUrl: import("@sinclair/typebox").TOptional<import("@sinclair/typebox").TUnion<[import("@sinclair/typebox").TString, import("@sinclair/typebox").TNull]>>;
         thumbUrl: import("@sinclair/typebox").TOptional<import("@sinclair/typebox").TUnion<[import("@sinclair/typebox").TString, import("@sinclair/typebox").TNull]>>;
         width: import("@sinclair/typebox").TOptional<import("@sinclair/typebox").TUnion<[import("@sinclair/typebox").TNumber, import("@sinclair/typebox").TNull]>>;
@@ -151,13 +187,18 @@ export declare const MessageAttachmentSchema: import("@sinclair/typebox").TUnion
         sizeBytes: import("@sinclair/typebox").TNumber;
         isLss: import("@sinclair/typebox").TOptional<import("@sinclair/typebox").TBoolean>;
         deliveryMode: import("@sinclair/typebox").TOptional<import("@sinclair/typebox").TUnion<[import("@sinclair/typebox").TLiteral<"optimized">, import("@sinclair/typebox").TLiteral<"lss">]>>;
+        ephemeral: import("@sinclair/typebox").TOptional<import("@sinclair/typebox").TUnion<[import("@sinclair/typebox").TNull, import("@sinclair/typebox").TObject<{
+            maxViews: import("@sinclair/typebox").TInteger;
+            viewCount: import("@sinclair/typebox").TInteger;
+            consumedAt: import("@sinclair/typebox").TUnion<[import("@sinclair/typebox").TString, import("@sinclair/typebox").TNull]>;
+        }>]>>;
     }>;
 }>, import("@sinclair/typebox").TObject<{
     id: import("@sinclair/typebox").TString;
     type: import("@sinclair/typebox").TLiteral<"video">;
     media: import("@sinclair/typebox").TObject<{
         id: import("@sinclair/typebox").TString;
-        url: import("@sinclair/typebox").TString;
+        url: import("@sinclair/typebox").TOptional<import("@sinclair/typebox").TUnion<[import("@sinclair/typebox").TString, import("@sinclair/typebox").TNull]>>;
         streamUrl: import("@sinclair/typebox").TOptional<import("@sinclair/typebox").TUnion<[import("@sinclair/typebox").TString, import("@sinclair/typebox").TNull]>>;
         posterUrl: import("@sinclair/typebox").TOptional<import("@sinclair/typebox").TUnion<[import("@sinclair/typebox").TString, import("@sinclair/typebox").TNull]>>;
         thumbUrl: import("@sinclair/typebox").TOptional<import("@sinclair/typebox").TUnion<[import("@sinclair/typebox").TString, import("@sinclair/typebox").TNull]>>;
@@ -170,6 +211,11 @@ export declare const MessageAttachmentSchema: import("@sinclair/typebox").TUnion
         isLss: import("@sinclair/typebox").TOptional<import("@sinclair/typebox").TBoolean>;
         deliveryMode: import("@sinclair/typebox").TOptional<import("@sinclair/typebox").TUnion<[import("@sinclair/typebox").TLiteral<"optimized">, import("@sinclair/typebox").TLiteral<"lss">]>>;
         status: import("@sinclair/typebox").TOptional<import("@sinclair/typebox").TString>;
+        ephemeral: import("@sinclair/typebox").TOptional<import("@sinclair/typebox").TUnion<[import("@sinclair/typebox").TNull, import("@sinclair/typebox").TObject<{
+            maxViews: import("@sinclair/typebox").TInteger;
+            viewCount: import("@sinclair/typebox").TInteger;
+            consumedAt: import("@sinclair/typebox").TUnion<[import("@sinclair/typebox").TString, import("@sinclair/typebox").TNull]>;
+        }>]>>;
     }>;
 }>, import("@sinclair/typebox").TObject<{
     id: import("@sinclair/typebox").TString;

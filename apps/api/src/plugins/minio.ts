@@ -11,7 +11,9 @@ import { env } from "../backend-core/runtime/env.js";
 declare module "fastify" {
   interface FastifyInstance {
     s3: S3Client;
-    getMediaUrl: (storageKey: string) => Promise<string>;
+    // `expiresIn` (seconds) overrides the default expiry — Phase 6E uses a short
+    // window (env.MEDIA_EPHEMERAL_SIGNED_URL_EXPIRY) for ephemeral view-once media.
+    getMediaUrl: (storageKey: string, expiresIn?: number) => Promise<string>;
   }
 }
 
@@ -40,8 +42,8 @@ export default fp(async (fastify) => {
   }
 
   fastify.decorate("s3", s3);
-  fastify.decorate("getMediaUrl", async (storageKey: string) => {
+  fastify.decorate("getMediaUrl", async (storageKey: string, expiresIn?: number) => {
     const cmd = new GetObjectCommand({ Bucket: env.MINIO_BUCKET, Key: storageKey });
-    return awsGetSignedUrl(s3, cmd, { expiresIn: env.MEDIA_SIGNED_URL_EXPIRY });
+    return awsGetSignedUrl(s3, cmd, { expiresIn: expiresIn ?? env.MEDIA_SIGNED_URL_EXPIRY });
   });
 });

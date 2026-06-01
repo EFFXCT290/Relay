@@ -110,7 +110,7 @@ function GridTile({ attachment, width, height, onClick, overlayCount = 0 }: Tile
   const { ref, visible } = useInViewport<HTMLButtonElement>();
 
   const blurUrl = attachment.media.blurUrl;
-  const chatSrc = attachment.media.thumbUrl ?? attachment.media.url;
+  const chatSrc = attachment.media.thumbUrl ?? attachment.media.url ?? undefined;
 
   return (
     <button

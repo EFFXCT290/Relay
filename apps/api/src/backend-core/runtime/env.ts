@@ -43,6 +43,10 @@ export const env = {
   MINIO_BUCKET:            optional("MINIO_BUCKET_MEDIA", "relay-media"),
   MEDIA_MAX_SIZE_MB:       int("MEDIA_MAX_SIZE_MB", 50),
   MEDIA_SIGNED_URL_EXPIRY: int("MEDIA_SIGNED_URL_EXPIRY", 3600),
+  // Phase 6E: ephemeral (view-once) media gets a deliberately short-lived URL,
+  // minted only on explicit open via POST /media/:id/view, so a leaked link dies
+  // within a minute and is never reissued once the view count is consumed.
+  MEDIA_EPHEMERAL_SIGNED_URL_EXPIRY: int("MEDIA_EPHEMERAL_SIGNED_URL_EXPIRY", 60),
 
   // Voice-note transcription (openai-whisper CLI + ffmpeg).
   WHISPER_BIN:    optional("WHISPER_BIN", "whisper"),

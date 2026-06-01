@@ -3,7 +3,7 @@
 import { randomUUID } from "node:crypto";
 import sharp from "sharp";
 import { PutObjectCommand, type S3Client } from "@aws-sdk/client-s3";
-import type { PrismaClient, Media, MediaVariant } from "@prisma/client";
+import type { PrismaClient, Media, MediaVariant, TemporaryMedia } from "@prisma/client";
 import type { MessageAttachment, Transcript } from "@relay/contracts";
 import { createMediaRepository } from "./media.repository.js";
 import { buildVariantKey, assertPhase6BKey } from "./media.keys.js";
@@ -411,9 +411,54 @@ export function findMedia(mediaId: string, prisma: PrismaClient) {
 export async function serializeAttachment(
   attachmentId: string,
   type:         string,
-  media:        Media & { variants?: MediaVariant[] },
+  media:        Media & { variants?: MediaVariant[]; temporary?: TemporaryMedia | null },
   signUrl:      (key: string) => Promise<string>,
 ): Promise<MessageAttachment> {
+  // Phase 6E: ephemeral media is NEVER serialized with a URL (no preview leak).
+  // The recipient mints a short-lived URL on explicit open via POST /media/:id/view,
+  // which is the only thing that increments the view count. Here we emit a locked
+  // (or consumed) card carrying just the ephemeral state + layout metadata.
+  if (media.temporary) {
+    const t = media.temporary;
+    const ephemeral = {
+      maxViews:   t.maxViews,
+      viewCount:  t.viewCount,
+      consumedAt: t.consumedAt ? t.consumedAt.toISOString() : null,
+    };
+    if (type === "video") {
+      return {
+        id:   attachmentId,
+        type: "video",
+        media: {
+          id:           media.id,
+          width:        media.width,
+          height:       media.height,
+          durationMs:   media.durationMs,
+          mimeType:     media.mimeType,
+          sizeBytes:    media.sizeBytes,
+          isLss:        media.isLss,
+          deliveryMode: media.deliveryMode === "LSS" ? "lss" : "optimized",
+          status:       media.status,
+          ephemeral,
+        },
+      };
+    }
+    return {
+      id:   attachmentId,
+      type: "image",
+      media: {
+        id:           media.id,
+        width:        media.width,
+        height:       media.height,
+        mimeType:     media.mimeType,
+        sizeBytes:    media.sizeBytes,
+        isLss:        media.isLss,
+        deliveryMode: media.deliveryMode === "LSS" ? "lss" : "optimized",
+        ephemeral,
+      },
+    };
+  }
+
   const url = await signUrl(media.storageKey);
 
   if (type === "video") {

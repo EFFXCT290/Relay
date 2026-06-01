@@ -21,6 +21,8 @@ import authPlugin from "./plugins/auth.js";
 import socketPlugin from "./plugins/socket.js";
 import minioPlugin from "./plugins/minio.js";
 import { createMediaWorker, createVideoWorker, createVoiceWorker } from "./queues/media.worker.js";
+import { createCleanupWorker } from "./queues/cleanup.worker.js";
+import { cleanupQueue, SWEEP_JOB } from "./queues/cleanup.queue.js";
 
 import healthRoutes from "./modules/health/health.routes.js";
 import mediaRoutes from "./modules/media/media.routes.js";
@@ -79,8 +81,18 @@ export async function buildServer() {
   const mediaWorker = createMediaWorker(workerDeps);
   const videoWorker = createVideoWorker(workerDeps);
   const voiceWorker = createVoiceWorker(workerDeps);
+  // Phase 6E: in-process sweep that purges consumed ephemeral media from MinIO.
+  // A single repeatable job (stable jobId so server restarts don't stack
+  // schedulers) fires every 60s; the worker is idempotent.
+  const cleanupWorker = createCleanupWorker(workerDeps);
+  await cleanupQueue.add(SWEEP_JOB, {}, { repeat: { every: 60_000 }, jobId: "sweep-singleton" });
   app.addHook("onClose", async () => {
-    await Promise.all([mediaWorker.close(), videoWorker.close(), voiceWorker.close()]);
+    await Promise.all([
+      mediaWorker.close(),
+      videoWorker.close(),
+      voiceWorker.close(),
+      cleanupWorker.close(),
+    ]);
   });
   await app.register(multipart, {
     limits: { fileSize: env.MEDIA_MAX_SIZE_MB * 1024 * 1024 },

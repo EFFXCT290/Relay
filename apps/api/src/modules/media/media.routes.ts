@@ -1,8 +1,13 @@
 import type { FastifyPluginAsyncTypebox } from "@fastify/type-provider-typebox";
 import { Type } from "@sinclair/typebox";
 import { ProblemError } from "../../backend-core/http/errors.js";
-import { MediaUploadResponseSchema } from "@relay/contracts";
-import { uploadImage, uploadVideo, uploadVoice, findMedia, mediaKindFromMime, resolveUploadMime } from "./media.service.js";
+import {
+  MediaUploadResponseSchema,
+  MediaViewResponseSchema,
+  MEDIA_EVENTS,
+  type MediaViewedEvent,
+} from "@relay/contracts";
+import { uploadImage, uploadVideo, uploadVoice, mediaKindFromMime, resolveUploadMime } from "./media.service.js";
 import { env } from "../../backend-core/runtime/env.js";
 
 const mediaRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
@@ -95,10 +100,121 @@ const mediaRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
     },
     async (request) => {
       const { mediaId } = request.params;
-      const media = await findMedia(mediaId, fastify.prisma);
+      const media = await fastify.prisma.media.findUnique({
+        where: { id: mediaId },
+        include: { temporary: true },
+      });
       if (!media) throw new ProblemError("not_found", "Media not found.");
+      // Phase 6E: ephemeral media must NEVER be served through the generic URL
+      // endpoint — that would hand out an unmetered link and bypass the view
+      // count. The only path to ephemeral bytes is POST /media/:id/view.
+      if (media.temporary) {
+        throw new ProblemError("forbidden", "This media is view-once. Open it from the chat.");
+      }
       const url = await fastify.getMediaUrl(media.storageKey);
       return { url };
+    },
+  );
+
+  // ── POST /api/media/:mediaId/view (Phase 6E) ────────────────────────────────
+  // Ephemeral view-count consume. Only a recipient (a participant who is NOT the
+  // uploader) can spend a view. Atomically increments viewCount under a guard so
+  // it can never exceed maxViews, stamps consumedAt at the cap, and returns a
+  // short-lived signed URL for this single open — refused once consumed. Emits
+  // media:viewed so the sender's "Opened X/N" and the recipient's other devices
+  // stay in sync.
+  fastify.post(
+    "/media/:mediaId/view",
+    {
+      preHandler: [fastify.authenticate],
+      schema: {
+        params:   Type.Object({ mediaId: Type.String() }),
+        response: { 200: MediaViewResponseSchema },
+      },
+      config: { rateLimit: { max: 60, timeWindow: "1 minute" } },
+    },
+    async (request) => {
+      const callerId = request.userId!;
+      const { mediaId } = request.params;
+
+      const media = await fastify.prisma.media.findUnique({
+        where: { id: mediaId },
+        include: {
+          temporary: true,
+          attachments: {
+            include: {
+              message: {
+                include: {
+                  conversation: { include: { participants: { select: { userId: true } } } },
+                },
+              },
+            },
+          },
+        },
+      });
+      if (!media) throw new ProblemError("not_found", "Media not found.");
+
+      // Authz: the caller must be a participant of a conversation this media was
+      // sent into, and must not be the uploader.
+      const att = media.attachments.find((a) =>
+        a.message.conversation.participants.some((p) => p.userId === callerId),
+      );
+      if (!att) throw new ProblemError("forbidden", "You can't view this media.");
+      if (media.uploaderId === callerId) {
+        throw new ProblemError("forbidden", "You can't open your own view-once media.");
+      }
+
+      const temp = media.temporary;
+      // Non-ephemeral media wouldn't show a locked card; just sign defensively.
+      if (!temp) {
+        const url = await fastify.getMediaUrl(media.storageKey);
+        return { consumed: false, viewCount: 0, maxViews: 0, url };
+      }
+
+      // Already spent before this request → no URL, no further mint.
+      if (temp.consumedAt || temp.viewCount >= temp.maxViews) {
+        return { consumed: true, viewCount: temp.viewCount, maxViews: temp.maxViews };
+      }
+
+      // Guarded atomic increment: bumps only while strictly under the cap, so a
+      // double-tap (or a future second recipient) can never over-count.
+      const viewedAt = new Date();
+      const bumped = await fastify.prisma.temporaryMedia.updateMany({
+        where: { mediaId, viewCount: { lt: temp.maxViews } },
+        data:  { viewCount: { increment: 1 } },
+      });
+      const fresh = await fastify.prisma.temporaryMedia.findUnique({ where: { mediaId } });
+      const viewCount = fresh?.viewCount ?? temp.maxViews;
+      const consumed  = viewCount >= temp.maxViews;
+
+      if (bumped.count === 0) {
+        // Lost the race for the last view — refuse, no URL.
+        return { consumed: true, viewCount, maxViews: temp.maxViews };
+      }
+      if (consumed && !fresh?.consumedAt) {
+        await fastify.prisma.temporaryMedia.updateMany({
+          where: { mediaId, consumedAt: null },
+          data:  { consumedAt: viewedAt },
+        });
+      }
+
+      // Short-lived URL for this single open; whoever spends the last view still
+      // gets to see it this once.
+      const url = await fastify.getMediaUrl(media.storageKey, env.MEDIA_EPHEMERAL_SIGNED_URL_EXPIRY);
+
+      const event: MediaViewedEvent = {
+        mediaId,
+        messageId: att.message.id,
+        viewCount,
+        maxViews:  temp.maxViews,
+        consumed,
+        viewedAt:  viewedAt.toISOString(),
+      };
+      for (const p of att.message.conversation.participants) {
+        fastify.io.to(`user:${p.userId}`).emit(MEDIA_EVENTS.VIEWED, event);
+      }
+
+      return { consumed, viewCount, maxViews: temp.maxViews, url };
     },
   );
 };

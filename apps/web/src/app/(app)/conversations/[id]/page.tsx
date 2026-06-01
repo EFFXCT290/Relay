@@ -25,7 +25,8 @@ import {
   drainSessions,
 } from "@/frontend-core/upload-session";
 import { ImageLightbox, type LightboxState } from "@/features/messages/components/lightbox/image-lightbox";
-import { ACK_EVENT, MEDIA_EVENTS, VOICE_EVENTS, PRESENCE_EVENTS, SYNC_EVENTS, TYPING_EVENTS, type MediaReadyEvent, type MediaProcessedEvent, type VoiceTranscriptReadyEvent, type ImageAttachment, type DeliveryMode, type PresenceSyncResponse, type ReplayResponse, type TypingSyncResponse } from "@relay/contracts";
+import { EphemeralViewer } from "@/features/messages/components/ephemeral-viewer";
+import { ACK_EVENT, MEDIA_EVENTS, VOICE_EVENTS, PRESENCE_EVENTS, SYNC_EVENTS, TYPING_EVENTS, type MediaReadyEvent, type MediaProcessedEvent, type MediaViewedEvent, type VoiceTranscriptReadyEvent, type ImageAttachment, type VideoAttachment, type MediaViewResponse, type DeliveryMode, type EphemeralSend, type PresenceSyncResponse, type ReplayResponse, type TypingSyncResponse } from "@relay/contracts";
 import { formatLastSeen } from "@/frontend-core/format-presence";
 import { useCall } from "@/features/calls/call-provider";
 import { useMe } from "@/providers/me-provider";
@@ -167,6 +168,7 @@ export default function ChatThreadPage() {
   const [pendingBatches, setPendingBatches] = useState<PendingBatch[]>([]);
   const batchControllersRef = useRef(new Map<string, AbortController>());
   const [lightbox, setLightbox] = useState<LightboxState | null>(null);
+  const [ephemeralView, setEphemeralView] = useState<{ url: string; type: "image" | "video" } | null>(null);
   const [dragActive, setDragActive] = useState(false);
   const dragCounterRef = useRef(0);
 
@@ -653,6 +655,31 @@ export default function ChatThreadPage() {
       }
     };
 
+    // Phase 6E: a recipient opened ephemeral media — tick the view count (and
+    // flip to consumed once spent) so the sender's "Opened X/N" and this user's
+    // other devices reflect it without a refetch.
+    const onMediaViewed = (payload: MediaViewedEvent) => {
+      for (const m of Object.values(messagesRef.current)) {
+        if (!m.attachments?.some((a) => a.media.id === payload.mediaId)) continue;
+        messagesRef.current[m.messageId] = {
+          ...m,
+          attachments: m.attachments.map((a) => {
+            if (a.media.id !== payload.mediaId) return a;
+            const consumedAt = payload.consumed ? payload.viewedAt : null;
+            if (a.type === "image" && a.media.ephemeral) {
+              return { ...a, media: { ...a.media, ephemeral: { ...a.media.ephemeral, viewCount: payload.viewCount, consumedAt: consumedAt ?? a.media.ephemeral.consumedAt } } };
+            }
+            if (a.type === "video" && a.media.ephemeral) {
+              return { ...a, media: { ...a.media, ephemeral: { ...a.media.ephemeral, viewCount: payload.viewCount, consumedAt: consumedAt ?? a.media.ephemeral.consumedAt } } };
+            }
+            return a;
+          }),
+        };
+        rerender();
+        break; // mediaId is unique per upload
+      }
+    };
+
     const onVoiceTranscript = (payload: VoiceTranscriptReadyEvent) => {
       const m = messagesRef.current[payload.messageId];
       if (!m?.attachments) return;
@@ -681,6 +708,7 @@ export default function ChatThreadPage() {
     socket.on("presence:offline", onPresenceOffline);
     socket.on(MEDIA_EVENTS.READY, onMediaReady);
     socket.on(MEDIA_EVENTS.PROCESSED, onMediaProcessed);
+    socket.on(MEDIA_EVENTS.VIEWED, onMediaViewed);
     socket.on(VOICE_EVENTS.TRANSCRIPT_READY, onVoiceTranscript);
 
     return () => {
@@ -712,6 +740,7 @@ export default function ChatThreadPage() {
       socket.off("presence:offline", onPresenceOffline);
       socket.off(MEDIA_EVENTS.READY, onMediaReady);
       socket.off(MEDIA_EVENTS.PROCESSED, onMediaProcessed);
+      socket.off(MEDIA_EVENTS.VIEWED, onMediaViewed);
       socket.off(VOICE_EVENTS.TRANSCRIPT_READY, onVoiceTranscript);
     };
   }, [conversationId]);
@@ -918,7 +947,7 @@ export default function ChatThreadPage() {
   );
 
   const handleSendImages = useCallback(
-    async (files: File[], existingUploadIds?: string[], deliveryMode: DeliveryMode = "optimized") => {
+    async (files: File[], existingUploadIds?: string[], deliveryMode: DeliveryMode = "optimized", ephemeral?: EphemeralSend) => {
       if (!files.length) return;
       const batchId         = crypto.randomUUID();
       const clientUploadIds = existingUploadIds ?? files.map(() => crypto.randomUUID());
@@ -971,7 +1000,7 @@ export default function ChatThreadPage() {
 
         await api(`/api/conversations/${conversationId}/messages/media`, {
           method: "POST",
-          body:   { mediaIds },
+          body:   { mediaIds, ...(ephemeral ? { ephemeral } : {}) },
         });
 
         removeSession(batchId);
@@ -1019,6 +1048,25 @@ export default function ChatThreadPage() {
   // Opt-in transcription — fires only when the user taps Transcribe on a voice
   // bubble. The worker emits voice:transcript_ready, which onVoiceTranscript
   // patches in. Rejection propagates so the bubble can reset its pending state.
+  // Phase 6E: recipient taps a locked ephemeral card. POST /view counts the view
+  // server-side and returns a short-lived URL we show once; the media:viewed
+  // socket echo flips the bubble to "Viewed" when the budget is spent.
+  const handleViewEphemeral = useCallback(
+    async (attachment: ImageAttachment | VideoAttachment) => {
+      try {
+        const res = await api<MediaViewResponse>(`/api/media/${attachment.media.id}/view`, { method: "POST" });
+        if (res.url) {
+          setEphemeralView({ url: res.url, type: attachment.type });
+        } else {
+          setError("This media has already been viewed.");
+        }
+      } catch {
+        setError("Couldn't open this media. Try again.");
+      }
+    },
+    [],
+  );
+
   const handleRequestTranscript = useCallback(
     (messageId: string, attachmentId: string): Promise<void> =>
       api(`/api/messages/${messageId}/attachments/${attachmentId}/transcribe`, { method: "POST" }).then(() => undefined),
@@ -1333,6 +1381,7 @@ export default function ChatThreadPage() {
                           onOpenLightbox={(atts: ImageAttachment[], idx: number) =>
                             setLightbox({ images: atts, index: idx })
                           }
+                          onViewEphemeral={handleViewEphemeral}
                           onRequestTranscript={handleRequestTranscript}
                         />
                       </div>
@@ -1396,7 +1445,7 @@ export default function ChatThreadPage() {
           onSend={handleSend}
           onUpdate={handleUpdate}
           onTypingChange={handleTypingChange}
-          onSendImages={(files, mode) => handleSendImages(files, undefined, mode)}
+          onSendImages={(files, mode, ephemeral) => handleSendImages(files, undefined, mode, ephemeral)}
           onSendVoice={handleSendVoice}
           replyTo={replyTo}
           onCancelReply={() => setReplyTo(null)}
@@ -1409,6 +1458,14 @@ export default function ChatThreadPage() {
         <ImageLightbox
           state={lightbox}
           onClose={() => setLightbox(null)}
+        />
+      )}
+
+      {ephemeralView && (
+        <EphemeralViewer
+          url={ephemeralView.url}
+          type={ephemeralView.type}
+          onClose={() => setEphemeralView(null)}
         />
       )}
     </div>

@@ -8,6 +8,7 @@ import { EmbedCard } from "./embeds";
 import { ImageGrid } from "./image-grid";
 import { VoiceBubble } from "./voice-bubble";
 import { VideoBubble } from "./video-bubble";
+import { EphemeralMediaCard } from "./ephemeral-media-card";
 import type { Message, ImageAttachment, VoiceAttachment, VideoAttachment } from "@relay/contracts";
 
 export type { Message };  // re-export so existing consumers still resolve through this module
@@ -33,6 +34,7 @@ type Props = {
   onDelete?: (message: Message) => void;
   onDismiss?: () => void;
   onOpenLightbox?: (attachments: ImageAttachment[], index: number) => void;
+  onViewEphemeral?: (attachment: ImageAttachment | VideoAttachment) => void;
   onRequestTranscript?: (messageId: string, attachmentId: string) => Promise<void> | void;
 };
 
@@ -49,6 +51,7 @@ export function MessageBubble({
   onDelete,
   onDismiss,
   onOpenLightbox,
+  onViewEphemeral,
   onRequestTranscript,
 }: Props) {
   const [pickerOpen, setPickerOpen] = useState(false);
@@ -290,11 +293,20 @@ export function MessageBubble({
           )}
           <div className={cn("flex flex-col gap-1", isMine ? "items-end" : "items-start")}>
             {message.attachments && message.attachments.length > 0 && (() => {
-              const images = message.attachments.filter((a): a is ImageAttachment => a.type === "image");
-              const videos = message.attachments.filter((a): a is VideoAttachment => a.type === "video");
+              // Phase 6E: ephemeral image/video render as locked cards (no preview),
+              // separate from the normal grid/player paths.
+              const ephemerals = message.attachments.filter(
+                (a): a is ImageAttachment | VideoAttachment =>
+                  (a.type === "image" || a.type === "video") && Boolean(a.media.ephemeral),
+              );
+              const images = message.attachments.filter((a): a is ImageAttachment => a.type === "image" && !a.media.ephemeral);
+              const videos = message.attachments.filter((a): a is VideoAttachment => a.type === "video" && !a.media.ephemeral);
               const voices = message.attachments.filter((a): a is VoiceAttachment => a.type === "voice");
               return (
                 <>
+                  {ephemerals.map((a) => (
+                    <EphemeralMediaCard key={a.id} attachment={a} isMine={isMine} onView={onViewEphemeral} />
+                  ))}
                   {images.length > 0 && (
                     <ImageGrid attachments={images} isMine={isMine} onOpenLightbox={onOpenLightbox} />
                   )}

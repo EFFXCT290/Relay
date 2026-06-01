@@ -38,7 +38,7 @@ export function ImageBubble({ attachment, isMine, onOpenLightbox }: Props) {
   );
   const blurUrl = attachment.media.blurUrl;
   // Thumb is the displayed asset in chat; original is reserved for lightbox.
-  const chatSrc = attachment.media.thumbUrl ?? attachment.media.url;
+  const chatSrc = attachment.media.thumbUrl ?? attachment.media.url ?? undefined;
 
   const inner = (
     <div

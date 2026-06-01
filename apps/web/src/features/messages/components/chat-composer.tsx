@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { Camera, Check, Mic, Plus, Send, Trash2, X } from "lucide-react";
-import { TYPING_DEBOUNCE_MS, type DeliveryMode } from "@relay/contracts";
+import { TYPING_DEBOUNCE_MS, type DeliveryMode, type EphemeralSend } from "@relay/contracts";
 import type { Message } from "./message-bubble";
 import { useVoiceRecorder } from "../hooks/use-voice-recorder";
 import { MediaComposerModal } from "./media-composer-modal";
@@ -19,7 +19,7 @@ type Props = {
   onSend: (body: string, replyToId?: string | null) => Promise<void> | void;
   onUpdate?: (messageId: string, body: string) => Promise<void> | void;
   onTypingChange?: (isTyping: boolean) => void;
-  onSendImages?: (files: File[], deliveryMode: DeliveryMode) => void;
+  onSendImages?: (files: File[], deliveryMode: DeliveryMode, ephemeral?: EphemeralSend) => void;
   onSendVoice?: (blob: Blob, durationMs: number) => void;
   /** When set, composer renders in reply mode with the parent preview above. */
   replyTo?: Message | null;
@@ -286,7 +286,7 @@ export function ChatComposer({
         <MediaComposerModal
           files={staged}
           onCancel={() => setStaged(null)}
-          onSend={(mode) => { onSendImages?.(staged, mode); setStaged(null); }}
+          onSend={(mode, ephemeral) => { onSendImages?.(staged, mode, ephemeral); setStaged(null); }}
         />
       )}
     </div>

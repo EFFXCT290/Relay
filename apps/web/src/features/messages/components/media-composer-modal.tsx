@@ -9,17 +9,18 @@
 // the queue is shown as a horizontal strip (future-ready).
 import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
-import { X, Send, Check, Sparkles, Crop, Wand2, PenLine, Timer, Type as TypeIcon } from "lucide-react";
-import type { DeliveryMode } from "@relay/contracts";
+import { X, Send, Check, Sparkles, Crop, Wand2, PenLine, Eye, Type as TypeIcon } from "lucide-react";
+import type { DeliveryMode, EphemeralSend } from "@relay/contracts";
 import { cn } from "@/frontend-core/utils";
 
 const mono = "var(--font-mono)";
 
 type Staged = { file: File; url: string; isVideo: boolean };
 
+// View-count options for ephemeral media (Phase 6E). null = no limit (normal).
+const VIEW_LIMITS = [null, 1, 2, 3, 4, 5] as const;
+
 const FUTURE = [
-  { icon: Timer,    label: "View once" },
-  { icon: Timer,    label: "Expire after" },
   { icon: Crop,     label: "Crop" },
   { icon: Wand2,    label: "Filters" },
   { icon: PenLine,  label: "Draw" },
@@ -33,11 +34,13 @@ export function MediaComposerModal({
 }: {
   files:    File[];
   onCancel: () => void;
-  onSend:   (mode: DeliveryMode) => void;
+  onSend:   (mode: DeliveryMode, ephemeral?: EphemeralSend) => void;
 }) {
   const [staged, setStaged] = useState<Staged[]>([]);
   const [active, setActive] = useState(0);
   const [mode, setMode]     = useState<DeliveryMode>("optimized");
+  // null = unlimited (normal media); 1..5 = ephemeral view budget.
+  const [maxViews, setMaxViews] = useState<number | null>(null);
 
   // Build object URLs once per file set; revoke on cleanup to avoid leaks.
   useEffect(() => {
@@ -68,7 +71,7 @@ export function MediaComposerModal({
         </span>
         <button
           type="button"
-          onClick={() => onSend(mode)}
+          onClick={() => onSend(mode, maxViews ? { maxViews } : undefined)}
           className="flex h-9 items-center gap-1.5 rounded-full px-4 text-[14px] font-semibold text-white shadow-[0_4px_12px_rgba(59,130,246,0.35)]"
           style={{ background: "var(--color-signal)" }}
           aria-label="Send"
@@ -129,6 +132,37 @@ export function MediaComposerModal({
               : "Images & H.264 video are compressed for fast delivery; originals are kept for fullscreen."}
           </p>
 
+          {/* View limit (ephemeral) — Phase 6E. Off = normal media; 1 = view once. */}
+          <div className="mt-2 rounded-[14px] border border-white/10 bg-white/[0.03] px-3.5 py-3">
+            <div className="flex items-center gap-2 text-[14px] font-semibold text-white">
+              <Eye className="h-4 w-4" /> View limit
+            </div>
+            <div className="mt-2 flex gap-1.5">
+              {VIEW_LIMITS.map((n) => (
+                <button
+                  key={n ?? "off"}
+                  type="button"
+                  onClick={() => setMaxViews(n)}
+                  className={cn(
+                    "flex h-9 flex-1 items-center justify-center rounded-[10px] border text-[13px] font-semibold transition-colors",
+                    maxViews === n
+                      ? "border-[var(--color-signal)] bg-[var(--color-signal)]/15 text-white"
+                      : "border-white/10 bg-white/[0.03] text-white/55",
+                  )}
+                >
+                  {n ?? "Off"}
+                </button>
+              ))}
+            </div>
+            <p className="mt-2 px-0.5 text-[11px] leading-snug text-white/45" style={{ fontFamily: mono }}>
+              {maxViews == null
+                ? "No limit — recipient can view anytime."
+                : maxViews === 1
+                  ? "View once — disappears after it's opened."
+                  : `Disappears after ${maxViews} views.`}
+            </p>
+          </div>
+
           {/* Coming-soon slots (disabled) — reserve UI so the flow never redesigns */}
           <div className="mt-2 flex flex-wrap gap-1.5">
             {FUTURE.map(({ icon: Icon, label }) => (
@@ -141,8 +175,8 @@ export function MediaComposerModal({
                 <Icon className="h-3 w-3" /> {label}
               </span>
             ))}
+            <span className="flex items-center gap-1 px-1 text-[10px] text-white/30"><Sparkles className="h-3 w-3" /> Coming soon</span>
           </div>
-          <span className="flex items-center gap-1 px-1 text-[10px] text-white/30"><Sparkles className="h-3 w-3" /> Coming soon</span>
         </div>
       </div>
     </div>,

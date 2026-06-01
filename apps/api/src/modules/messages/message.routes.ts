@@ -2,7 +2,12 @@ import type { FastifyPluginAsyncTypebox } from "@fastify/type-provider-typebox";
 import { Type } from "@sinclair/typebox";
 import { randomUUID } from "node:crypto";
 import { ProblemError } from "../../backend-core/http/errors.js";
-import { MESSAGE_EVENTS, MessageSchema, MessageAttachmentSchema } from "@relay/contracts";
+import {
+  MESSAGE_EVENTS,
+  MessageSchema,
+  MessageAttachmentSchema,
+  EphemeralSendSchema,
+} from "@relay/contracts";
 import { serializeAttachment, mediaKindFromMime } from "../media/media.service.js";
 import { createMediaRepository } from "../media/media.repository.js";
 import { voiceQueue, TRANSCRIBE_VOICE_JOB } from "../../queues/media.queue.js";
@@ -73,7 +78,7 @@ const messageRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
           reactions:   { select: { emoji: true, userId: true } },
           reads:       { select: { readerId: true, readAt: true } },
           embed:       true,
-          attachments: { include: { media: { include: { variants: true } } } },
+          attachments: { include: { media: { include: { variants: true, temporary: true } } } },
         },
         orderBy: { createdAt: "desc" },
         take: limit + 1,
@@ -356,6 +361,9 @@ const messageRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
         body: Type.Object({
           mediaIds:  Type.Array(Type.String(), { minItems: 1, maxItems: 10 }),
           replyToId: Type.Optional(Type.Union([Type.String({ format: "uuid" }), Type.Null()])),
+          // Phase 6E: when present, every attached medium becomes ephemeral
+          // (view-count based). Absent ⇒ normal/unlimited media.
+          ephemeral: Type.Optional(EphemeralSendSchema),
         }),
         response: {
           201: Type.Object({
@@ -379,7 +387,7 @@ const messageRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
     async (request, reply) => {
       const callerId = request.userId!;
       const { conversationId } = request.params;
-      const { mediaIds, replyToId } = request.body;
+      const { mediaIds, replyToId, ephemeral } = request.body;
 
       await assertParticipant(fastify, callerId, conversationId);
 
@@ -448,6 +456,17 @@ const messageRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
             data: { id, messageId: msg.id, mediaId, type },
           });
           attachmentRecords.push({ id, mediaId, type });
+          // Phase 6E: mark each medium ephemeral with the chosen view budget. The
+          // sidecar is what makes serializeAttachment emit a locked card instead
+          // of a URL. Attach it back onto mediaMap so the send response/broadcast
+          // already render as locked (the row isn't on the pre-txn media fetch).
+          if (ephemeral) {
+            const temp = await tx.temporaryMedia.create({
+              data: { mediaId, maxViews: ephemeral.maxViews },
+            });
+            const m = mediaMap.get(mediaId);
+            if (m) (m as typeof m & { temporary?: typeof temp }).temporary = temp;
+          }
         }
         await tx.conversation.update({
           where: { id: conversationId },
