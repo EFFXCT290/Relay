@@ -405,6 +405,17 @@ export function findMedia(mediaId: string, prisma: PrismaClient) {
   return createMediaRepository(prisma).findMediaById(mediaId);
 }
 
+// Feed-safe stream = highest-resolution optimized rung (or the HEVC passthrough).
+// Single source of truth for both serializeAttachment (streamUrl) and the
+// ephemeral view endpoint, which serves this instead of the raw original so an
+// iPhone .mov / large source is delivered as the browser-playable transcode.
+// Returns null while transcoding is still in flight (caller falls back to the
+// original).
+export function pickVideoStream(variants: MediaVariant[]): MediaVariant | null {
+  const optimized = variants.filter((v) => v.type === "OPTIMIZED");
+  return [...optimized].sort((a, b) => (b.height ?? 0) - (a.height ?? 0))[0] ?? null;
+}
+
 // Single source of truth for the attachment wire shape. Both the history GET and
 // the media-send POST route through here so image/voice payloads stay identical
 // to the MessageAttachment contract union. `signUrl` produces a presigned URL.
@@ -463,9 +474,7 @@ export async function serializeAttachment(
 
   if (type === "video") {
     const variants  = media.variants ?? [];
-    const optimized = variants.filter((v) => v.type === "OPTIMIZED");
-    // Feed stream = highest-resolution optimized rung (or the HEVC passthrough).
-    const stream    = [...optimized].sort((a, b) => (b.height ?? 0) - (a.height ?? 0))[0] ?? null;
+    const stream    = pickVideoStream(variants);
     const poster    = variants.find((v) => v.type === "POSTER" && v.label === "") ?? null;
     const thumb     = variants.find((v) => v.type === "THUMBNAIL" && v.label === "md")
                    ?? variants.find((v) => v.type === "THUMBNAIL" && v.label === "sm") ?? null;

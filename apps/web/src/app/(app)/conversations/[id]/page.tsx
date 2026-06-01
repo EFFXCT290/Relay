@@ -1060,8 +1060,14 @@ export default function ChatThreadPage() {
         } else {
           setError("This media has already been viewed.");
         }
-      } catch {
-        setError("Couldn't open this media. Try again.");
+      } catch (err) {
+        // 409 = video not transcoded yet; the server did NOT spend a view, so
+        // the card stays tappable and the user can retry in a moment.
+        if (err instanceof ApiError && err.status === 409) {
+          setError("This video is still processing — try again in a moment.");
+        } else {
+          setError("Couldn't open this media. Try again.");
+        }
       }
     },
     [],

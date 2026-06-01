@@ -7,7 +7,7 @@ import {
   MEDIA_EVENTS,
   type MediaViewedEvent,
 } from "@relay/contracts";
-import { uploadImage, uploadVideo, uploadVoice, mediaKindFromMime, resolveUploadMime } from "./media.service.js";
+import { uploadImage, uploadVideo, uploadVoice, mediaKindFromMime, resolveUploadMime, pickVideoStream } from "./media.service.js";
 import { env } from "../../backend-core/runtime/env.js";
 
 const mediaRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
@@ -141,6 +141,7 @@ const mediaRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
         where: { id: mediaId },
         include: {
           temporary: true,
+          variants:  true,
           attachments: {
             include: {
               message: {
@@ -164,10 +165,24 @@ const mediaRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
         throw new ProblemError("forbidden", "You can't open your own view-once media.");
       }
 
+      // For video, serve the browser-playable optimized stream (HEVC/.mov sources
+      // are passthrough/transcoded by the worker). Images/voice use the original.
+      const stream = att.type === "video" ? pickVideoStream(media.variants) : null;
+      const keyToServe = stream?.storageKey ?? media.storageKey;
+
+      // Don't spend a view on a video that isn't browser-ready yet: the optimized
+      // stream hasn't been produced and the raw source may be unplayable. Refuse
+      // WITHOUT incrementing/consuming so the recipient can retry once the worker
+      // finishes. A failed transcode (status "failed") falls through and serves
+      // the original best-effort rather than blocking forever.
+      if (att.type === "video" && !stream && media.status === "processing") {
+        throw new ProblemError("conflict", "Video is still processing. Try again in a moment.");
+      }
+
       const temp = media.temporary;
       // Non-ephemeral media wouldn't show a locked card; just sign defensively.
       if (!temp) {
-        const url = await fastify.getMediaUrl(media.storageKey);
+        const url = await fastify.getMediaUrl(keyToServe);
         return { consumed: false, viewCount: 0, maxViews: 0, url };
       }
 
@@ -200,7 +215,7 @@ const mediaRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
 
       // Short-lived URL for this single open; whoever spends the last view still
       // gets to see it this once.
-      const url = await fastify.getMediaUrl(media.storageKey, env.MEDIA_EPHEMERAL_SIGNED_URL_EXPIRY);
+      const url = await fastify.getMediaUrl(keyToServe, env.MEDIA_EPHEMERAL_SIGNED_URL_EXPIRY);
 
       const event: MediaViewedEvent = {
         mediaId,
