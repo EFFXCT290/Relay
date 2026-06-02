@@ -41,9 +41,15 @@ export type CallMediaStateInbound = {
     callId: string;
     cameraOn: boolean;
 };
+export type IceServer = {
+    urls: string | string[];
+    username?: string;
+    credential?: string;
+};
 export type CallInitAck = {
     ok: true;
     callId: string;
+    iceServers?: IceServer[];
 } | {
     ok: false;
     reason: "self" | "offline" | "busy" | "not_found" | "error";
@@ -56,6 +62,7 @@ export type CallRingingEvent = {
     };
     type: CallType;
     conversationId?: string;
+    iceServers?: IceServer[];
 };
 export type CallAcceptedEvent = {
     callId: string;

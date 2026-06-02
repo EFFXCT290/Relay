@@ -13,7 +13,10 @@ import type {
 // fresh one for the next call. close() is the single mic-releasing teardown.
 // ─────────────────────────────────────────────────────────────────────────────
 
-const ICE_SERVERS: RTCIceServer[] = [{ urls: "stun:stun.l.google.com:19302" }];
+// Fallback used only until call signaling delivers the real config (STUN + a
+// per-call TURN relay) via setIceServers(). A direct/STUN path is better than
+// nothing if a payload ever arrives without servers.
+const DEFAULT_ICE_SERVERS: RTCIceServer[] = [{ urls: "stun:stun.l.google.com:19302" }];
 
 // 1080p / 30fps ideal — the browser negotiates down on weaker links, so this is
 // a ceiling, not a floor. Adaptive bitrate (the old 6D Step 3) is still
@@ -43,10 +46,22 @@ export class WebRtcController {
   private pendingIce: RTCIceCandidateInitLike[] = [];
   private closed = false;
   private facingMode: "user" | "environment" = "user";
+  private iceServers: RTCIceServer[] = DEFAULT_ICE_SERVERS;
 
   constructor(private cb: WebRtcCallbacks) {}
 
-  // Acquire the mic (and camera for video calls) and attach the tracks. Throws if
+  // Install the ICE config (STUN + the per-call TURN relay) delivered via call
+  // signaling. MUST be called before the first negotiation — the peer connection
+  // is created lazily in createOffer/acceptOffer so the config is baked in at
+  // construction and never needs a mid-call setConfiguration. No-ops on an empty
+  // list so a missing-TURN payload can't clobber the STUN fallback.
+  setIceServers(servers: RTCIceServer[] | null | undefined): void {
+    if (servers && servers.length > 0) this.iceServers = servers;
+  }
+
+  // Acquire the mic (and camera for video calls). Tracks are attached to the peer
+  // connection lazily when it's created (see ensurePc) — that lets setIceServers
+  // run in between, after the relay config arrives from signaling. Throws if
   // permission is denied — the caller must close() and abort the call.
   async startLocalMedia(opts: { video: boolean }): Promise<void> {
     if (this.localStream || this.closed) return;
@@ -54,8 +69,6 @@ export class WebRtcController {
       audio: true,
       video: opts.video ? VIDEO_CONSTRAINTS : false,
     });
-    const pc = this.ensurePc();
-    for (const track of this.localStream.getTracks()) pc.addTrack(track, this.localStream);
     this.cb.onLocalStream(this.localStream);
     // facingMode defaults to "user" via VIDEO_CONSTRAINTS; mirror that to the UI
     // for video calls so the self-preview mirrors correctly from the first frame.
@@ -64,7 +77,7 @@ export class WebRtcController {
 
   private ensurePc(): RTCPeerConnection {
     if (this.pc) return this.pc;
-    const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+    const pc = new RTCPeerConnection({ iceServers: this.iceServers });
     this.remoteStream = new MediaStream();
 
     pc.onicecandidate = (e) => {
@@ -81,6 +94,13 @@ export class WebRtcController {
     };
 
     this.pc = pc;
+    // startLocalMedia runs before any negotiation, so the stream is already here;
+    // attach its tracks now that the pc exists (deferred so the ICE config could
+    // be applied first). These must be added before createOffer/createAnswer to
+    // make it into the SDP.
+    if (this.localStream) {
+      for (const track of this.localStream.getTracks()) pc.addTrack(track, this.localStream);
+    }
     return pc;
   }
 

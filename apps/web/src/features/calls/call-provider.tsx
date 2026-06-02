@@ -9,7 +9,7 @@ import {
   useRef,
   type ReactNode,
 } from "react";
-import type { CallType } from "@relay/contracts";
+import type { CallType, IceServer } from "@relay/contracts";
 import { getSocket } from "@/frontend-core/socket";
 import {
   callReducer,
@@ -88,6 +88,10 @@ export function CallProvider({
   stateRef.current  = state;
   const webrtcRef   = useRef<WebRtcController | null>(null);
   const callIdRef   = useRef<string | null>(null);
+  // ICE config (STUN + per-call TURN relay) handed to us by call signaling — in
+  // the ack for an outgoing call, in the ring event for an incoming one. Stashed
+  // until the controller is built so the peer connection is created with it.
+  const iceServersRef = useRef<IceServer[] | null>(null);
   const remoteAudioRef = useRef<HTMLAudioElement | null>(null);
   const localVideoRef  = useRef<HTMLVideoElement | null>(null);
   const remoteVideoRef = useRef<HTMLVideoElement | null>(null);
@@ -106,6 +110,7 @@ export function CallProvider({
     webrtcRef.current?.close();
     webrtcRef.current = null;
     callIdRef.current = null;
+    iceServersRef.current = null;
     localStreamRef.current = null;
     remoteStreamRef.current = null;
     if (remoteAudioRef.current) remoteAudioRef.current.srcObject = null;
@@ -169,6 +174,8 @@ export function CallProvider({
           if (webrtcRef.current === controller) webrtcRef.current = null;
           return;
         }
+        // Bake in the relay config before the offer (created later, on accept).
+        controller.setIceServers(ack.iceServers as RTCIceServer[] | undefined);
         callIdRef.current = ack.callId;
         dispatch({ t: "outgoing", callId: ack.callId, peer, callType: type, conversationId });
       })();
@@ -182,6 +189,8 @@ export function CallProvider({
     const callId = s.callId;
     const socket = getSocket();
     const controller = makeController();
+    // Relay config arrived with the ring event; bake it in before we answer.
+    controller.setIceServers(iceServersRef.current as RTCIceServer[] | null);
     void (async () => {
       try {
         await controller.startLocalMedia({ video: stateRef.current.type === "VIDEO" });
@@ -235,12 +244,14 @@ export function CallProvider({
   useEffect(() => {
     const socket = getSocket();
     const cleanup = bindCallSocket(socket, {
-      onRinging: ({ callId, caller, type, conversationId }) => {
+      onRinging: ({ callId, caller, type, conversationId, iceServers }) => {
         // Already in a call → auto-reject so we never ring two calls at once.
         if (stateRef.current.phase !== "idle") {
           emitReject(socket, { callId });
           return;
         }
+        // Stash the relay config until accept() builds the controller.
+        iceServersRef.current = iceServers ?? null;
         callIdRef.current = callId;
         dispatch({ t: "incoming", callId, peer: caller, callType: type, conversationId });
       },

@@ -16,6 +16,7 @@ import { PresenceService } from "../presence/presence.service.js";
 import { CallRepository } from "./calls.repository.js";
 import { callRuntime, type ActiveCallSession } from "./calls.runtime.js";
 import { callDebug } from "./calls.debug.js";
+import { generateTurnCredentials } from "./turn.helper.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Call orchestration. Signaling is fire-and-forget over user rooms (raw emit,
@@ -88,15 +89,19 @@ export class CallService {
     }, CALL_RING_TIMEOUT_MS);
     session.ringTimer.unref?.();
 
+    // Mint per-peer TURN credentials (own userId for coturn-log traceability) so
+    // each side builds its peer connection with relay support. Falls back to
+    // STUN-only when TURN is unconfigured — see turn.helper.ts.
     const ringing: CallRingingEvent = {
       callId,
       caller: { id: callerId, username: caller?.username ?? "" },
       type,
       conversationId,
+      iceServers: generateTurnCredentials(targetUserId).iceServers,
     };
     this.emitTo(targetUserId, CALL_EVENTS.RINGING, ringing);
     callDebug(this.fastify.log, "ringing", { callId, callerId, recipientId: targetUserId, type });
-    return { ok: true, callId };
+    return { ok: true, callId, iceServers: generateTurnCredentials(callerId).iceServers };
   }
 
   async accept(userId: string, callId: string): Promise<void> {

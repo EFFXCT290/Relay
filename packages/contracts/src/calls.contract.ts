@@ -70,9 +70,23 @@ export type CallIceInbound   = { callId: string; candidate: RTCIceCandidateInitL
 // the envelope leaves room for `micOn?` if/when a peer-mute indicator lands.
 export type CallMediaStateInbound = { callId: string; cameraOn: boolean };
 
-// call:init ack (returned via the Socket.IO ack callback).
+// ICE server config minted per call and handed to each peer at setup time.
+// Mirrors only the RTCIceServer fields we use, keeping shared code free of
+// lib.dom types (same reason as RTCSessionDescriptionInitLike below). TURN
+// entries carry short-lived HMAC credentials generated server-side per call;
+// see apps/api/src/modules/calls/turn.helper.ts.
+export type IceServer = {
+  urls:        string | string[];
+  username?:   string;
+  credential?: string;
+};
+
+// call:init ack (returned via the Socket.IO ack callback). On success it also
+// carries the caller's ICE servers (STUN + per-call TURN relay) so the caller's
+// peer connection is built with relay support; the recipient gets its own set
+// via CallRingingEvent.
 export type CallInitAck =
-  | { ok: true;  callId: string }
+  | { ok: true;  callId: string; iceServers?: IceServer[] }
   | { ok: false; reason: "self" | "offline" | "busy" | "not_found" | "error" };
 
 // ── Outbound payloads (server → client) ─────────────────────────────────────
@@ -81,6 +95,9 @@ export type CallRingingEvent = {
   caller: { id: string; username: string };
   type:   CallType;
   conversationId?: string;
+  // The recipient's ICE servers (STUN + per-call TURN relay), delivered with the
+  // ring so the answering peer connection is built with relay support.
+  iceServers?: IceServer[];
 };
 export type CallAcceptedEvent = { callId: string };
 export type CallSdpEvent      = { callId: string; sdp: RTCSessionDescriptionInitLike };

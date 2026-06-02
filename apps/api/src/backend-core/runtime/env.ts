@@ -63,6 +63,14 @@ export const env = {
   VIDEO_TRANSCODE_CONCURRENCY: int("VIDEO_TRANSCODE_CONCURRENCY", 1),
   VIDEO_H264_CRF:    int("VIDEO_H264_CRF", 21),
   VIDEO_H264_PRESET: optional("VIDEO_H264_PRESET", "medium"),
+
+  // WebRTC TURN relay. coturn run with `static-auth-secret` (the TURN REST API):
+  // the API mints time-limited HMAC credentials per call, so no per-user TURN
+  // accounts exist. Both left blank → calls fall back to STUN-only; that works on
+  // permissive networks but peers behind symmetric NAT / strict firewalls won't
+  // connect without a relay. TURN_URL is the bare host (e.g. turn.example.com).
+  TURN_URL:    optional("TURN_URL", ""),
+  TURN_SECRET: optional("TURN_SECRET", ""),
 } as const;
 
 export const isProd = env.NODE_ENV === "production";
