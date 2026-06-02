@@ -26,7 +26,7 @@ import {
 } from "@/frontend-core/upload-session";
 import { ImageLightbox, type LightboxState } from "@/features/messages/components/lightbox/image-lightbox";
 import { EphemeralViewer } from "@/features/messages/components/ephemeral-viewer";
-import { ACK_EVENT, MEDIA_EVENTS, VOICE_EVENTS, PRESENCE_EVENTS, SYNC_EVENTS, TYPING_EVENTS, type MediaReadyEvent, type MediaProcessedEvent, type MediaViewedEvent, type VoiceTranscriptReadyEvent, type ImageAttachment, type VideoAttachment, type MediaViewResponse, type DeliveryMode, type EphemeralSend, type PresenceSyncResponse, type ReplayResponse, type TypingSyncResponse } from "@relay/contracts";
+import { ACK_EVENT, MEDIA_EVENTS, VOICE_EVENTS, PRESENCE_EVENTS, SYNC_EVENTS, TYPING_EVENTS, USER_EVENTS, type MediaReadyEvent, type MediaProcessedEvent, type MediaViewedEvent, type VoiceTranscriptReadyEvent, type ImageAttachment, type VideoAttachment, type MediaViewResponse, type DeliveryMode, type EphemeralSend, type PresenceSyncResponse, type ReplayResponse, type TypingSyncResponse, type UserProfileUpdatedEvent } from "@relay/contracts";
 import { formatLastSeen } from "@/frontend-core/format-presence";
 import { useCall } from "@/features/calls/call-provider";
 import { useMe } from "@/providers/me-provider";
@@ -121,6 +121,7 @@ type ConversationDetail = {
   participant: {
     userId: string;
     username: string;
+    avatarUrl?: string | null;
     isOnline?: boolean;
     lastSeenAt?: string | null;
   };
@@ -613,6 +614,15 @@ export default function ChatThreadPage() {
       );
     };
 
+    const onProfileUpdated = (payload: UserProfileUpdatedEvent) => {
+      if (payload.userId !== partnerIdRef.current) return;
+      setDetail((prev) =>
+        prev
+          ? { ...prev, participant: { ...prev.participant, avatarUrl: payload.avatarUrl } }
+          : prev,
+      );
+    };
+
     const onMessageEmbedUpdate = (payload: { messageId: string; embed: Message["embed"] }) => {
       const m = messagesRef.current[payload.messageId];
       if (!m) return;
@@ -706,6 +716,7 @@ export default function ChatThreadPage() {
     socket.on(PRESENCE_EVENTS.SYNC_RESPONSE, onPresenceSyncResponse);
     socket.on("presence:online", onPresenceOnline);
     socket.on("presence:offline", onPresenceOffline);
+    socket.on(USER_EVENTS.PROFILE_UPDATED, onProfileUpdated);
     socket.on(MEDIA_EVENTS.READY, onMediaReady);
     socket.on(MEDIA_EVENTS.PROCESSED, onMediaProcessed);
     socket.on(MEDIA_EVENTS.VIEWED, onMediaViewed);
@@ -738,6 +749,7 @@ export default function ChatThreadPage() {
       socket.off(PRESENCE_EVENTS.SYNC_RESPONSE, onPresenceSyncResponse);
       socket.off("presence:online", onPresenceOnline);
       socket.off("presence:offline", onPresenceOffline);
+      socket.off(USER_EVENTS.PROFILE_UPDATED, onProfileUpdated);
       socket.off(MEDIA_EVENTS.READY, onMediaReady);
       socket.off(MEDIA_EVENTS.PROCESSED, onMediaProcessed);
       socket.off(MEDIA_EVENTS.VIEWED, onMediaViewed);
@@ -1258,6 +1270,7 @@ export default function ChatThreadPage() {
             <>
               <Avatar
                 username={detail.participant.username}
+                src={detail.participant.avatarUrl}
                 size={36}
                 isOnline={detail.participant.isOnline}
               />

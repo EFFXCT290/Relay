@@ -27,5 +27,6 @@ export const AuthSuccessSchema = Type.Object({
 export const MeSchema = Type.Object({
   userId: Type.String({ format: "uuid" }),
   username: Type.String(),
+  avatarUrl: Type.Optional(Type.Union([Type.String(), Type.Null()])),
   createdAt: Type.String({ format: "date-time" }),
 });

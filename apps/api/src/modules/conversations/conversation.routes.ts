@@ -12,6 +12,7 @@ import { PresenceService } from "../presence/presence.service.js";
 const ParticipantSchema = Type.Object({
   userId:     Type.String({ format: "uuid" }),
   username:   Type.String(),
+  avatarUrl:  Type.Optional(Type.Union([Type.String(), Type.Null()])),
   isOnline:   Type.Optional(Type.Boolean()),
   lastSeenAt: Type.Optional(Type.Union([Type.String({ format: "date-time" }), Type.Null()])),
 });
@@ -97,9 +98,10 @@ const conversationRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
 
       const other = await fastify.prisma.user.findUnique({
         where: { id: participantId },
-        select: { id: true, username: true },
+        select: { id: true, username: true, avatarKey: true },
       });
       if (!other) throw new ProblemError("not_found", "Participant not found.");
+      const otherAvatarUrl = other.avatarKey ? await fastify.getMediaUrl(other.avatarKey) : null;
 
       // Look for an existing 1:1 conversation that has *exactly* these two
       // participants (so future group conversations don't collide).
@@ -117,7 +119,7 @@ const conversationRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
       if (existing && existing.participants.length === 2) {
         return reply.code(200).send({
           conversationId: existing.id,
-          participant: { userId: other.id, username: other.username },
+          participant: { userId: other.id, username: other.username, avatarUrl: otherAvatarUrl },
           createdAt: existing.createdAt.toISOString(),
         });
       }
@@ -147,7 +149,7 @@ const conversationRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
 
       return reply.code(201).send({
         conversationId: created.id,
-        participant: { userId: other.id, username: other.username },
+        participant: { userId: other.id, username: other.username, avatarUrl: otherAvatarUrl },
         createdAt: created.createdAt.toISOString(),
       });
     },
@@ -181,7 +183,7 @@ const conversationRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
           participants: { some: { userId: callerId, acceptedAt: { not: null } } },
         },
         include: {
-          participants: { include: { user: { select: { id: true, username: true } } } },
+          participants: { include: { user: { select: { id: true, username: true, avatarKey: true } } } },
           messages: {
             where: { isDeleted: false },
             orderBy: { createdAt: "desc" },
@@ -209,14 +211,15 @@ const conversationRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
       ]);
 
       return {
-        conversations: slice.map((c) => {
+        conversations: await Promise.all(slice.map(async (c) => {
           const other = c.participants.find((p) => p.userId !== callerId);
           const last  = c.messages[0];
           const p     = presences.get(other?.userId ?? callerId);
+          const avatarUrl = other?.user.avatarKey ? await fastify.getMediaUrl(other.user.avatarKey) : null;
           return {
             conversationId: c.id,
             participant: other
-              ? { userId: other.user.id, username: other.user.username, isOnline: p?.isOnline, lastSeenAt: p?.lastSeen ?? null }
+              ? { userId: other.user.id, username: other.user.username, avatarUrl, isOnline: p?.isOnline, lastSeenAt: p?.lastSeen ?? null }
               : { userId: callerId, username: "—" },
             lastMessage: last
               ? {
@@ -229,7 +232,7 @@ const conversationRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
             unreadCount: unreadCounts.get(c.id) ?? 0,
             updatedAt: c.updatedAt.toISOString(),
           };
-        }),
+        })),
         nextCursor,
       };
     },
@@ -256,7 +259,7 @@ const conversationRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
           participants: { some: { userId: callerId, acceptedAt: null } },
         },
         include: {
-          participants: { include: { user: { select: { id: true, username: true } } } },
+          participants: { include: { user: { select: { id: true, username: true, avatarKey: true } } } },
           messages: {
             where: { isDeleted: false },
             orderBy: { createdAt: "desc" },
@@ -278,14 +281,15 @@ const conversationRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
       ]);
 
       return {
-        requests: rows.map((c) => {
+        requests: await Promise.all(rows.map(async (c) => {
           const other = c.participants.find((p) => p.userId !== callerId);
           const last  = c.messages[0];
           const p     = presences.get(other?.userId ?? callerId);
+          const avatarUrl = other?.user.avatarKey ? await fastify.getMediaUrl(other.user.avatarKey) : null;
           return {
             conversationId: c.id,
             participant: other
-              ? { userId: other.user.id, username: other.user.username, isOnline: p?.isOnline, lastSeenAt: p?.lastSeen ?? null }
+              ? { userId: other.user.id, username: other.user.username, avatarUrl, isOnline: p?.isOnline, lastSeenAt: p?.lastSeen ?? null }
               : { userId: callerId, username: "—" },
             lastMessage: last
               ? {
@@ -298,7 +302,7 @@ const conversationRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
             unreadCount: unreadCounts.get(c.id) ?? 0,
             updatedAt: c.updatedAt.toISOString(),
           };
-        }),
+        })),
       };
     },
   );
@@ -325,7 +329,7 @@ const conversationRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
       const conv = await fastify.prisma.conversation.findUnique({
         where: { id: request.params.conversationId },
         include: {
-          participants: { include: { user: { select: { id: true, username: true } } } },
+          participants: { include: { user: { select: { id: true, username: true, avatarKey: true } } } },
         },
       });
       if (!conv) throw new ProblemError("not_found", "Conversation not found.");
@@ -340,6 +344,7 @@ const conversationRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
         participant: {
           userId:     other.user.id,
           username:   other.user.username,
+          avatarUrl:  other.user.avatarKey ? await fastify.getMediaUrl(other.user.avatarKey) : null,
           isOnline:   presence.isOnline,
           lastSeenAt: presence.lastSeen ?? null,
         },

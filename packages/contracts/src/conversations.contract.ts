@@ -10,6 +10,7 @@ import { Type, type Static } from "@sinclair/typebox";
 export const ConversationParticipantSchema = Type.Object({
   userId:     Type.String({ format: "uuid" }),
   username:   Type.String(),
+  avatarUrl:  Type.Optional(Type.Union([Type.String(), Type.Null()])),
   isOnline:   Type.Optional(Type.Boolean()),
   lastSeenAt: Type.Optional(Type.Union([Type.String({ format: "date-time" }), Type.Null()])),
 });

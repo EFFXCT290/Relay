@@ -1,3 +1,6 @@
+"use client";
+
+import { useState } from "react";
 import { cn } from "@/frontend-core/utils";
 
 // Deterministic gradient per username — same input always renders the same
@@ -21,13 +24,21 @@ function pickPalette(seed: string): [string, string] {
 
 type Props = {
   username: string;
+  /** Signed avatar URL. When absent (or it fails to load) the initials
+   *  gradient is shown — so the UI never depends on the URL resolving. */
+  src?: string | null;
   size?: number;
   isOnline?: boolean;
   hasAlert?: boolean;
   className?: string;
 };
 
-export function Avatar({ username, size = 48, isOnline, hasAlert, className }: Props) {
+export function Avatar({ username, src, size = 48, isOnline, hasAlert, className }: Props) {
+  // Reset the error gate whenever the URL changes (e.g. a live avatar update)
+  // by keying the fallback decision on `src` itself.
+  const [failedSrc, setFailedSrc] = useState<string | null>(null);
+  const showImage = !!src && src !== failedSrc;
+
   const initial = (username[0] ?? "?").toUpperCase();
   const [from, to] = pickPalette(username);
   const dotSize = Math.max(10, Math.round(size * 0.28));
@@ -35,17 +46,30 @@ export function Avatar({ username, size = 48, isOnline, hasAlert, className }: P
 
   return (
     <div className={cn("relative shrink-0", className)} style={{ width: size, height: size }}>
-      <div
-        className="flex h-full w-full items-center justify-center rounded-full"
-        style={{ background: `linear-gradient(135deg, ${from} 0%, ${to} 100%)` }}
-      >
-        <span
-          className="font-bold text-white"
-          style={{ fontFamily: "var(--font-display)", fontSize, letterSpacing: "-0.02em" }}
+      {showImage ? (
+        <img
+          src={src!}
+          alt={`@${username}`}
+          width={size}
+          height={size}
+          draggable={false}
+          onError={() => setFailedSrc(src!)}
+          className="h-full w-full rounded-full object-cover"
+          style={{ background: `linear-gradient(135deg, ${from} 0%, ${to} 100%)` }}
+        />
+      ) : (
+        <div
+          className="flex h-full w-full items-center justify-center rounded-full"
+          style={{ background: `linear-gradient(135deg, ${from} 0%, ${to} 100%)` }}
         >
-          {initial}
-        </span>
-      </div>
+          <span
+            className="font-bold text-white"
+            style={{ fontFamily: "var(--font-display)", fontSize, letterSpacing: "-0.02em" }}
+          >
+            {initial}
+          </span>
+        </div>
+      )}
       {isOnline && (
         <span
           className="absolute right-0 bottom-0 rounded-full border-[2.5px] border-[var(--color-bg)]"

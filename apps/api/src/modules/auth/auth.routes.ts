@@ -200,12 +200,13 @@ const authRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
     async (request, reply) => {
       const user = await fastify.prisma.user.findUnique({
         where: { id: request.userId! },
-        select: { id: true, username: true, createdAt: true },
+        select: { id: true, username: true, avatarKey: true, createdAt: true },
       });
       if (!user) throw new ProblemError("not_found", "User not found.");
       return {
         userId: user.id,
         username: user.username,
+        avatarUrl: user.avatarKey ? await fastify.getMediaUrl(user.avatarKey) : null,
         createdAt: user.createdAt.toISOString(),
       };
     },

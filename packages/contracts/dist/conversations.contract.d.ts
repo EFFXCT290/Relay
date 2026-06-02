@@ -2,6 +2,7 @@ import { type Static } from "@sinclair/typebox";
 export declare const ConversationParticipantSchema: import("@sinclair/typebox").TObject<{
     userId: import("@sinclair/typebox").TString;
     username: import("@sinclair/typebox").TString;
+    avatarUrl: import("@sinclair/typebox").TOptional<import("@sinclair/typebox").TUnion<[import("@sinclair/typebox").TString, import("@sinclair/typebox").TNull]>>;
     isOnline: import("@sinclair/typebox").TOptional<import("@sinclair/typebox").TBoolean>;
     lastSeenAt: import("@sinclair/typebox").TOptional<import("@sinclair/typebox").TUnion<[import("@sinclair/typebox").TString, import("@sinclair/typebox").TNull]>>;
 }>;
@@ -16,6 +17,7 @@ export declare const ConversationListItemSchema: import("@sinclair/typebox").TOb
     participant: import("@sinclair/typebox").TObject<{
         userId: import("@sinclair/typebox").TString;
         username: import("@sinclair/typebox").TString;
+        avatarUrl: import("@sinclair/typebox").TOptional<import("@sinclair/typebox").TUnion<[import("@sinclair/typebox").TString, import("@sinclair/typebox").TNull]>>;
         isOnline: import("@sinclair/typebox").TOptional<import("@sinclair/typebox").TBoolean>;
         lastSeenAt: import("@sinclair/typebox").TOptional<import("@sinclair/typebox").TUnion<[import("@sinclair/typebox").TString, import("@sinclair/typebox").TNull]>>;
     }>;
@@ -36,6 +38,7 @@ export declare const ConversationSchema: import("@sinclair/typebox").TObject<{
     participants: import("@sinclair/typebox").TArray<import("@sinclair/typebox").TObject<{
         userId: import("@sinclair/typebox").TString;
         username: import("@sinclair/typebox").TString;
+        avatarUrl: import("@sinclair/typebox").TOptional<import("@sinclair/typebox").TUnion<[import("@sinclair/typebox").TString, import("@sinclair/typebox").TNull]>>;
         isOnline: import("@sinclair/typebox").TOptional<import("@sinclair/typebox").TBoolean>;
         lastSeenAt: import("@sinclair/typebox").TOptional<import("@sinclair/typebox").TUnion<[import("@sinclair/typebox").TString, import("@sinclair/typebox").TNull]>>;
     }>>;

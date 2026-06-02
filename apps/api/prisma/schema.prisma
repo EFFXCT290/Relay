@@ -20,6 +20,11 @@ model User {
   username     String   @unique @db.VarChar(30)
   passwordHash String
   passwordSalt String   @db.Char(64) // 32 bytes hex
+  // Avatar: stores the raw MinIO object key (never a signed URL — URLs expire,
+  // keys don't). null = no custom avatar (clients fall back to the initials
+  // gradient). The key embeds a random token so replacing an avatar yields a
+  // fresh key, side-stepping CDN/browser caching of the previous image.
+  avatarKey    String?
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 

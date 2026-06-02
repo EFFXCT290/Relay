@@ -1,27 +1,32 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
   Bell,
   Ban,
+  Camera,
   CheckCheck,
   ChevronRight,
   Eye as EyeIcon,
   Laptop,
+  Loader2,
   Lock,
   LogOut,
   ShieldOff,
   Trash2,
+  X,
 } from "lucide-react";
 import { Avatar } from "@/shared/components/avatar";
 import { Toggle } from "@/shared/components/toggle";
 import { ApiError, api } from "@/frontend-core/api";
+import { usersApi } from "@/frontend-core/api-client/users";
+import { cropToSquareWebp } from "@/shared/utils/crop-image";
 
 const mono = "var(--font-mono)";
 const display = "var(--font-display)";
 
-type Me = { userId: string; username: string; createdAt: string };
+type Me = { userId: string; username: string; avatarUrl?: string | null; createdAt: string };
 
 const PREF_KEYS = ["showOnline", "readReceipts", "captureReports"] as const;
 type PrefKey = (typeof PREF_KEYS)[number];
@@ -55,9 +60,66 @@ export default function ProfilePage() {
   });
   const [error, setError] = useState<string | null>(null);
 
+  // Avatar: `avatarUrl` is the committed server value; `preview` is an optimistic
+  // object-URL shown while an upload is in flight. `preview` wins when present.
+  const [avatarUrl, setAvatarUrl] = useState<string | null>(null);
+  const [preview, setPreview] = useState<string | null>(null);
+  const [avatarBusy, setAvatarBusy] = useState(false);
+  const [avatarError, setAvatarError] = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
   useEffect(() => {
     setPrefs(loadPrefs());
   }, []);
+
+  // Revoke any optimistic object URL on unmount so we don't leak blobs.
+  useEffect(() => () => { if (preview) URL.revokeObjectURL(preview); }, [preview]);
+
+  const onPickAvatar = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = ""; // allow re-selecting the same file later
+    if (!file) return;
+
+    setAvatarError(null);
+    let blob: Blob;
+    try {
+      blob = await cropToSquareWebp(file);
+    } catch (err) {
+      setAvatarError(err instanceof Error ? err.message : "Could not read that image.");
+      return;
+    }
+
+    const optimistic = URL.createObjectURL(blob);
+    setPreview(optimistic);
+    setAvatarBusy(true);
+    try {
+      const res = await usersApi.uploadAvatar(blob);
+      setAvatarUrl(res.avatarUrl);
+    } catch (err) {
+      setAvatarError(err instanceof ApiError ? err.problem.detail : "Upload failed. Try again.");
+      URL.revokeObjectURL(optimistic);
+      setPreview(null);
+    } finally {
+      setAvatarBusy(false);
+    }
+  };
+
+  const onRemoveAvatar = async () => {
+    if (avatarBusy) return;
+    setAvatarError(null);
+    setAvatarBusy(true);
+    const prev = avatarUrl;
+    setAvatarUrl(null);
+    if (preview) { URL.revokeObjectURL(preview); setPreview(null); }
+    try {
+      await usersApi.deleteAvatar();
+    } catch (err) {
+      setAvatarUrl(prev); // revert on failure
+      setAvatarError(err instanceof ApiError ? err.problem.detail : "Could not remove photo.");
+    } finally {
+      setAvatarBusy(false);
+    }
+  };
 
   useEffect(() => {
     (async () => {
@@ -68,6 +130,7 @@ export default function ProfilePage() {
           api<{ notifications: { type: string }[] }>("/api/notifications?limit=100"),
         ]);
         setMe(meRes);
+        setAvatarUrl(meRes.avatarUrl ?? null);
         setThreadCount(convs.conversations.length);
         setCaptureCount(notifs.notifications.filter((n) => n.type === "SYSTEM_ALERT").length);
       } catch (err) {
@@ -96,7 +159,62 @@ export default function ProfilePage() {
       {/* Profile header */}
       <header className="flex flex-col items-center gap-4 px-6 pt-10 pb-7 lg:pt-14">
         {me ? (
-          <Avatar username={me.username} size={96} isOnline />
+          <div className="flex flex-col items-center gap-2.5">
+            <div className="relative">
+              <button
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                disabled={avatarBusy}
+                aria-label="Change profile photo"
+                className="group relative block rounded-full outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-signal)]"
+              >
+                <Avatar username={me.username} src={preview ?? avatarUrl} size={96} isOnline />
+                {/* Hover/upload scrim with a camera affordance */}
+                <span
+                  className={`absolute inset-0 flex items-center justify-center rounded-full bg-black/45 transition-opacity ${
+                    avatarBusy ? "opacity-100" : "opacity-0 group-hover:opacity-100"
+                  }`}
+                >
+                  {avatarBusy ? (
+                    <Loader2 className="h-5 w-5 animate-spin text-white" />
+                  ) : (
+                    <Camera className="h-5 w-5 text-white" />
+                  )}
+                </span>
+              </button>
+              {(avatarUrl || preview) && !avatarBusy && (
+                <button
+                  type="button"
+                  onClick={onRemoveAvatar}
+                  aria-label="Remove profile photo"
+                  className="absolute -right-0.5 -top-0.5 flex h-6 w-6 items-center justify-center rounded-full border-[2.5px] border-[var(--color-bg)] bg-[var(--color-panel)] text-[var(--color-text-secondary)] hover:text-[var(--color-alert)]"
+                >
+                  <X className="h-3 w-3" />
+                </button>
+              )}
+            </div>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="image/jpeg,image/png,image/webp"
+              className="hidden"
+              onChange={onPickAvatar}
+            />
+            <button
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              disabled={avatarBusy}
+              className="text-[11px] tracking-[0.04em] text-[var(--color-signal)] disabled:opacity-50"
+              style={{ fontFamily: mono }}
+            >
+              {avatarBusy ? "uploading…" : avatarUrl || preview ? "change photo" : "add photo"}
+            </button>
+            {avatarError && (
+              <span className="text-[11px] text-[var(--color-alert)]" style={{ fontFamily: mono }}>
+                {avatarError}
+              </span>
+            )}
+          </div>
         ) : (
           <div className="h-24 w-24 animate-pulse rounded-full bg-white/5" />
         )}

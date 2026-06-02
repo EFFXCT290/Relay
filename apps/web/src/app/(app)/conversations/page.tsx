@@ -9,7 +9,7 @@ import { getSocket } from "@/frontend-core/socket";
 import { Button } from "@/shared/ui/button";
 import { Avatar } from "@/shared/components/avatar";
 import { ConversationRow, type ConversationListItem } from "@/features/conversations/components/conversation-row";
-import { PRESENCE_EVENTS, TYPING_EVENTS, type PresenceSyncResponse, type TypingSyncResponse } from "@relay/contracts";
+import { PRESENCE_EVENTS, TYPING_EVENTS, USER_EVENTS, type PresenceSyncResponse, type TypingSyncResponse, type UserProfileUpdatedEvent } from "@relay/contracts";
 
 const mono = "var(--font-mono)";
 const display = "var(--font-display)";
@@ -182,6 +182,11 @@ export default function ConversationsPage() {
       );
     };
 
+    const onProfileUpdated = (payload: UserProfileUpdatedEvent) => {
+      setConversations((p) => p ? applyPresence(p, payload.userId, { avatarUrl: payload.avatarUrl }) : p);
+      setRequests((p) => p ? applyPresence(p, payload.userId, { avatarUrl: payload.avatarUrl }) : p);
+    };
+
     const onPresenceSyncResponse = (res: PresenceSyncResponse) => {
       const map = new Map(res.users.map((u) => [u.userId, u]));
       const patch = (list: typeof conversations): typeof conversations =>
@@ -207,6 +212,7 @@ export default function ConversationsPage() {
     socket.on("message:new", onMessageNew);
     socket.on("presence:online", onPresenceOnline);
     socket.on("presence:offline", onPresenceOffline);
+    socket.on(USER_EVENTS.PROFILE_UPDATED, onProfileUpdated);
     socket.on("typing:update", onTypingUpdate);
     socket.on(TYPING_EVENTS.SYNC_RESPONSE, onTypingSyncResponse);
     socket.on(PRESENCE_EVENTS.SYNC_RESPONSE, onPresenceSyncResponse);
@@ -218,6 +224,7 @@ export default function ConversationsPage() {
       socket.off("message:new", onMessageNew);
       socket.off("presence:online", onPresenceOnline);
       socket.off("presence:offline", onPresenceOffline);
+      socket.off(USER_EVENTS.PROFILE_UPDATED, onProfileUpdated);
       socket.off("typing:update", onTypingUpdate);
       socket.off(TYPING_EVENTS.SYNC_RESPONSE, onTypingSyncResponse);
       socket.off(PRESENCE_EVENTS.SYNC_RESPONSE, onPresenceSyncResponse);

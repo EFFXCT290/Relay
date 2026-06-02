@@ -39,6 +39,7 @@ export function ConversationRow({ conversation }: { conversation: ConversationLi
     >
       <Avatar
         username={participant.username}
+        src={participant.avatarUrl}
         isOnline={participant.isOnline}
         hasAlert={captureAlert}
       />
