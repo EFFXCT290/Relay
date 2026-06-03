@@ -10,6 +10,11 @@ import { MediaComposerModal } from "./media-composer-modal";
 // Discard takes below this — a stray tap rather than a deliberate recording.
 const MIN_VOICE_MS = 700;
 
+// Per-message image cap (Instagram-style). Picking more keeps the first N and
+// surfaces the overflow count in the staging modal. A single send of ≤10 stays
+// well under the server's 20/min /media/upload rate limit, so batches never 429.
+export const MAX_IMAGES_PER_SEND = 10;
+
 function fmtElapsed(ms: number): string {
   const total = Math.floor(ms / 1000);
   return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, "0")}`;
@@ -49,6 +54,8 @@ export function ChatComposer({
   // Files picked but not yet sent — held for the staging modal (6B.1) so the
   // user can choose a delivery mode before anything uploads.
   const [staged, setStaged] = useState<File[] | null>(null);
+  // How many picks were dropped by the MAX_IMAGES_PER_SEND cap — shown in the modal.
+  const [overflow, setOverflow] = useState(0);
   const recorder = useVoiceRecorder();
   const taRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -235,7 +242,11 @@ export function ChatComposer({
             onChange={(e) => {
               const files = Array.from(e.target.files ?? []);
               // Open the staging modal instead of uploading immediately (6B.1).
-              if (files.length) setStaged(files);
+              // Cap at MAX_IMAGES_PER_SEND; the modal surfaces what was dropped.
+              if (files.length) {
+                setStaged(files.slice(0, MAX_IMAGES_PER_SEND));
+                setOverflow(Math.max(0, files.length - MAX_IMAGES_PER_SEND));
+              }
               e.target.value = "";
             }}
           />
@@ -285,8 +296,9 @@ export function ChatComposer({
       {staged && (
         <MediaComposerModal
           files={staged}
-          onCancel={() => setStaged(null)}
-          onSend={(mode, ephemeral) => { onSendImages?.(staged, mode, ephemeral); setStaged(null); }}
+          overflow={overflow}
+          onCancel={() => { setStaged(null); setOverflow(0); }}
+          onSend={(mode, ephemeral) => { onSendImages?.(staged, mode, ephemeral); setStaged(null); setOverflow(0); }}
         />
       )}
     </div>

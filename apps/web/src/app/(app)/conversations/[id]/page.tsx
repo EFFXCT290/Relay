@@ -15,7 +15,7 @@ import {
   TypingBubble,
   type Message,
 } from "@/features/messages/components/message-bubble";
-import { ChatComposer } from "@/features/messages/components/chat-composer";
+import { ChatComposer, MAX_IMAGES_PER_SEND } from "@/features/messages/components/chat-composer";
 import { UploadPreview } from "@/features/messages/components/upload-preview";
 import { mediaApi } from "@/frontend-core/api-client/media";
 import {
@@ -959,8 +959,12 @@ export default function ChatThreadPage() {
   );
 
   const handleSendImages = useCallback(
-    async (files: File[], existingUploadIds?: string[], deliveryMode: DeliveryMode = "optimized", ephemeral?: EphemeralSend) => {
-      if (!files.length) return;
+    async (requestedFiles: File[], existingUploadIds?: string[], deliveryMode: DeliveryMode = "optimized", ephemeral?: EphemeralSend) => {
+      if (!requestedFiles.length) return;
+      // Hard cap per send (the picker already trims + warns; this also guards the
+      // paste/drag paths). Slicing here keeps one batch ≤10 uploads, under the
+      // server's 20/min /media/upload limit. existingUploadIds (retry) is already ≤10.
+      const files           = requestedFiles.slice(0, MAX_IMAGES_PER_SEND);
       const batchId         = crypto.randomUUID();
       const clientUploadIds = existingUploadIds ?? files.map(() => crypto.randomUUID());
       const previews        = files.map((f) => ({ localId: crypto.randomUUID(), blobUrl: URL.createObjectURL(f) }));

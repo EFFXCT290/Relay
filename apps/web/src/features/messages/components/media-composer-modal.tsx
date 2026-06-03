@@ -29,10 +29,13 @@ const FUTURE = [
 
 export function MediaComposerModal({
   files,
+  overflow = 0,
   onCancel,
   onSend,
 }: {
   files:    File[];
+  /** Count of picks dropped by the per-send cap; renders an advisory banner. */
+  overflow?: number;
   onCancel: () => void;
   onSend:   (mode: DeliveryMode, ephemeral?: EphemeralSend) => void;
 }) {
@@ -79,6 +82,13 @@ export function MediaComposerModal({
           Send <Send className="h-4 w-4" />
         </button>
       </div>
+
+      {/* Cap notice — shown when the picker dropped extras (max 10 per send) */}
+      {overflow > 0 && (
+        <div className="mx-4 mb-2 rounded-[10px] border border-amber-400/25 bg-amber-400/10 px-3 py-2 text-center text-[12px] text-amber-200/90" style={{ fontFamily: mono }}>
+          Up to {staged.length} per message — {overflow} not added. Send these, then pick the rest.
+        </div>
+      )}
 
       {/* Preview area */}
       <div className="flex min-h-0 flex-1 items-center justify-center px-4">
