@@ -28,15 +28,22 @@ model User {
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
-  sentMessages  Message[]      @relation("SentMessages")
-  conversations Participant[]
-  notifications Notification[]
-  uploadedMedia Media[]
-  reads         MessageRead[]
-  reactions     Reaction[]
-  presence      UserPresence?
-  outgoingCalls Call[]         @relation("OutgoingCalls")
-  incomingCalls Call[]         @relation("IncomingCalls")
+  // Web Push notification preferences. Two flat booleans for now; if categories
+  // proliferate (mentions/reactions/announcements) migrate to a single
+  // `notificationPreferences Json?` rather than adding more columns.
+  pushMessages Boolean @default(true)
+  pushCalls    Boolean @default(true)
+
+  sentMessages      Message[]          @relation("SentMessages")
+  conversations     Participant[]
+  notifications     Notification[]
+  pushSubscriptions PushSubscription[]
+  uploadedMedia     Media[]
+  reads             MessageRead[]
+  reactions         Reaction[]
+  presence          UserPresence?
+  outgoingCalls     Call[]             @relation("OutgoingCalls")
+  incomingCalls     Call[]             @relation("IncomingCalls")
 
   @@index([username])
 }
@@ -399,6 +406,28 @@ model Notification {
 enum NotificationType {
   SYSTEM_ALERT
   MESSAGE_RECEIVED
+}
+
+// One row per installed device/browser (a user can have many). We store the
+// FULL raw browser PushSubscription as JSON and hand it straight to web-push —
+// future-proof against providers adding fields. `endpoint` is denormalized out
+// for dedup + indexing. No provider-host allowlist (maintenance debt): subscribe
+// only validates https + length, and dead endpoints are pruned reactively when a
+// send returns 404/410. lastUsedAt is bumped on every successful send AND on
+// (re)subscribe, so a valid device that simply never received a push isn't aged
+// out by the 180-day backstop sweep.
+model PushSubscription {
+  id           String   @id @default(uuid())
+  userId       String
+  endpoint     String   @unique
+  subscription Json
+  userAgent    String?
+  createdAt    DateTime @default(now())
+  lastUsedAt   DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
 }
 
 model JtiBlocklist {

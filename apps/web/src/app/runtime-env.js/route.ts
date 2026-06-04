@@ -8,6 +8,7 @@ export function GET() {
   const env = {
     API_URL: process.env.API_URL ?? "",
     WS_URL: process.env.WS_URL ?? "",
+    VAPID_PUBLIC_KEY: process.env.VAPID_PUBLIC_KEY ?? "",
   };
   return new Response(`window.__ENV__ = ${JSON.stringify(env)};`, {
     headers: {

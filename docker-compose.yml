@@ -82,6 +82,8 @@ services:
       NODE_ENV: production
       API_URL: http://localhost:3001
       WS_URL: ws://localhost:3001
+      # Served to the browser via /runtime-env.js; pulled from the host .env.
+      VAPID_PUBLIC_KEY: ${VAPID_PUBLIC_KEY}
     ports:
       - "3000:3000"
     depends_on:

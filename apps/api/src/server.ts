@@ -23,6 +23,8 @@ import minioPlugin from "./plugins/minio.js";
 import { createMediaWorker, createVideoWorker, createVoiceWorker } from "./queues/media.worker.js";
 import { createCleanupWorker } from "./queues/cleanup.worker.js";
 import { cleanupQueue, SWEEP_JOB } from "./queues/cleanup.queue.js";
+import { createPushWorker } from "./queues/push.worker.js";
+import { pushQueue, PRUNE_STALE_JOB } from "./queues/push.queue.js";
 
 import healthRoutes from "./modules/health/health.routes.js";
 import mediaRoutes from "./modules/media/media.routes.js";
@@ -32,6 +34,7 @@ import conversationRoutes from "./modules/conversations/conversation.routes.js";
 import callRoutes from "./modules/calls/calls.routes.js";
 import messageRoutes from "./modules/messages/message.routes.js";
 import notificationRoutes from "./modules/notifications/notification.routes.js";
+import pushRoutes from "./modules/push/push.routes.js";
 import syncRoutes from "./modules/sync/sync.routes.js";
 import devRoutes from "./modules/dev/dev.routes.js";
 
@@ -86,12 +89,17 @@ export async function buildServer() {
   // schedulers) fires every 60s; the worker is idempotent.
   const cleanupWorker = createCleanupWorker(workerDeps);
   await cleanupQueue.add(SWEEP_JOB, {}, { repeat: { every: 60_000 }, jobId: "sweep-singleton" });
+  // Web Push fan-out worker + a daily backstop sweep of long-idle subscriptions
+  // (stable jobId so restarts don't stack schedulers; the sweep is idempotent).
+  const pushWorker = createPushWorker(workerDeps);
+  await pushQueue.add(PRUNE_STALE_JOB, {}, { repeat: { every: 24 * 60 * 60_000 }, jobId: "push-prune-singleton" });
   app.addHook("onClose", async () => {
     await Promise.all([
       mediaWorker.close(),
       videoWorker.close(),
       voiceWorker.close(),
       cleanupWorker.close(),
+      pushWorker.close(),
     ]);
   });
   await app.register(multipart, {
@@ -131,6 +139,7 @@ export async function buildServer() {
   await app.register(callRoutes, { prefix: "/api" });
   await app.register(messageRoutes, { prefix: "/api" });
   await app.register(notificationRoutes, { prefix: "/api" });
+  await app.register(pushRoutes, { prefix: "/api" });
   await app.register(syncRoutes, { prefix: "/api" });
 
   if (!isProd) {

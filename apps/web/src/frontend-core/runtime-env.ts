@@ -4,7 +4,7 @@
 
 declare global {
   interface Window {
-    __ENV__?: { API_URL?: string; WS_URL?: string };
+    __ENV__?: { API_URL?: string; WS_URL?: string; VAPID_PUBLIC_KEY?: string };
   }
 }
 
@@ -20,4 +20,14 @@ export function getWsUrl(): string {
     return window.__ENV__.WS_URL;
   }
   return process.env.NEXT_PUBLIC_WS_URL ?? "ws://localhost:3001";
+}
+
+// Web Push VAPID public key. Same runtime-env pattern as the URLs so the key can
+// be set per deployment without a rebuild; falls back to the build-time public
+// var. Empty string when push isn't configured — callers treat that as disabled.
+export function getVapidPublicKey(): string {
+  if (typeof window !== "undefined" && window.__ENV__?.VAPID_PUBLIC_KEY) {
+    return window.__ENV__.VAPID_PUBLIC_KEY;
+  }
+  return process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY ?? "";
 }

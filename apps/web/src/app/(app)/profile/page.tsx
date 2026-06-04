@@ -19,6 +19,7 @@ import {
 } from "lucide-react";
 import { Avatar } from "@/shared/components/avatar";
 import { Toggle } from "@/shared/components/toggle";
+import { PushToggle } from "@/features/notifications/push/push-toggle";
 import { ApiError, api } from "@/frontend-core/api";
 import { usersApi } from "@/frontend-core/api-client/users";
 import { cropToSquareWebp } from "@/shared/utils/crop-image";
@@ -252,6 +253,11 @@ export default function ProfilePage() {
           <Divider />
           <Stat label="Captures" value={captureCount} tone={captureCount && captureCount > 0 ? "alert" : "default"} />
         </div>
+      </Section>
+
+      {/* Notifications */}
+      <Section title="Notifications">
+        <PushToggle />
       </Section>
 
       {/* Privacy */}

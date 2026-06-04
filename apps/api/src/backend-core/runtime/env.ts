@@ -71,6 +71,21 @@ export const env = {
   // connect without a relay. TURN_URL is the bare host (e.g. turn.example.com).
   TURN_URL:    optional("TURN_URL", ""),
   TURN_SECRET: optional("TURN_SECRET", ""),
+
+  // Web Push (VAPID → APNs on Apple, FCM/autopush elsewhere). Generate once with
+  // `npx web-push generate-vapid-keys`. Both keys empty → push is disabled and
+  // every send silently skips (mirrors the Discord skip), so the server still
+  // boots before keys are provisioned. VAPID_SUBJECT is the admin contact the
+  // push services require; the default here is a placeholder — set the real
+  // mailto:/https: value in .env, never commit it.
+  VAPID_PUBLIC_KEY:  optional("VAPID_PUBLIC_KEY", ""),
+  VAPID_PRIVATE_KEY: optional("VAPID_PRIVATE_KEY", ""),
+  VAPID_SUBJECT:     optional("VAPID_SUBJECT", "mailto:notifications@example.com"),
+
+  // Comma list controlling which channels the new-message dispatch seam fans to
+  // during the Discord→push migration. "discord,push" runs both in parallel;
+  // flip to "push" to retire Discord with no code change.
+  NOTIFICATION_PROVIDER: optional("NOTIFICATION_PROVIDER", "discord,push"),
 } as const;
 
 export const isProd = env.NODE_ENV === "production";

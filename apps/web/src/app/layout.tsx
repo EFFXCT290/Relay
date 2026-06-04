@@ -1,6 +1,7 @@
 import type { Metadata, Viewport } from "next";
 import { Inter, Manrope, Geist_Mono } from "next/font/google";
 import "./globals.css";
+import { ServiceWorkerRegistrar } from "@/features/notifications/push/register-sw";
 
 const manrope = Manrope({
   subsets: ["latin"],
@@ -30,6 +31,13 @@ export const metadata: Metadata = {
   applicationName: "Relay",
   authors: [{ name: "Relay" }],
   robots: { index: true, follow: true },
+  // PWA: Next auto-links the manifest from app/manifest.ts. appleWebApp enables
+  // the standalone Home Screen app (the prerequisite for Web Push on iOS).
+  appleWebApp: { capable: true, statusBarStyle: "black-translucent", title: "Relay" },
+  icons: {
+    icon: [{ url: "/icons/icon-192.png", sizes: "192x192", type: "image/png" }],
+    apple: [{ url: "/icons/apple-touch-icon-180.png", sizes: "180x180", type: "image/png" }],
+  },
 };
 
 export const viewport: Viewport = {
@@ -45,7 +53,10 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       <head>
         <script src="/runtime-env.js" />
       </head>
-      <body>{children}</body>
+      <body>
+        <ServiceWorkerRegistrar />
+        {children}
+      </body>
     </html>
   );
 }
