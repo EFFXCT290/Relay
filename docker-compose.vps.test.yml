@@ -1,0 +1,88 @@
+# Dev-data validation pass for the fixed relay-api/relay-web images — NOT the
+# cutover file. Points at the real postgres/redis containers (reached the same
+# way production will) but isolated by database name, Redis index, and
+# explicit dev-scoped MinIO credentials from .env.vps (not env_file: .env —
+# see MINIO_ACCESS_KEY_TEST etc. below). Bypasses NGINX Proxy Manager entirely
+# via direct published ports, so it never touches the live routing or the
+# real relay-api/relay-web containers.
+#
+# One-time setup on the VPS before first run:
+#   docker exec -it <postgres-container-name> psql -U postgres \
+#     -c "CREATE DATABASE relay_test OWNER relay;"
+#   docker compose --env-file .env.vps -f docker-compose.vps.test.yml build
+#   docker compose --env-file .env.vps -f docker-compose.vps.test.yml run --rm \
+#     api-test ./node_modules/.bin/prisma migrate deploy
+#   (pnpm isn't installed in the runtime image — only the build stage has it —
+#   so the prisma CLI must be invoked directly via node_modules/.bin.)
+#
+# Then:
+#   docker compose --env-file .env.vps -f docker-compose.vps.test.yml up -d
+#   open http://REPLACE_ME_VPS_HOST:13000   (sign up / log in / upload a photo)
+#
+# Teardown when done:
+#   docker compose -f docker-compose.vps.test.yml down
+
+services:
+  api-test:
+    container_name: relay-api-test
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    env_file: .env
+    environment:
+      NODE_ENV: production
+      HOST: 0.0.0.0
+      # Loopback is fine — nothing outside this host needs to hit this test
+      # instance's own CORS-checked origin except the browser via port 13000.
+      WEB_ORIGIN: http://REPLACE_ME_VPS_HOST:13000
+      BASE_URL: http://REPLACE_ME_VPS_HOST:13001
+      # Isolated by database name, not by instance — same real postgres
+      # container production will use, but nothing in `relay` is touched.
+      DATABASE_URL: postgresql://relay:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env.vps}@postgres:5432/relay_test
+      # Isolated by logical DB index, not by instance — index 1, prod uses 0.
+      REDIS_URL: redis://:${REDIS_PASSWORD:-}@redis:6379/1
+      MINIO_ENDPOINT: minio
+      MINIO_PORT: 9000
+      MINIO_USE_SSL: "false"
+      # Explicit from .env.vps rather than falling through from env_file: .env
+      # — that file's contents (and whether its MinIO keys are dev-scoped)
+      # can differ by host, so this pins the test to known dev-safe values
+      # regardless of what's on the machine that runs it.
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY_TEST:?set MINIO_ACCESS_KEY_TEST in .env.vps}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY_TEST:?set MINIO_SECRET_KEY_TEST in .env.vps}
+      MINIO_BUCKET_MEDIA: ${MINIO_BUCKET_MEDIA_TEST:?set MINIO_BUCKET_MEDIA_TEST in .env.vps}
+    ports:
+      - "13001:3001"
+    networks:
+      - postgres_default
+      - redis_default
+      - minio_default
+
+  web-test:
+    container_name: relay-web-test
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+    env_file: .env
+    environment:
+      NODE_ENV: production
+      # Not same-origin here — NPM isn't in the path for this test, so web and
+      # api are genuinely different origins (different ports on the same host).
+      API_URL: http://REPLACE_ME_VPS_HOST:13001
+      WS_URL: ws://REPLACE_ME_VPS_HOST:13001
+    ports:
+      - "13000:3000"
+    networks:
+      - postgres_default
+      - redis_default
+      - minio_default
+    depends_on:
+      - api-test
+
+networks:
+  postgres_default:
+    external: true
+  redis_default:
+    external: true
+  minio_default:
+    external: true

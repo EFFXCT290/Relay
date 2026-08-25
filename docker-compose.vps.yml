@@ -1,0 +1,80 @@
+# VPS deployment — relay-api + relay-web only. Postgres, Redis, and MinIO are
+# pre-existing containers on this host, each on its own external network; NGINX
+# Proxy Manager reverse-proxies both services from nginx-proxy-manager_default.
+# No ports are published to the host — everything is reached by container name
+# over the shared networks.
+#
+# POSTGRES_PASSWORD / REDIS_PASSWORD are NOT read from .env — they come from
+# .env.vps (git-ignored) via --env-file, so the real postgres/redis credentials
+# never land in this tracked file. Build/run with:
+#   docker compose --env-file .env.vps -f docker-compose.vps.yml build
+#   docker compose --env-file .env.vps -f docker-compose.vps.yml up -d
+#
+# Before running: fill in .env.vps (see .env.vps.example) and confirm
+# MINIO_PORT matches the existing minio container's actual internal API port
+# (9000 is MinIO's default). MINIO_ACCESS_KEY/MINIO_SECRET_KEY/MINIO_BUCKET_MEDIA
+# still come from .env via env_file.
+
+services:
+  api:
+    container_name: relay-api
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      NODE_ENV: production
+      HOST: 0.0.0.0
+      # REPLACE_ME: the real public domain NGINX Proxy Manager serves this app
+      # on. Used as the CORS origin for both the HTTP API and the Socket.IO
+      # handshake (server.ts:62, plugins/socket.ts:31) — left as localhost,
+      # every real browser request gets rejected.
+      WEB_ORIGIN: https://REPLACE_ME.example.com
+      BASE_URL: https://REPLACE_ME.example.com
+      DATABASE_URL: postgresql://relay:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env.vps}@postgres:5432/relay
+      # Empty is fine — ioredis skips AUTH entirely when the password segment
+      # is blank, verified against an unauthenticated redis:7-alpine locally.
+      REDIS_URL: redis://:${REDIS_PASSWORD:-}@redis:6379/0
+      MINIO_ENDPOINT: minio
+      MINIO_PORT: 9000
+      MINIO_USE_SSL: "false"
+      # Blank = same-origin; the browser resolves these dynamically via
+      # /runtime-env.js, and NGINX Proxy Manager routes both origins from one
+      # domain. Only set these if web and api end up on different domains.
+      API_URL: ""
+      WS_URL: ""
+    networks:
+      - postgres_default
+      - redis_default
+      - minio_default
+      - nginx-proxy-manager_default
+
+  web:
+    container_name: relay-web
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      NODE_ENV: production
+      API_URL: ""
+      WS_URL: ""
+    networks:
+      - postgres_default
+      - redis_default
+      - minio_default
+      - nginx-proxy-manager_default
+    depends_on:
+      - api
+
+networks:
+  postgres_default:
+    external: true
+  redis_default:
+    external: true
+  minio_default:
+    external: true
+  nginx-proxy-manager_default:
+    external: true

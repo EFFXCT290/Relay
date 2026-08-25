@@ -1,0 +1,11 @@
+node_modules
+**/node_modules
+dist
+**/dist
+!packages/contracts/dist
+.next
+**/.next
+.git
+.env
+.env.*
+!.env.example
