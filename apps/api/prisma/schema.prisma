@@ -44,6 +44,7 @@ model User {
   presence          UserPresence?
   outgoingCalls     Call[]             @relation("OutgoingCalls")
   incomingCalls     Call[]             @relation("IncomingCalls")
+  eventOutbox       EventOutbox[]
 
   @@index([username])
 }
@@ -74,6 +75,7 @@ model Conversation {
   participants Participant[]
   messages     Message[]
   calls        Call[]
+  eventOutbox  EventOutbox[]
 }
 
 model Participant {
@@ -454,6 +456,13 @@ model EventOutbox {
   createdAt      DateTime  @default(now())
   ackedAt        DateTime?
 
+  conversation Conversation? @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  recipient    User          @relation(fields: [recipientId], references: [id], onDelete: Cascade)
+
   // id tiebreaks millisecond collisions → deterministic replay order under burst load.
   @@index([recipientId, ackedAt, createdAt, id])
+  // Postgres doesn't auto-index FK columns (unlike MySQL) — without this, a
+  // conversation delete cascading into EventOutbox would sequentially scan
+  // the whole table to find matching rows.
+  @@index([conversationId])
 }
