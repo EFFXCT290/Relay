@@ -99,10 +99,22 @@ const mediaRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
       },
     },
     async (request) => {
+      const callerId = request.userId!;
       const { mediaId } = request.params;
       const media = await fastify.prisma.media.findUnique({
         where: { id: mediaId },
-        include: { temporary: true },
+        include: {
+          temporary: true,
+          attachments: {
+            include: {
+              message: {
+                include: {
+                  conversation: { include: { participants: { select: { userId: true } } } },
+                },
+              },
+            },
+          },
+        },
       });
       if (!media) throw new ProblemError("not_found", "Media not found.");
       // Phase 6E: ephemeral media must NEVER be served through the generic URL
@@ -111,6 +123,20 @@ const mediaRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
       if (media.temporary) {
         throw new ProblemError("forbidden", "This media is view-once. Open it from the chat.");
       }
+
+      // Authz: caller must be the uploader OR a participant of a conversation
+      // this media was attached to. Unlike POST /:mediaId/view, the uploader is
+      // NOT excluded here — this route serves the uploader's own non-ephemeral
+      // upload too; the uploader-exclusion only applies to /view's view-once
+      // "recipient consumes it" semantics.
+      const isUploader = media.uploaderId === callerId;
+      const isParticipant = media.attachments.some((a) =>
+        a.message.conversation.participants.some((p) => p.userId === callerId),
+      );
+      if (!isUploader && !isParticipant) {
+        throw new ProblemError("forbidden", "You can't view this media.");
+      }
+
       const url = await fastify.getMediaUrl(media.storageKey);
       return { url };
     },
