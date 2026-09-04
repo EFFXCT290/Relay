@@ -89,3 +89,13 @@ export const env = {
 } as const;
 
 export const isProd = env.NODE_ENV === "production";
+
+// Parsed once from NOTIFICATION_PROVIDER ("discord,push" | "push" | "discord")
+// — lets the parallel Discord/push notifier call sites gate on the flag
+// without every call site re-splitting the string.
+const enabledNotificationProviders = new Set(
+  env.NOTIFICATION_PROVIDER.split(",").map((s) => s.trim()).filter(Boolean),
+);
+export function isNotificationProviderEnabled(name: "discord" | "push"): boolean {
+  return enabledNotificationProviders.has(name);
+}

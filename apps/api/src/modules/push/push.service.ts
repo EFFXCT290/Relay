@@ -9,7 +9,7 @@ import { PushRepository } from "./push.repository.js";
 // branch on format without breaking already-installed service workers.
 export type PushPayload = {
   v:    1;
-  type: "message" | "call_incoming" | "call_missed" | "test";
+  type: "message" | "call_incoming" | "call_missed" | "call_cleared" | "test";
   title: string;
   body:  string;
   url?:  string;

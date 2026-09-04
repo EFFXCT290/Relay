@@ -17,6 +17,10 @@ import { CallRepository } from "./calls.repository.js";
 import { callRuntime, type ActiveCallSession } from "./calls.runtime.js";
 import { callDebug } from "./calls.debug.js";
 import { generateTurnCredentials } from "./turn.helper.js";
+import { PushRepository } from "../push/push.repository.js";
+import type { PushPayload } from "../push/push.service.js";
+import { pushQueue, SEND_PUSH_JOB } from "../../queues/push.queue.js";
+import { isNotificationProviderEnabled } from "../../backend-core/runtime/env.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Call orchestration. Signaling is fire-and-forget over user rooms (raw emit,
@@ -56,8 +60,12 @@ export class CallService {
     ]);
     if (!recipient) return { ok: false, reason: "not_found" };
 
+    // Presence no longer hard-gates the attempt (it used to reject offline
+    // callees before any session existed — see calls.service.ts history). An
+    // offline callee still gets a real RINGING session + timer; delivery just
+    // falls back to push instead of a live socket emit, decided below.
     const presence = await new PresenceService(this.fastify).getFor(targetUserId);
-    if (!presence.isOnline) return { ok: false, reason: "offline" };
+    const isOnline = presence.isOnline;
 
     // Reserve both slots synchronously (no await between the check and create)
     // so a concurrent initiate for either party loses the race and gets "busy".
@@ -71,6 +79,8 @@ export class CallService {
       recipientId: targetUserId,
       type,
       state: "ringing",
+      conversationId,
+      callerUsername: caller?.username ?? "",
     };
     callRuntime.create(session);
 
@@ -99,8 +109,13 @@ export class CallService {
       conversationId,
       iceServers: generateTurnCredentials(targetUserId).iceServers,
     };
-    this.emitTo(targetUserId, CALL_EVENTS.RINGING, ringing);
-    callDebug(this.fastify.log, "ringing", { callId, callerId, recipientId: targetUserId, type });
+    if (isOnline) {
+      this.emitTo(targetUserId, CALL_EVENTS.RINGING, ringing);
+    } else {
+      session.pushNotified = true;
+      void this.pushIncomingCall(session, ringing.caller.username);
+    }
+    callDebug(this.fastify.log, "ringing", { callId, callerId, recipientId: targetUserId, type, isOnline });
     return { ok: true, callId, iceServers: generateTurnCredentials(callerId).iceServers };
   }
 
@@ -118,6 +133,25 @@ export class CallService {
 
     this.emitTo(session.callerId, CALL_EVENTS.ACCEPTED, { callId });
     callDebug(this.fastify.log, "ringing → active", { callId, acceptedBy: userId });
+  }
+
+  // Called on every new socket connection (plugins/socket.ts), mirroring
+  // MessageService.sweepUndelivered. Closes the gap where a device that was
+  // never live for the original RINGING emit (offline at initiate(), woken by
+  // a push) would otherwise reconnect into a dead app with no way to learn a
+  // call is still ringing for it. No-ops if there's nothing to resync.
+  resyncRinging(userId: string): void {
+    const session = callRuntime.getByUser(userId);
+    if (!session || session.state !== "ringing" || session.recipientId !== userId) return;
+    const ringing: CallRingingEvent = {
+      callId: session.callId,
+      caller: { id: session.callerId, username: session.callerUsername ?? "" },
+      type: session.type,
+      conversationId: session.conversationId,
+      iceServers: generateTurnCredentials(userId).iceServers,
+    };
+    this.emitTo(userId, CALL_EVENTS.RINGING, ringing);
+    callDebug(this.fastify.log, "ringing resync", { callId: session.callId, userId });
   }
 
   // ── Signaling relay (verbatim, to the other peer) ───────────────────────────
@@ -242,5 +276,60 @@ export class CallService {
 
     const payload = { callId, status: opts.status };
     for (const uid of opts.notify) this.emitTo(uid, opts.event, payload);
+
+    // Missed-call follow-up fires regardless of how the original ring was
+    // delivered (live or push) — a recipient who was online but simply never
+    // answered still deserves to know. A stale "incoming call" notification
+    // (only ever sent when pushNotified) is superseded by this same tag, via
+    // sw.js's existing renotify mechanism — no separate clear needed.
+    if (opts.status === "MISSED") {
+      void this.pushMissedCall(session.recipientId, session.callId, session.callerUsername ?? "");
+    } else if (session.pushNotified) {
+      // Recipient resolved the call some other way (answered elsewhere,
+      // rejected, ended, failed) — the device we push-notified never showed a
+      // live UI for it, so its stale notification needs an explicit close.
+      void this.pushCallCleared(session.recipientId, session.callId);
+    }
+  }
+
+  // ── Push notifications (only reached when the recipient was presence-
+  // offline at initiate() — see the isOnline branch above) ───────────────────
+
+  private async pushIncomingCall(session: ActiveCallSession, callerUsername: string): Promise<void> {
+    if (!isNotificationProviderEnabled("push")) return;
+    const prefs = await new PushRepository(this.fastify.prisma).getPreferences(session.recipientId);
+    if (prefs?.pushCalls === false) return;
+    const payload: PushPayload = {
+      v:     1,
+      type:  "call_incoming",
+      title: `Incoming ${session.type === "VIDEO" ? "video" : "audio"} call`,
+      body:  `from @${callerUsername}`,
+      url:   session.conversationId ? `/conversations/${session.conversationId}` : "/conversations",
+      tag:   `call-${session.callId}`,
+    };
+    await pushQueue.add(SEND_PUSH_JOB, { userId: session.recipientId, payload });
+  }
+
+  private async pushMissedCall(recipientId: string, callId: string, callerUsername: string): Promise<void> {
+    if (!isNotificationProviderEnabled("push")) return;
+    const prefs = await new PushRepository(this.fastify.prisma).getPreferences(recipientId);
+    if (prefs?.pushCalls === false) return;
+    const payload: PushPayload = {
+      v:     1,
+      type:  "call_missed",
+      title: "Missed call",
+      body:  `from @${callerUsername}`,
+      url:   "/calls",
+      tag:   `call-${callId}`,
+    };
+    await pushQueue.add(SEND_PUSH_JOB, { userId: recipientId, payload });
+  }
+
+  private async pushCallCleared(recipientId: string, callId: string): Promise<void> {
+    if (!isNotificationProviderEnabled("push")) return;
+    // No title/body — sw.js recognizes this type and closes the matching-tag
+    // notification instead of displaying anything.
+    const payload: PushPayload = { v: 1, type: "call_cleared", title: "", body: "", tag: `call-${callId}` };
+    await pushQueue.add(SEND_PUSH_JOB, { userId: recipientId, payload });
   }
 }

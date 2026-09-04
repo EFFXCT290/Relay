@@ -21,6 +21,15 @@ self.addEventListener("push", (event) => {
   } catch (_) {
     data = {};
   }
+  // A cleared/superseded call (answered elsewhere, rejected, ended) — close
+  // the stale "incoming call" notification instead of showing anything new.
+  if (data.type === "call_cleared") {
+    event.waitUntil(
+      self.registration.getNotifications({ tag: data.tag }).then((ns) => ns.forEach((n) => n.close())),
+    );
+    return;
+  }
+
   const title = data.title || "Relay";
   const options = {
     body: data.body || "",

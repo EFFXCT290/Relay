@@ -28,6 +28,15 @@ export type ActiveCallSession = {
   state:       CallSessionState;
   answeredAt?: number;          // epoch ms — set on accept; duration is measured from here
   ringTimer?:  NodeJS.Timeout;  // fires the MISSED teardown if unanswered
+
+  // Cached at initiate() so a reconnect resync or a push send never needs an
+  // extra DB round-trip mid-call.
+  conversationId?: string;
+  callerUsername?: string;
+  // Set when the recipient was presence-offline at initiate() and the ring
+  // was delivered via push instead of a live socket emit — tells terminate()
+  // whether a stale device notification needs clearing/replacing.
+  pushNotified?: boolean;
 };
 
 const sessions = new Map<string, ActiveCallSession>();

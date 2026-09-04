@@ -5,6 +5,7 @@ import { env } from "../backend-core/runtime/env.js";
 import { isBlocklisted, verifyAccessToken } from "../backend-core/auth/tokens.js";
 import { registerAllSocketHandlers } from "../sockets/index.js";
 import { MessageService } from "../modules/messages/message.service.js";
+import { CallService } from "../modules/calls/calls.service.js";
 import { startTypingSweep } from "../modules/typing/typing.service.js";
 
 declare module "socket.io" {
@@ -65,6 +66,12 @@ export default fp(async (fastify) => {
     void new MessageService(fastify)
       .sweepUndelivered(socket.userId)
       .catch((err) => fastify.log.error({ err }, "delivered-sweep failed"));
+
+    // Re-emit a still-RINGING call this user is the recipient of. Needed for a
+    // device that was never live for the original ring (offline at initiate(),
+    // woken by a push) — without this it would reconnect into a dead app with
+    // no way to learn a call is still waiting. Lives in CallService.
+    new CallService(fastify).resyncRinging(socket.userId);
 
     registerAllSocketHandlers(socket, fastify, socket.userId);
   });
