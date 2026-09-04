@@ -1,6 +1,7 @@
 import type { FastifyPluginAsyncTypebox } from "@fastify/type-provider-typebox";
 import { Type } from "@sinclair/typebox";
 import { randomUUID } from "node:crypto";
+import { Prisma } from "@prisma/client";
 import { ProblemError } from "../../backend-core/http/errors.js";
 import {
   MESSAGE_EVENTS,
@@ -183,35 +184,42 @@ const messageRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
       const { body, replyToId, clientMessageId } = request.body;
       await assertParticipant(fastify, callerId, conversationId);
 
-      // Idempotency: if this clientMessageId was already committed, return the
-      // existing message instead of creating a duplicate (handles retries and
-      // double-taps safely).
-      if (clientMessageId) {
-        const existing = await fastify.prisma.message.findUnique({
-          where: { senderId_clientMessageId: { senderId: callerId, clientMessageId } },
+      // Existing-message response shape shared by both idempotency paths below:
+      // the fast-path check (no race) and the P2002 recovery (lost the race).
+      const findExistingByClientMessageId = (clientMsgId: string) =>
+        fastify.prisma.message.findUnique({
+          where: { senderId_clientMessageId: { senderId: callerId, clientMessageId: clientMsgId } },
           include: {
             sender:  { select: { username: true } },
             replyTo: { select: { id: true, body: true, type: true } },
           },
         });
-        if (existing) {
-          return reply.code(201).send({
-            messageId:      existing.id,
-            conversationId: existing.conversationId,
-            senderId:       existing.senderId,
-            senderUsername: existing.sender.username,
-            type:           "TEXT" as const,
-            body:           existing.body!,
-            replyTo:        existing.replyTo
-              ? { messageId: existing.replyTo.id, preview: existing.replyTo.body?.slice(0, 80) ?? null, type: existing.replyTo.type }
-              : null,
-            reactions:   {} as Record<string, number>,
-            myReaction:  null as string | null,
-            readBy:      [] as { userId: string; readAt: string }[],
-            deliveredAt: existing.deliveredAt ? existing.deliveredAt.toISOString() : null,
-            createdAt:   existing.createdAt.toISOString(),
-          });
-        }
+      type ExistingMessage = NonNullable<Awaited<ReturnType<typeof findExistingByClientMessageId>>>;
+      const existingMessageResponse = (existing: ExistingMessage) => ({
+        messageId:      existing.id,
+        conversationId: existing.conversationId,
+        senderId:       existing.senderId,
+        senderUsername: existing.sender.username,
+        type:           "TEXT" as const,
+        body:           existing.body!,
+        replyTo:        existing.replyTo
+          ? { messageId: existing.replyTo.id, preview: existing.replyTo.body?.slice(0, 80) ?? null, type: existing.replyTo.type }
+          : null,
+        reactions:   {} as Record<string, number>,
+        myReaction:  null as string | null,
+        readBy:      [] as { userId: string; readAt: string }[],
+        deliveredAt: existing.deliveredAt ? existing.deliveredAt.toISOString() : null,
+        createdAt:   existing.createdAt.toISOString(),
+      });
+
+      // Idempotency fast path: if this clientMessageId was already committed
+      // before this request arrived, return the existing message instead of
+      // creating a duplicate (handles retries and double-taps safely). This
+      // does NOT by itself close the race — see the P2002 catch below for two
+      // requests that both pass this check concurrently.
+      if (clientMessageId) {
+        const existing = await findExistingByClientMessageId(clientMessageId);
+        if (existing) return reply.code(201).send(existingMessageResponse(existing));
       }
 
       if (replyToId) {
@@ -234,25 +242,39 @@ const messageRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
         otherIds.every((uid) => (fastify.io.sockets.adapter.rooms.get(`user:${uid}`)?.size ?? 0) > 0);
       const deliveredAt = allRecipientsOnline ? new Date() : null;
 
-      const created = await fastify.prisma.$transaction(async (tx) => {
-        const msg = await tx.message.create({
-          data: {
-            conversationId,
-            senderId: callerId,
-            type:     "TEXT",
-            body,
-            ...(replyToId       ? { replyToId }       : {}),
-            ...(deliveredAt     ? { deliveredAt }      : {}),
-            ...(clientMessageId ? { clientMessageId }  : {}),
-          },
-          include: {
-            replyTo: { select: { id: true, body: true, type: true } },
-            sender:  { select: { username: true } },
-          },
+      let created;
+      try {
+        created = await fastify.prisma.$transaction(async (tx) => {
+          const msg = await tx.message.create({
+            data: {
+              conversationId,
+              senderId: callerId,
+              type:     "TEXT",
+              body,
+              ...(replyToId       ? { replyToId }       : {}),
+              ...(deliveredAt     ? { deliveredAt }      : {}),
+              ...(clientMessageId ? { clientMessageId }  : {}),
+            },
+            include: {
+              replyTo: { select: { id: true, body: true, type: true } },
+              sender:  { select: { username: true } },
+            },
+          });
+          await tx.conversation.update({ where: { id: conversationId }, data: { updatedAt: new Date() } });
+          return msg;
         });
-        await tx.conversation.update({ where: { id: conversationId }, data: { updatedAt: new Date() } });
-        return msg;
-      });
+      } catch (err) {
+        // Two concurrent identical retries (same clientMessageId) can both pass
+        // the fast-path check above — the loser hits the unique constraint here
+        // instead of a lost write. Recover with the winner's message instead of
+        // surfacing a 500 for what is, from the client's perspective, a
+        // successful send.
+        if (clientMessageId && err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
+          const existing = await findExistingByClientMessageId(clientMessageId);
+          if (existing) return reply.code(201).send(existingMessageResponse(existing));
+        }
+        throw err;
+      }
 
       const httpPayload = {
         messageId:      created.id,
