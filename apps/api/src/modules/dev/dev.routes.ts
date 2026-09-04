@@ -12,10 +12,16 @@ const devRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
       preHandler: [fastify.authenticate],
       schema: {
         body: Type.Object({
+          // "view"/"expired" were removed from this union: neither has a real
+          // backend behind it yet. NotificationType (schema.prisma) only has
+          // SYSTEM_ALERT/MESSAGE_RECEIVED — the VIEW_COUNT_UPDATE/MEDIA_EXPIRED
+          // types only exist in @relay/contracts and the web notification-card
+          // UI, speculatively, with no migration and no real trigger site
+          // (POST /media/:id/view only emits a live socket event, never a
+          // persisted Notification; the cleanup sweep worker has no
+          // notification code at all). Re-add here once that's built for real.
           variant: Type.Union([
             Type.Literal("capture"),
-            Type.Literal("view"),
-            Type.Literal("expired"),
             Type.Literal("message"),
           ]),
           fromUsername: Type.Optional(Type.String()),
