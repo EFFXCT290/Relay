@@ -47,6 +47,30 @@ async function assertParticipant(
   return conv;
 }
 
+// Recomputes the true post-write reaction state for a message from the DB —
+// shared by the normal write path and the P2002/P2025 race-recovery path in
+// POST /messages/:messageId/react, so a concurrent loser reports whatever
+// actually landed rather than blindly echoing its own request.
+async function currentReactionState(
+  fastify: import("fastify").FastifyInstance,
+  messageId: string,
+  callerId: string,
+) {
+  const [all, mine] = await Promise.all([
+    fastify.prisma.reaction.groupBy({
+      by: ["emoji"],
+      where: { messageId },
+      _count: { emoji: true },
+    }),
+    fastify.prisma.reaction.findUnique({
+      where: { messageId_userId: { messageId, userId: callerId } },
+      select: { emoji: true },
+    }),
+  ]);
+  const reactions = Object.fromEntries(all.map((r) => [r.emoji, r._count.emoji]));
+  return { messageId, reactions, myReaction: mine?.emoji ?? null };
+}
+
 const messageRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
   // ── GET /api/conversations/:id/messages ───────────────────────────────────
   fastify.get(
@@ -740,43 +764,42 @@ const messageRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
       });
       if (!member) throw new ProblemError("forbidden", "You are not a participant.");
 
-      const existing = await fastify.prisma.reaction.findUnique({
-        where: { messageId_userId: { messageId, userId: callerId } },
-      });
+      try {
+        await fastify.prisma.$transaction(async (tx) => {
+          const existing = await tx.reaction.findUnique({
+            where: { messageId_userId: { messageId, userId: callerId } },
+          });
 
-      if (existing?.emoji === emoji) {
-        // Toggle off — same emoji tapped again.
-        await fastify.prisma.reaction.delete({ where: { id: existing.id } });
-      } else if (existing) {
-        // Replace with a different emoji.
-        await fastify.prisma.reaction.update({
-          where: { id: existing.id },
-          data: { emoji },
+          if (existing?.emoji === emoji) {
+            // Toggle off — same emoji tapped again.
+            await tx.reaction.delete({ where: { id: existing.id } });
+          } else if (existing) {
+            // Replace with a different emoji.
+            await tx.reaction.update({
+              where: { id: existing.id },
+              data: { emoji },
+            });
+          } else {
+            await tx.reaction.create({
+              data: { messageId, userId: callerId, emoji },
+            });
+          }
         });
-      } else {
-        await fastify.prisma.reaction.create({
-          data: { messageId, userId: callerId, emoji },
-        });
+      } catch (err) {
+        // Two concurrent identical requests (same messageId+userId) can both
+        // pass the read above and then race on the write: both-create races
+        // on the unique constraint (P2002); a delete/update racing a
+        // concurrent delete hits a since-removed row (P2025) — e.g. two tabs
+        // both toggling the same emoji off, or one toggling off while another
+        // replaces it. Either way the loser would otherwise 500 for what the
+        // client experiences as a successful reaction — swallow only these
+        // two codes and let the shared re-fetch below report whatever state
+        // actually landed, for either party's request.
+        const code = err instanceof Prisma.PrismaClientKnownRequestError ? err.code : undefined;
+        if (code !== "P2002" && code !== "P2025") throw err;
       }
 
-      const [all, mine] = await Promise.all([
-        fastify.prisma.reaction.groupBy({
-          by: ["emoji"],
-          where: { messageId },
-          _count: { emoji: true },
-        }),
-        fastify.prisma.reaction.findUnique({
-          where: { messageId_userId: { messageId, userId: callerId } },
-          select: { emoji: true },
-        }),
-      ]);
-
-      const reactions = Object.fromEntries(all.map((r) => [r.emoji, r._count.emoji]));
-      const payload = {
-        messageId,
-        reactions,
-        myReaction: mine?.emoji ?? null,
-      };
+      const payload = await currentReactionState(fastify, messageId, callerId);
 
       emitMessageReaction(fastify.io, msg.conversationId, {
         messageId: payload.messageId,
