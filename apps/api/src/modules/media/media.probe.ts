@@ -74,12 +74,38 @@ type FfprobeResult = {
  * alter the video — we just report what the player will actually show, so the
  * bubble sizes correctly (no pillarbox/black bars).
  */
-function rotationDegrees(video: FfprobeStream | undefined): number {
+export function rotationDegrees(video: FfprobeStream | undefined): number {
   const tag = Number(video?.tags?.rotate);
   if (Number.isFinite(tag) && tag !== 0) return tag;
   const dm = video?.side_data_list?.find((s) => s.side_data_type === "Display Matrix");
   if (dm && typeof dm.rotation === "number") return dm.rotation;
   return 0;
+}
+
+/** Pure resolution of ffprobe's raw JSON into a VideoProbe — split out from
+ *  probeVideo so the width/height-swap and codec logic is unit-testable
+ *  without a real ffprobe subprocess. */
+export function parseProbeResult(result: FfprobeResult): VideoProbe {
+  const video  = result.streams?.find((s) => s.codec_type === "video");
+  const codec  = video?.codec_name?.toLowerCase() ?? null;
+  const durSec =
+    Number(video?.duration) ||
+    Number(result.format?.duration) ||
+    NaN;
+
+  // Swap W/H for quarter-turn rotations so we store the orientation the user
+  // actually sees (portrait stays portrait), without re-encoding the video.
+  const encW = video?.width  ?? null;
+  const encH = video?.height ?? null;
+  const swap = Math.abs(rotationDegrees(video)) % 180 === 90;
+
+  return {
+    codec,
+    width:      swap ? encH : encW,
+    height:     swap ? encW : encH,
+    durationMs: Number.isFinite(durSec) ? Math.round(durSec * 1000) : null,
+    isHevc:     codec === "hevc" || codec === "h265",
+  };
 }
 
 /** Probe a video buffer for its primary video stream's codec + DISPLAY dims. */
@@ -88,26 +114,7 @@ export async function probeVideo(buffer: Buffer): Promise<VideoProbe> {
   await writeFile(path, buffer);
   try {
     const result = (await runFfprobe(path)) as FfprobeResult;
-    const video  = result.streams?.find((s) => s.codec_type === "video");
-    const codec  = video?.codec_name?.toLowerCase() ?? null;
-    const durSec =
-      Number(video?.duration) ||
-      Number(result.format?.duration) ||
-      NaN;
-
-    // Swap W/H for quarter-turn rotations so we store the orientation the user
-    // actually sees (portrait stays portrait), without re-encoding the video.
-    const encW = video?.width  ?? null;
-    const encH = video?.height ?? null;
-    const swap = Math.abs(rotationDegrees(video)) % 180 === 90;
-
-    return {
-      codec,
-      width:      swap ? encH : encW,
-      height:     swap ? encW : encH,
-      durationMs: Number.isFinite(durSec) ? Math.round(durSec * 1000) : null,
-      isHevc:     codec === "hevc" || codec === "h265",
-    };
+    return parseProbeResult(result);
   } finally {
     await unlink(path).catch(() => {});
   }

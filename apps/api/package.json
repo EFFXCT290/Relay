@@ -9,7 +9,7 @@
     "build": "tsc -p tsconfig.json",
     "start": "node --env-file=../../.env dist/server.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "node --env-file=.env.test --experimental-test-module-mocks --import tsx --test $(find src/modules -name '*.test.ts')",
+    "test": "node --env-file=.env.test --experimental-test-module-mocks --import tsx --test $(find src -name '*.test.ts')",
     "prisma:generate": "dotenv -e ../../.env -- prisma generate",
     "prisma:migrate": "dotenv -e ../../.env -- prisma migrate dev",
     "prisma:deploy": "dotenv -e ../../.env -- prisma migrate deploy",

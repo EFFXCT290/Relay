@@ -337,7 +337,7 @@ async function generateImageVariants(
 
 async function processVideo(deps: WorkerDeps, data: ProcessVideoJobData) {
   const { s3, prisma, io, log } = deps;
-  const { mediaId, storageKey, uploaderId, isLss, isHevc, height } = data;
+  const { mediaId, storageKey, uploaderId, isLss, isHevc, height, durationMs } = data;
   const repo = createMediaRepository(prisma);
   const partitionDate = parseMediaKeyDate(storageKey) ?? undefined;
   log.info({ mediaId, isHevc, isLss, height }, "[video-worker] processing video");
@@ -375,7 +375,11 @@ async function processVideo(deps: WorkerDeps, data: ProcessVideoJobData) {
   try {
     await repo.setTaskState(mediaId, "POSTER", "PROCESSING");
     await repo.setTaskState(mediaId, "THUMBNAIL", "PROCESSING");
-    const frame = await extractPosterFrame(original, 1);
+    // A fixed 1s seek produces zero frames (ffmpeg -ss at/past EOF) for any
+    // clip ~1s or shorter, silently losing its poster+thumbnail forever —
+    // clamp to a point safely inside the clip's actual duration instead.
+    const posterSeekSeconds = durationMs ? Math.min(1, (durationMs / 1000) * 0.5) : 0;
+    const frame = await extractPosterFrame(original, posterSeekSeconds);
 
     const posterWebp = await sharp(frame).resize({ width: 1280, height: 1280, fit: "inside", withoutEnlargement: true }).webp({ quality: 80 }).toBuffer();
     const pMeta = await sharp(posterWebp).metadata();

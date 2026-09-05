@@ -34,7 +34,7 @@ const EN_WORDS = new Set([
   "we","when","your","can","said","there","do","so","just","know","like","think","really",
 ]);
 
-function classify(text: string, fallback: TranscriptLanguage): TranscriptLanguage {
+export function classify(text: string, fallback: TranscriptLanguage): TranscriptLanguage {
   const lower = text.toLowerCase();
   const hasEsGlyph = /[ñáéíóú¿¡]/.test(lower);
   const words = lower.match(/[\p{L}]+/gu) ?? [];
@@ -56,7 +56,7 @@ function classify(text: string, fallback: TranscriptLanguage): TranscriptLanguag
 }
 
 // Roll segment languages up to one primary label, weighted by text length.
-function primaryLanguage(segments: TranscriptSegment[], fallback: TranscriptLanguage): TranscriptLanguage {
+export function primaryLanguage(segments: TranscriptSegment[], fallback: TranscriptLanguage): TranscriptLanguage {
   const weight: Record<TranscriptLanguage, number> = { en: 0, es: 0, mixed: 0 };
   for (const s of segments) weight[s.language] += Math.max(s.text.length, 1);
   const en = weight.en;
