@@ -1,25 +1,26 @@
 import ogs from "open-graph-scraper";
 import type { EmbedResult } from "./types.js";
 
-// Params that carry zero semantic meaning and are tracking-only.
-const TRACKING_PARAMS = new Set([
-  "fbclid", "ref_src", "ref_url",
-  // Twitter/X tracking tokens
-  "s", "t",
-]);
+// Params that carry zero semantic meaning and are tracking-only on any site.
+const TRACKING_PARAMS = new Set(["fbclid", "ref_src", "ref_url"]);
+// Twitter/X's short tracking tokens. Scoped to that host specifically (unlike
+// the generic set above) because single-letter names collide with legitimate
+// params elsewhere — "t" is YouTube's start-time offset, stripping it
+// globally silently drops a youtu.be link's deep-linked timestamp.
+const TWITTER_TRACKING_PARAMS = new Set(["s", "t"]);
 
 export function normalizeUrl(raw: string): string {
   try {
     const u = new URL(raw);
+    const host = u.hostname.toLowerCase();
+    const isTwitter = host === "twitter.com" || host === "www.twitter.com" || host === "x.com";
 
     // Strip utm_* and known tracking params.
     for (const key of [...u.searchParams.keys()]) {
-      if (key.startsWith("utm_") || TRACKING_PARAMS.has(key)) {
+      if (key.startsWith("utm_") || TRACKING_PARAMS.has(key) || (isTwitter && TWITTER_TRACKING_PARAMS.has(key))) {
         u.searchParams.delete(key);
       }
     }
-
-    const host = u.hostname.toLowerCase();
 
     // twitter.com → x.com (canonical domain)
     if (host === "twitter.com" || host === "www.twitter.com") {

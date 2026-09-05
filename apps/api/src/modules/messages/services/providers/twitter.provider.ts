@@ -1,7 +1,7 @@
 import type { EmbedProvider, EmbedResult } from "./types.js";
 import { tryOpenGraph, safeImageUrl } from "./utils.js";
 
-function extractTweetId(url: string): string | null {
+export function extractTweetId(url: string): string | null {
   // Matches: https://x.com/user/status/123 or https://twitter.com/user/status/123
   const m = url.match(/\/status\/(\d+)/);
   return m?.[1] ?? null;
@@ -9,7 +9,7 @@ function extractTweetId(url: string): string | null {
 
 // Twitter's bot-detection page serves abs.twimg.com/emoji/ as the OG image.
 // Real tweet media comes from pbs.twimg.com or video.twimg.com.
-function isRealTweetImage(rawUrl: string | null | undefined): boolean {
+export function isRealTweetImage(rawUrl: string | null | undefined): boolean {
   if (!rawUrl) return false;
   try {
     const h = new URL(rawUrl).hostname;
@@ -17,6 +17,21 @@ function isRealTweetImage(rawUrl: string | null | undefined): boolean {
   } catch {
     return false;
   }
+}
+
+// Strips the oEmbed API's raw blockquote HTML down to plain tweet text:
+// drops the trailing pic.twitter.com/t.co media anchor, strips every other
+// tag, cuts the "&mdash; Author (@handle) date" attribution line, unescapes
+// the handful of entities Twitter's oEmbed HTML actually uses, collapses
+// whitespace, and caps length. Returns null for an empty result.
+export function stripOEmbedHtml(html: string): string | null {
+  return html
+    .replace(/<a\b[^>]*>(?:pic\.twitter\.com|t\.co)[^<]*<\/a>/gi, "")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&mdash;.*$/s, "")
+    .replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"').replace(/&#39;/g, "'")
+    .replace(/\s+/g, " ").trim().slice(0, 280) || null;
 }
 
 export class TwitterProvider implements EmbedProvider {
@@ -77,17 +92,7 @@ export class TwitterProvider implements EmbedProvider {
       const data = await res.json() as { author_name?: string; html?: string };
       if (!data.author_name) return null;
 
-      let text: string | null = null;
-      if (data.html) {
-        text = data.html
-          .replace(/<a\b[^>]*>(?:pic\.twitter\.com|t\.co)[^<]*<\/a>/gi, "")
-          .replace(/<[^>]+>/g, " ")
-          .replace(/&mdash;.*$/s, "")
-          .replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">")
-          .replace(/&quot;/g, '"').replace(/&#39;/g, "'")
-          .replace(/\s+/g, " ").trim().slice(0, 280) || null;
-      }
-
+      const text = data.html ? stripOEmbedHtml(data.html) : null;
       return { author: data.author_name, text };
     } catch {
       return null;

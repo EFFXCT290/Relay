@@ -6,6 +6,24 @@ import ogs from "open-graph-scraper";
 const FB_CRAWLER_UA =
   "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)";
 
+// og:url contains /username/p/shortcode/ (posts) or /username/reel/shortcode/
+// (reels) — extract the handle. Matches p/r/reel as a superset so a canonical
+// short form (if og:url ever reports one) is covered too.
+export function extractInstagramUsername(ogUrl: string | undefined | null): string | null {
+  const m = ogUrl?.match(/instagram\.com\/([^/]+)\/(?:p|r|reel)\//);
+  return m?.[1] ?? null;
+}
+
+// og:title format: "{Display Name} on Instagram: \"{caption}\"" — falls back
+// to og:description when og:title doesn't match that shape.
+export function extractInstagramCaption(
+  ogTitle:       string | undefined | null,
+  ogDescription: string | undefined | null,
+): string | null {
+  const m = ogTitle?.match(/on Instagram:\s*"([\s\S]*)"\s*$/);
+  return m?.[1]?.trim().slice(0, 300) ?? ogDescription?.slice(0, 300) ?? null;
+}
+
 export class InstagramProvider implements EmbedProvider {
   canHandle(url: string): boolean {
     try {
@@ -30,13 +48,8 @@ export class InstagramProvider implements EmbedProvider {
         return this.brandedFallback(url);
       }
 
-      // og:url contains /username/p/shortcode/ — extract the handle.
-      const userMatch = result.ogUrl?.match(/instagram\.com\/([^/]+)\/[pr]\//);
-      const username = userMatch?.[1] ?? null;
-
-      // og:title format: "{Display Name} on Instagram: \"{caption}\""
-      const captionMatch = result.ogTitle?.match(/on Instagram:\s*"([\s\S]*)"\s*$/);
-      const caption = captionMatch?.[1]?.trim().slice(0, 300) ?? result.ogDescription?.slice(0, 300) ?? null;
+      const username = extractInstagramUsername(result.ogUrl);
+      const caption  = extractInstagramCaption(result.ogTitle, result.ogDescription);
 
       return {
         url,
