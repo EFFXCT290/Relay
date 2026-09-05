@@ -327,6 +327,8 @@ export class CallService {
 
   private async pushCallCleared(recipientId: string, callId: string): Promise<void> {
     if (!isNotificationProviderEnabled("push")) return;
+    const prefs = await new PushRepository(this.fastify.prisma).getPreferences(recipientId);
+    if (prefs?.pushCalls === false) return;
     // No title/body — sw.js recognizes this type and closes the matching-tag
     // notification instead of displaying anything.
     const payload: PushPayload = { v: 1, type: "call_cleared", title: "", body: "", tag: `call-${callId}` };
