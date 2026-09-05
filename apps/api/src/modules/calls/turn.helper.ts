@@ -28,7 +28,7 @@ const STUN_SERVER: IceServer = { urls: "stun:stun.l.google.com:19302" };
 // Accept a bare host ("turn.example.com") or a fully-qualified URL
 // ("turns://turn.example.com:5349") and return just the host. Trailing port /
 // path / query are dropped — we build the canonical coturn URL set ourselves.
-function turnHost(raw: string): string {
+export function turnHost(raw: string): string {
   return raw
     .trim()
     .replace(/^(stun|turn|turns):\/\//i, "")

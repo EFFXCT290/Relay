@@ -8,23 +8,46 @@ import { normalizeUrl } from "./providers/utils.js";
 
 export type { EmbedResult } from "./providers/types.js";
 
+// True for a dotted-decimal IPv4 string in a loopback/private/link-local
+// range this guard rejects. Shared by the plain-hostname check and the
+// IPv4-mapped-IPv6 check below so both apply identical range logic instead
+// of two copies that can drift out of sync.
+function isBlockedIPv4(ip: string): boolean {
+  if (
+    ip === "0.0.0.0" ||
+    ip.startsWith("127.") ||
+    ip.startsWith("10.") ||
+    ip.startsWith("192.168.") ||
+    ip.startsWith("169.254.")
+  ) return true;
+  const m = ip.match(/^172\.(\d+)\./);
+  return !!m && Number(m[1]) >= 16 && Number(m[1]) <= 31;
+}
+
+// IPv4-mapped IPv6 (RFC 4291 §2.5.5.2) re-expresses any IPv4 address as an
+// IPv6 literal. The WHATWG URL parser always normalizes these to the
+// compressed hex form in u.hostname — e.g. "::ffff:127.0.0.1" becomes
+// "::ffff:7f00:1" — so every blocked IPv4 range above could otherwise be
+// smuggled past a plain hostname-string check. Decode it back to
+// dotted-decimal and re-run the same range check on it.
+function mappedIPv4(host: string): string | null {
+  const m = host.replace(/^\[|\]$/g, "").match(/^(?:0*:){0,5}ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/i);
+  if (!m) return null;
+  const hi = parseInt(m[1]!, 16);
+  const lo = parseInt(m[2]!, 16);
+  return `${(hi >> 8) & 0xff}.${hi & 0xff}.${(lo >> 8) & 0xff}.${lo & 0xff}`;
+}
+
 // SSRF guard — blocks private/loopback ranges before any provider runs.
-function isSafeUrl(raw: string): boolean {
+export function isSafeUrl(raw: string): boolean {
   try {
     const u = new URL(raw);
     if (u.protocol !== "http:" && u.protocol !== "https:") return false;
     const h = u.hostname.toLowerCase();
-    if (
-      h === "localhost" ||
-      h === "::1" ||
-      h === "[::1]" ||
-      h.startsWith("127.") ||
-      h.startsWith("10.") ||
-      h.startsWith("192.168.") ||
-      h.startsWith("169.254.")
-    ) return false;
-    const m = h.match(/^172\.(\d+)\./);
-    if (m && Number(m[1]) >= 16 && Number(m[1]) <= 31) return false;
+    if (h === "localhost" || h === "::1" || h === "[::1]") return false;
+    if (isBlockedIPv4(h)) return false;
+    const mapped = mappedIPv4(h);
+    if (mapped && isBlockedIPv4(mapped)) return false;
     return true;
   } catch {
     return false;
