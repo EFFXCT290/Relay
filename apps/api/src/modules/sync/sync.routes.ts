@@ -33,7 +33,7 @@ const syncRoutes: FastifyPluginAsyncTypebox = async (app) => {
     async (req) => {
       const userId = req.userId!;
       try {
-        return await service.replayFor(userId, req.body.since, req.body.limit);
+        return await service.replayFor(userId, req.body.since, req.body.limit, req.body.conversationId);
       } catch (err) {
         throw new ProblemError(
           "bad_request",

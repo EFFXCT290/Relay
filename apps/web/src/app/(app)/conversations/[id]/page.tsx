@@ -18,6 +18,7 @@ import {
 import { ChatComposer, MAX_IMAGES_PER_SEND } from "@/features/messages/components/chat-composer";
 import { UploadPreview } from "@/features/messages/components/upload-preview";
 import { mediaApi } from "@/frontend-core/api-client/media";
+import { syncApi } from "@/frontend-core/api-client/sync";
 import {
   saveSession,
   updateSession,
@@ -445,52 +446,48 @@ export default function ChatThreadPage() {
 
       socket.emit(SYNC_EVENTS.REPLAY_REQUEST, { since: cursor, conversationId });
 
-      // Relay response — apply missed events oldest-first, then flush any
-      // live events that buffered while the barrier was up.
-      const handleReplay = (res: ReplayResponse) => {
-        // Stale check: a newer reconnect fired while this response was in
-        // flight. The new reconnect's handler will take over.
-        if (epoch !== getReconnectEpoch()) {
-          isSyncingRef.current = false;
-          syncQueueRef.current  = [];
-          return;
-        }
-
+      // Applies one replay result (missed events oldest-first), then — only
+      // once nextCursor says the server is fully caught up — flushes any live
+      // events that buffered while the barrier was up. Shared by both the
+      // normal socket-replay path and the HTTP-fallback recovery path below,
+      // so a request that failed over to HTTP is applied identically to one
+      // that succeeded over the socket.
+      const applyReplayResult = (events: ReplayResponse["events"], nextCursor: string | null) => {
         // ACK all envelopes first (idempotent — safe before applying).
-        for (const env of res.events) {
+        for (const env of events) {
           socket.emit(ACK_EVENT, { eventId: env.eventId, status: "ok" });
         }
         // Apply in causal order: new messages first so that edit/delete/read
         // events referencing them find their targets already in state.
-        for (const env of res.events) {
+        for (const env of events) {
           if (env.eventName === "message:new")
             applyMessageNew(env.payload as { message: Message });
         }
-        for (const env of res.events) {
+        for (const env of events) {
           if (env.eventName === "message:edited")
             applyMessageEdited(env.payload as { messageId: string; body: string; editedAt: string });
         }
-        for (const env of res.events) {
+        for (const env of events) {
           if (env.eventName === "message:deleted")
             applyMessageDeleted(env.payload as { messageId: string });
         }
-        for (const env of res.events) {
+        for (const env of events) {
           if (env.eventName === "message:delivered")
             applyMessageDelivered(env.payload as { conversationId: string; messageIds: string[]; deliveredAt: string });
         }
-        for (const env of res.events) {
+        for (const env of events) {
           if (env.eventName === "message:read")
             applyMessageRead(env.payload as { conversationId: string; readBy: string; messageIds: string[]; readAt: string; deliveredAt?: string | null });
         }
 
         // Advance the replay cursor to the outbox insertion timestamp (not the
         // message's createdAt) so the next replay starts from the right position.
-        const lastEnv = res.events[res.events.length - 1];
+        const lastEnv = events[events.length - 1];
         if (lastEnv) replayCursorRef.current = lastEnv.timestamp;
 
         // If nextCursor is null the server has fully caught us up — close the
         // barrier and flush any live events that queued during the sync window.
-        if (!res.nextCursor) {
+        if (!nextCursor) {
           socket.off(SYNC_EVENTS.REPLAY_RESPONSE, handleReplay);
           currentReplayHandler  = null;
           isSyncingRef.current  = false;
@@ -503,6 +500,57 @@ export default function ChatThreadPage() {
           for (const e of queued) { if (e.type === "delivered") applyMessageDelivered(e.payload); }
           for (const e of queued) { if (e.type === "read")      applyMessageRead(e.payload); }
         }
+      };
+
+      // Unblocks the UI on a total replay failure (socket AND HTTP fallback
+      // both failed) without silently pretending sync succeeded. Deliberately
+      // does NOT touch replayCursorRef — leaving the cursor where it is means
+      // the next genuine reconnect retries this exact missed window instead
+      // of skipping past it.
+      const abandonReplay = (reason: unknown) => {
+        console.error("[sync] replay failed on both the socket and HTTP fallback paths", reason);
+        setError("Some messages may be missing — check your connection.");
+        socket.off(SYNC_EVENTS.REPLAY_RESPONSE, handleReplay);
+        currentReplayHandler  = null;
+        isSyncingRef.current  = false;
+        const queued = syncQueueRef.current.splice(0);
+        for (const e of queued) { if (e.type === "new")       applyMessageNew(e.payload); }
+        for (const e of queued) { if (e.type === "edit")      applyMessageEdited(e.payload); }
+        for (const e of queued) { if (e.type === "delete")    applyMessageDeleted(e.payload); }
+        for (const e of queued) { if (e.type === "delivered") applyMessageDelivered(e.payload); }
+        for (const e of queued) { if (e.type === "read")      applyMessageRead(e.payload); }
+      };
+
+      const handleReplay = async (res: ReplayResponse) => {
+        // Stale check: a newer reconnect fired while this response was in
+        // flight. The new reconnect's handler will take over.
+        if (epoch !== getReconnectEpoch()) {
+          isSyncingRef.current = false;
+          syncQueueRef.current  = [];
+          return;
+        }
+
+        if (res.error) {
+          // The socket-side replay failed (see sync.socket.ts's
+          // REPLAY_REQUEST catch handler). nextCursor is null on this path
+          // too, but that must NOT be read as "fully caught up" — fall back
+          // to the HTTP replay endpoint per the documented contract instead
+          // of silently discarding the missed-event window.
+          try {
+            const fallback = await syncApi.replay(cursor, { conversationId });
+            if (epoch !== getReconnectEpoch()) {
+              isSyncingRef.current = false;
+              syncQueueRef.current  = [];
+              return;
+            }
+            applyReplayResult(fallback.events, fallback.nextCursor);
+          } catch (fallbackErr) {
+            abandonReplay(fallbackErr);
+          }
+          return;
+        }
+
+        applyReplayResult(res.events, res.nextCursor);
       };
 
       currentReplayHandler = handleReplay;

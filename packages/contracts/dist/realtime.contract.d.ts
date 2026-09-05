@@ -37,4 +37,5 @@ export type ReplayRequest = Static<typeof ReplayRequestSchema>;
 export type ReplayResponse = {
     events: EventEnvelope[];
     nextCursor: string | null;
+    error?: string;
 };

@@ -71,4 +71,10 @@ export type ReplayRequest = Static<typeof ReplayRequestSchema>;
 export type ReplayResponse = {
   events:     EventEnvelope[];
   nextCursor: string | null;  // ISO timestamp of last returned envelope, or null when fully caught up
+  // Set only when the server could not compute a replay (see sync.socket.ts's
+  // REPLAY_REQUEST catch handler) — events/nextCursor are the safe empty
+  // defaults in that case. `nextCursor: null` alone does NOT mean "fully
+  // synced": callers MUST check `error` before treating a response as caught
+  // up, and should fall back to POST /api/sync/replay when it's set.
+  error?: string;
 };
