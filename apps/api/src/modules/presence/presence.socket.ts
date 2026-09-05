@@ -23,17 +23,24 @@ export function registerPresenceSocket(
 ) {
   const service = new PresenceService(fastify);
 
-  void service.markOnline(userId);
+  // Fire-and-forget — but uncaught, a rejection here (e.g. a transient DB
+  // error, or the user's row vanishing mid-connect) would be an unhandled
+  // promise rejection, which by default crashes the whole process for every
+  // connected user, not just this one. Same defensive pattern as
+  // MessageService.sweepUndelivered in plugins/socket.ts.
+  void service.markOnline(userId).catch((err) => fastify.log.error({ err, userId }, "presence: markOnline failed"));
 
   socket.on(PRESENCE_EVENTS.PING, () => {
-    void service.pulse(userId);
+    void service.pulse(userId).catch((err) => fastify.log.error({ err, userId }, "presence: pulse failed"));
   });
 
   socket.on(PRESENCE_EVENTS.SYNC_REQUEST, (payload: PresenceSyncRequest) => {
     if (!Array.isArray(payload?.userIds)) return;
-    void service.getMany(payload.userIds).then((users) => {
-      socket.emit(PRESENCE_EVENTS.SYNC_RESPONSE, { users });
-    });
+    void service.getMany(payload.userIds)
+      .then((users) => {
+        socket.emit(PRESENCE_EVENTS.SYNC_RESPONSE, { users });
+      })
+      .catch((err) => fastify.log.error({ err, userId }, "presence: sync-request failed"));
   });
 
   socket.on("disconnect", () => {

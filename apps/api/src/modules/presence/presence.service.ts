@@ -76,7 +76,12 @@ export class PresenceService {
 
     const timer = setTimeout(() => {
       offlineTimers.delete(userId);
-      void this.checkAndMarkOffline(userId);
+      // Same fire-and-forget hazard as the socket-layer calls in
+      // presence.socket.ts — an uncaught rejection here would crash the
+      // whole process, not just fail this one offline check.
+      void this.checkAndMarkOffline(userId).catch((err) =>
+        this.fastify.log.error({ err, userId }, "presence: checkAndMarkOffline failed"),
+      );
     }, PRESENCE_GRACE_MS);
 
     // Don't hold the process open for pending grace timers during shutdown.
