@@ -101,7 +101,7 @@ const messageRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
         where: { conversationId },
         include: {
           sender:      { select: { id: true, username: true } },
-          replyTo:     { select: { id: true, body: true, type: true } },
+          replyTo:     { select: { id: true, body: true, type: true, isDeleted: true } },
           reactions:   { select: { emoji: true, userId: true } },
           reads:       { select: { readerId: true, readAt: true } },
           embed:       true,
@@ -140,7 +140,10 @@ const messageRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
           replyTo: m.replyTo
             ? {
                 messageId: m.replyTo.id,
-                preview:   m.replyTo.body ? m.replyTo.body.slice(0, 80) : null,
+                // Soft-delete only flips isDeleted — it never clears `body`, so
+                // this must re-check it rather than trusting the joined row's
+                // raw body (mirrors the `body: m.isDeleted ? null : m.body` above).
+                preview:   m.replyTo.isDeleted ? null : (m.replyTo.body ? m.replyTo.body.slice(0, 80) : null),
                 type:      m.replyTo.type,
               }
             : null,
@@ -215,7 +218,7 @@ const messageRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
           where: { senderId_clientMessageId: { senderId: callerId, clientMessageId: clientMsgId } },
           include: {
             sender:  { select: { username: true } },
-            replyTo: { select: { id: true, body: true, type: true } },
+            replyTo: { select: { id: true, body: true, type: true, isDeleted: true } },
           },
         });
       type ExistingMessage = NonNullable<Awaited<ReturnType<typeof findExistingByClientMessageId>>>;
@@ -226,8 +229,10 @@ const messageRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
         senderUsername: existing.sender.username,
         type:           "TEXT" as const,
         body:           existing.body!,
+        // See the GET list route's identical re-check — soft-delete never
+        // clears `body`, so a deleted parent's text must not leak here either.
         replyTo:        existing.replyTo
-          ? { messageId: existing.replyTo.id, preview: existing.replyTo.body?.slice(0, 80) ?? null, type: existing.replyTo.type }
+          ? { messageId: existing.replyTo.id, preview: existing.replyTo.isDeleted ? null : (existing.replyTo.body?.slice(0, 80) ?? null), type: existing.replyTo.type }
           : null,
         reactions:   {} as Record<string, number>,
         myReaction:  null as string | null,
@@ -280,7 +285,7 @@ const messageRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
               ...(clientMessageId ? { clientMessageId }  : {}),
             },
             include: {
-              replyTo: { select: { id: true, body: true, type: true } },
+              replyTo: { select: { id: true, body: true, type: true, isDeleted: true } },
               sender:  { select: { username: true } },
             },
           });
@@ -308,7 +313,7 @@ const messageRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
         type:           "TEXT" as const,
         body:           created.body!,
         replyTo: created.replyTo
-          ? { messageId: created.replyTo.id, preview: created.replyTo.body ? created.replyTo.body.slice(0, 80) : null, type: created.replyTo.type }
+          ? { messageId: created.replyTo.id, preview: created.replyTo.isDeleted ? null : (created.replyTo.body ? created.replyTo.body.slice(0, 80) : null), type: created.replyTo.type }
           : null,
         reactions:   {} as Record<string, number>,
         myReaction:  null as string | null,
@@ -508,7 +513,7 @@ const messageRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
             ...(deliveredAt ? { deliveredAt } : {}),
           },
           include: {
-            replyTo: { select: { id: true, body: true, type: true } },
+            replyTo: { select: { id: true, body: true, type: true, isDeleted: true } },
             sender:  { select: { username: true } },
           },
         });
@@ -557,7 +562,7 @@ const messageRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
         replyTo: created.replyTo
           ? {
               messageId: created.replyTo.id,
-              preview:   created.replyTo.body ? created.replyTo.body.slice(0, 80) : null,
+              preview:   created.replyTo.isDeleted ? null : (created.replyTo.body ? created.replyTo.body.slice(0, 80) : null),
               type:      created.replyTo.type,
             }
           : null,
