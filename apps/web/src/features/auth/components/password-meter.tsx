@@ -7,7 +7,7 @@ const MIN_LENGTH = 12;
 // 4-tier strength assessment. We weight length above character variety because
 // the spec's only hard requirement is the 12-char floor — anything past that
 // is bonus credit for diverse character classes.
-function score(password: string): { tier: 0 | 1 | 2 | 3 | 4; label: string; color: string } {
+export function score(password: string): { tier: 0 | 1 | 2 | 3 | 4; label: string; color: string } {
   if (password.length === 0) return { tier: 0, label: "—", color: "var(--color-text-muted)" };
   if (password.length < MIN_LENGTH) {
     return { tier: 1, label: `${MIN_LENGTH - password.length} more`, color: "var(--color-alert)" };
