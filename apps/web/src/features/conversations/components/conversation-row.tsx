@@ -10,7 +10,7 @@ export type { ConversationListItem };  // re-export so prior consumers via this 
 const mono = "var(--font-mono)";
 const display = "var(--font-display)";
 
-function formatTime(iso: string): string {
+export function formatTime(iso: string): string {
   const d = new Date(iso);
   const now = new Date();
   const sameDay = d.toDateString() === now.toDateString();
