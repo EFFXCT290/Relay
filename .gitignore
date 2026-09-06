@@ -25,6 +25,8 @@ pnpm-debug.log*
 # Testing
 coverage/
 .nyc_output/
+apps/api/test-results.xml
+apps/web/vitest-results.json
 
 # Cache
 .cache/
