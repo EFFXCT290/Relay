@@ -1,0 +1,185 @@
+name: Relay-CICD
+
+
+on:
+  push:
+    branches:
+      - main
+      - dev
+  pull_request:
+    branches:
+      - main
+
+jobs:
+
+  prerequisites:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      run: echo "Checking out code..."
+
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup pnpm
+      run: echo "Setting up pnpm..."
+
+    - name: Setup pnpm
+      uses: pnpm/action-setup@v4
+
+    - name: Setup Node.js
+      run: echo "Setting up Node.js..."
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '22'
+        cache: 'pnpm'
+
+    - name: Install dependencies
+      run: echo "Installing dependencies..."
+
+    - name: Install dependencies
+      run: pnpm install --frozen-lockfile
+
+
+  api-test:
+    runs-on: ubuntu-latest
+    needs: prerequisites
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_USER: relay_test
+          POSTGRES_PASSWORD: relay_test
+          POSTGRES_DB: relay_test
+        ports:
+          - "5432:5432"
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7-alpine
+        ports:
+          - "6379:6379"
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      bitnami-minio:
+        image: bitnami/minio:2025.7.23
+        env:
+          MINIO_ROOT_USER: relay_test
+          MINIO_ROOT_PASSWORD: relay_test
+        ports:
+          - "9000:9000"
+        options: >-
+          --health-cmd "curl -f http://localhost:9000/minio/health/live"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+    - name: Checkout code
+      run: echo "Checking out code..."
+
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup pnpm
+      run: echo "Setting up pnpm..."
+
+    - name: Setup pnpm
+      uses: pnpm/action-setup@v4
+
+    - name: Setup Node.js
+      run: echo "Setting up Node.js..."
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '22'
+        cache: 'pnpm'
+
+    - name: Install dependencies
+      run: echo "Installing dependencies..."
+
+    - name: Install dependencies
+      run: pnpm install --frozen-lockfile
+
+    - name: Install Minio Client
+      run: |
+        curl -O https://dl.min.io/client/mc/release/linux-amd64/mc
+        chmod +x mc
+        sudo mv mc /usr/local/bin/mc
+
+    - name: Configure Minio Client
+      run: |
+        mc alias set local http://localhost:9000 relay_test relay_test
+        mc mb --ignore-existing local/relay-test-bucket
+
+    - name: Prisma Deployment
+      run: pnpm --filter @relay/api run prisma:deploy
+      env:
+        DATABASE_URL: postgresql://relay_test:relay_test@localhost:5432/relay_test
+
+    - name: Run tests
+      # Bare `pnpm test` runs at the repo root by default, and the root
+      # package.json has no "test" script — it would fail immediately with
+      # "Missing script: test" without ever reaching apps/api's real suite.
+      # --filter matches the pattern the Prisma step above already uses.
+      run: pnpm --filter @relay/api run test
+      env:
+        DATABASE_URL: postgresql://relay_test:relay_test@localhost:5432/relay_test
+        REDIS_URL: redis://localhost:6379
+        MINIO_ENDPOINT: localhost
+        MINIO_PORT: 9000
+        MINIO_USE_SSL: "false"
+        MINIO_ACCESS_KEY: relay_test
+        MINIO_SECRET_KEY: relay_test
+        MINIO_BUCKET_MEDIA: relay-test-bucket
+        JWT_SECRET: test_jwt_secret
+        JWT_REFRESH_SECRET: test_jwt_refresh_secret
+        COOKIE_SECRET: test_cookie_secret
+
+  web-test:
+    runs-on: ubuntu-latest
+    needs: prerequisites
+    # apps/web's Vitest suite is fully mocked (fetch, localStorage,
+    # IntersectionObserver, MediaRecorder, RTCPeerConnection, socket.io, etc.
+    # all via vi.mock/vi.stubGlobal) — confirmed no test file references any
+    # real DATABASE_URL/REDIS_URL/MINIO_* host or env var. No services: block,
+    # no service-readiness steps needed; this job is just install + run.
+    steps:
+    - name: Checkout code
+      run: echo "Checking out code..."
+
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup pnpm
+      run: echo "Setting up pnpm..."
+
+    - name: Setup pnpm
+      uses: pnpm/action-setup@v4
+
+    - name: Setup Node.js
+      run: echo "Setting up Node.js..."
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '22'
+        cache: 'pnpm'
+
+    - name: Install dependencies
+      run: echo "Installing dependencies..."
+
+    - name: Install dependencies
+      run: pnpm install --frozen-lockfile
+
+    - name: Run tests
+      run: pnpm --filter @relay/web run test
