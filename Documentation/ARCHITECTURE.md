@@ -436,7 +436,7 @@ Ack              = { eventId, status: "ok" | "error", error? }
 | Replay socket       | `apps/api/src/modules/sync/sync.socket.ts` (`SYNC_EVENTS.REPLAY_REQUEST`) |
 | Client emitter      | `apps/web/src/frontend-core/reliable.ts` (`emitReliable`)   |
 | Client ACK listener | `apps/web/src/frontend-core/reliable.ts` (`bindAckListener`) |
-| Reconnect replay    | `apps/web/src/frontend-core/reliable.ts` (`bindReconnectReplay`) |
+| Reconnect replay    | `apps/web/src/app/(app)/conversations/[id]/page.tsx` (per-conversation reconnect handler) + `apps/web/src/frontend-core/api-client/sync.ts` (HTTP fallback) |
 
 ### Flow — happy path
 
@@ -453,10 +453,17 @@ Ack              = { eventId, status: "ok" | "error", error? }
 - If no Ack within `ACK_TIMEOUT_MS + backoff`, sender retries (up to
   `ACK_MAX_ATTEMPTS`). The server's `eventId` deduplication (TODO: enforce in
   `withAck`) keeps retries idempotent.
-- On reconnect, `bindReconnectReplay(getCursor, onEnvelope)` emits
-  `SYNC_EVENTS.REPLAY_REQUEST` with the last processed timestamp. Server
-  streams missed envelopes from `EventOutbox`. Client dispatches each through
-  the same handler it would have used live.
+- On reconnect, the conversation page's own handler (`app/(app)/conversations/[id]/page.tsx`)
+  emits `SYNC_EVENTS.REPLAY_REQUEST` with the last processed timestamp,
+  scoped to that conversation. Server streams missed envelopes from
+  `EventOutbox`. If the socket-side replay itself fails (`error` set on the
+  response — `nextCursor: null` alone does NOT mean "fully caught up"), the
+  client falls back to `POST /api/sync/replay` rather than silently treating
+  the failure as a successful sync. Client dispatches each envelope through
+  the same handlers it would have used live, ACKing as it goes.
+  (`reliable.ts` previously exposed a generic `bindReconnectReplay` helper
+  for this, but it had no callers and was removed — the page's own handler
+  is the actual, live implementation.)
 
 ### Pending work to make this fully live
 

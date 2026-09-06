@@ -5,11 +5,8 @@ import {
   ACK_EVENT,
   ACK_MAX_ATTEMPTS,
   ACK_TIMEOUT_MS,
-  SYNC_EVENTS,
   type Ack,
   type EventEnvelope,
-  type ReplayRequest,
-  type ReplayResponse,
 } from "@relay/contracts";
 import { getSocket } from "./socket";
 
@@ -29,9 +26,12 @@ import { getSocket } from "./socket";
 //     exponential backoff up to ACK_MAX_ATTEMPTS before rejecting.
 //   - bindAckListener(): registers the single 'ack' handler. Call once at
 //     app bootstrap (e.g. from NotificationsProvider or app shell).
-//   - bindReconnectReplay(getCursor, onEnvelope): on every reconnect, asks
-//     the server for events since the last cursor and dispatches each
-//     envelope as if it had arrived live.
+//
+// Reconnect replay itself is NOT implemented here — see the per-conversation
+// reconnect handler in app/(app)/conversations/[id]/page.tsx, which emits
+// SYNC_EVENTS.REPLAY_REQUEST directly and falls back to the HTTP replay
+// endpoint on a socket-side failure. A generic bindReconnectReplay() helper
+// used to live here but had no callers and was removed.
 // ─────────────────────────────────────────────────────────────────────────────
 
 type Pending = {
@@ -92,41 +92,4 @@ export function bindAckListener(): void {
     if (ack.status === "ok") p.resolve();
     else p.reject(new Error(ack.error?.message ?? `ACK error: ${ack.error?.code ?? "unknown"}`));
   });
-}
-
-// ── Reconnect-replay ────────────────────────────────────────────────────────
-// getCursor: returns the ISO timestamp of the last envelope the client
-//   successfully processed (read from localStorage or a store).
-// onEnvelope: called for each missed envelope so feature stores can dispatch
-//   them as if they'd arrived live.
-export function bindReconnectReplay(
-  getCursor:  () => string | null,
-  onEnvelope: (env: EventEnvelope) => void,
-): () => void {
-  const socket = getSocket();
-
-  const requestReplay = () => {
-    const since = getCursor();
-    if (!since) return;
-    const req: ReplayRequest = { since, limit: 500 };
-    socket.emit(SYNC_EVENTS.REPLAY_REQUEST, req);
-  };
-
-  const handleResponse = (res: ReplayResponse) => {
-    for (const env of res.events) onEnvelope(env);
-    // If nextCursor is non-null, more events remain — caller will be invoked
-    // again on the next reconnect tick. Future work: paginate within a single
-    // reconnect by re-emitting REPLAY_REQUEST with res.nextCursor.
-  };
-
-  socket.on("connect",                       requestReplay);
-  socket.on(SYNC_EVENTS.REPLAY_RESPONSE,     handleResponse);
-
-  // Fire once for the current session (in case we're already connected)
-  if (socket.connected) requestReplay();
-
-  return () => {
-    socket.off("connect",                    requestReplay);
-    socket.off(SYNC_EVENTS.REPLAY_RESPONSE,  handleResponse);
-  };
 }
