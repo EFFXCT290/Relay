@@ -111,6 +111,11 @@ jobs:
     - name: Install dependencies
       run: pnpm install --frozen-lockfile
 
+    - name: Install ffmpeg
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y ffmpeg
+
     - name: Install Minio Client
       run: |
         curl -sL -O https://dl.min.io/client/mc/release/linux-amd64/mc
