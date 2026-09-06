@@ -13,7 +13,7 @@ interface NotifyOptions {
   log:            { info: (obj: object, msg: string) => void };
 }
 
-function previewFor(messageType: NotifyOptions["messageType"], body: string | null): string {
+export function previewFor(messageType: NotifyOptions["messageType"], body: string | null): string {
   if (messageType === "TEXT" && body) {
     return body.length > 120 ? body.slice(0, 120) + "…" : body;
   }

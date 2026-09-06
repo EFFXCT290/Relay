@@ -7,6 +7,19 @@ interface NotifyOptions {
   log:            { info: (obj: object, msg: string) => void };
 }
 
+// Duplicated (not shared) with push-notify.ts's own previewFor() — same
+// truncation logic, kept as two independent implementations by design per
+// this project's test-coverage plan (a DRY consolidation is a refactor to
+// consider separately, not bundled with test coverage work).
+export function previewFor(messageType: NotifyOptions["messageType"], body: string | null): string {
+  return messageType === "TEXT" && body
+    ? body.length > 120 ? body.slice(0, 120) + "…" : body
+    : messageType === "IMAGE"  ? "📷 Image"
+    : messageType === "VIDEO"  ? "🎥 Video"
+    : messageType === "AUDIO"  ? "🎙️ Voice note"
+    : "(message)";
+}
+
 export async function maybeNotifyDiscord(opts: NotifyOptions): Promise<void> {
   // Read at call time so a server restart is not required after .env edits.
   const webhookUrl = process.env.DISCORD_WEBHOOK_URL;
@@ -25,15 +38,7 @@ export async function maybeNotifyDiscord(opts: NotifyOptions): Promise<void> {
     return;
   }
 
-  const preview =
-    opts.messageType === "TEXT" && opts.body
-      ? opts.body.length > 120
-        ? opts.body.slice(0, 120) + "…"
-        : opts.body
-      : opts.messageType === "IMAGE"  ? "📷 Image"
-      : opts.messageType === "VIDEO"  ? "🎥 Video"
-      : opts.messageType === "AUDIO"  ? "🎙️ Voice note"
-      : "(message)";
+  const preview = previewFor(opts.messageType, opts.body);
 
   try {
     const res = await fetch(webhookUrl, {
