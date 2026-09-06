@@ -75,7 +75,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
 // Mobile bottom padding clears the tab bar — except on chat-thread routes,
 // where the composer pins the bottom edge and the tab bar is hidden.
-function ChatAwareMain({ children }: { children: React.ReactNode }) {
+export function ChatAwareMain({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const isChatThread =
     /^\/conversations\/[^/]+(?:\/.*)?$/.test(pathname) && pathname !== "/conversations/new";
