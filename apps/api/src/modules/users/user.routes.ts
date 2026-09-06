@@ -101,7 +101,7 @@ const userRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
 
       let key: string;
       try {
-        key = await putAvatar({ userId, buffer, mimeType: data.mimetype, prisma: fastify.prisma, s3: fastify.s3 });
+        key = await putAvatar({ userId, buffer, mimeType: data.mimetype, prisma: fastify.prisma, s3: fastify.s3, log: fastify.log });
       } catch (err) {
         if (err instanceof AvatarBadFormatError) throw new ProblemError("validation_error", err.message);
         if (err instanceof AvatarTooLargeError)  throw new ProblemError("validation_error", err.message);
@@ -123,7 +123,7 @@ const userRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
     },
     async (request) => {
       const userId = request.userId!;
-      await clearAvatar({ userId, prisma: fastify.prisma, s3: fastify.s3 });
+      await clearAvatar({ userId, prisma: fastify.prisma, s3: fastify.s3, log: fastify.log });
       await broadcastProfileUpdate(fastify, userId, null);
       return { avatarUrl: null };
     },

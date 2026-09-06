@@ -9,6 +9,7 @@ import { randomBytes } from "node:crypto";
 import sharp from "sharp";
 import { PutObjectCommand, DeleteObjectCommand, type S3Client } from "@aws-sdk/client-s3";
 import type { PrismaClient } from "@prisma/client";
+import type { FastifyBaseLogger } from "fastify";
 import { env } from "../../backend-core/runtime/env.js";
 
 // Accept only what the browser's canvas re-encoder emits — it normalizes any
@@ -60,8 +61,12 @@ export async function processAvatar(buffer: Buffer): Promise<Buffer> {
  *
  * Order matters: the new object is written and the row updated before the old
  * object is removed, so a crash mid-flight never leaves the row pointing at a
- * deleted key. Old-object cleanup failures are swallowed — a stray orphan is
- * harmless (the gc:orphan sweep is the backstop) and must not fail the update.
+ * deleted key. Old-object cleanup failures are swallowed and must not fail the
+ * update — but they are NOT swept up later: gc-orphan-media.ts only scans the
+ * images/videos/voice prefixes against the Media table, and avatars are
+ * deliberately not Media rows (see the file banner) — a failed delete here
+ * orphans that object in MinIO permanently. Logged (not silently dropped) so
+ * a failure is at least visible; there is no automated cleanup for it yet.
  */
 export async function putAvatar(opts: {
   userId:   string;
@@ -69,8 +74,9 @@ export async function putAvatar(opts: {
   mimeType: string;
   prisma:   PrismaClient;
   s3:       S3Client;
+  log?:     FastifyBaseLogger;
 }): Promise<string> {
-  const { userId, buffer, mimeType, prisma, s3 } = opts;
+  const { userId, buffer, mimeType, prisma, s3, log } = opts;
 
   if (!isAllowedAvatarMime(mimeType)) {
     throw new AvatarBadFormatError("Unsupported image format. Use JPEG, PNG, or WEBP.");
@@ -100,7 +106,7 @@ export async function putAvatar(opts: {
   await prisma.user.update({ where: { id: userId }, data: { avatarKey: key } });
 
   if (prev?.avatarKey && prev.avatarKey !== key) {
-    await deleteObjectQuietly(s3, prev.avatarKey);
+    await deleteObjectQuietly(s3, prev.avatarKey, log);
   }
   return key;
 }
@@ -111,20 +117,25 @@ export async function clearAvatar(opts: {
   userId: string;
   prisma: PrismaClient;
   s3:     S3Client;
+  log?:   FastifyBaseLogger;
 }): Promise<string | null> {
-  const { userId, prisma, s3 } = opts;
+  const { userId, prisma, s3, log } = opts;
   const prev = await prisma.user.findUnique({ where: { id: userId }, select: { avatarKey: true } });
   if (!prev?.avatarKey) return null;
 
   await prisma.user.update({ where: { id: userId }, data: { avatarKey: null } });
-  await deleteObjectQuietly(s3, prev.avatarKey);
+  await deleteObjectQuietly(s3, prev.avatarKey, log);
   return prev.avatarKey;
 }
 
-async function deleteObjectQuietly(s3: S3Client, key: string): Promise<void> {
+// Best-effort — a failure here must never fail the caller's update, but it
+// IS logged: there is no sweep that will ever find and remove this object
+// later (see putAvatar's doc comment), so a silent failure here would be
+// permanently invisible, not just permanently orphaned.
+async function deleteObjectQuietly(s3: S3Client, key: string, log?: FastifyBaseLogger): Promise<void> {
   try {
     await s3.send(new DeleteObjectCommand({ Bucket: env.MINIO_BUCKET, Key: key }));
-  } catch {
-    /* orphan cleanup is best-effort; the gc:orphan sweep is the backstop */
+  } catch (err) {
+    log?.warn({ err, key }, "avatar: failed to delete old avatar object — orphaned in MinIO with no automated cleanup");
   }
 }
