@@ -16,6 +16,6 @@
     "types": ["node"],
     "lib": ["DOM", "DOM.Iterable", "ES2023"]
   },
-  "include": ["next-env.d.ts", "src/**/*.ts", "src/**/*.tsx", ".next/types/**/*.ts"],
+  "include": ["next-env.d.ts", "src/**/*.ts", "src/**/*.tsx", ".next/types/**/*.ts", "vitest.config.ts", "vitest.setup.ts"],
   "exclude": ["node_modules"]
 }
