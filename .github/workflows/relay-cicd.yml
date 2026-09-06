@@ -122,16 +122,17 @@ jobs:
         mc alias set local http://localhost:9000 relay_test relay_test
         mc mb --ignore-existing local/relay-test-bucket
 
+    - name: Prisma Generate
+      run: pnpm --filter @relay/api run prisma:generate
+      env:
+        DATABASE_URL: postgresql://relay_test:relay_test@localhost:5432/relay_test
+
     - name: Prisma Deployment
       run: pnpm --filter @relay/api run prisma:deploy
       env:
         DATABASE_URL: postgresql://relay_test:relay_test@localhost:5432/relay_test
 
     - name: Run tests
-      # Bare `pnpm test` runs at the repo root by default, and the root
-      # package.json has no "test" script — it would fail immediately with
-      # "Missing script: test" without ever reaching apps/api's real suite.
-      # --filter matches the pattern the Prisma step above already uses.
       run: pnpm --filter @relay/api run test
       env:
         DATABASE_URL: postgresql://relay_test:relay_test@localhost:5432/relay_test
@@ -149,11 +150,6 @@ jobs:
   web-test:
     runs-on: ubuntu-latest
     needs: prerequisites
-    # apps/web's Vitest suite is fully mocked (fetch, localStorage,
-    # IntersectionObserver, MediaRecorder, RTCPeerConnection, socket.io, etc.
-    # all via vi.mock/vi.stubGlobal) — confirmed no test file references any
-    # real DATABASE_URL/REDIS_URL/MINIO_* host or env var. No services: block,
-    # no service-readiness steps needed; this job is just install + run.
     steps:
     - name: Checkout code
       run: echo "Checking out code..."
