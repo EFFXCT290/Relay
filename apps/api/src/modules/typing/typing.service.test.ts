@@ -113,6 +113,41 @@ describe("typing.service", () => {
     await fastify._close();
   });
 
+  it("an expired entry survives every EARLIER sweep tick untouched, and is cleared only by the tick that actually reaches its expiry", async () => {
+    mock.timers.enable({ apis: ["Date", "setInterval", "setTimeout"] });
+    const svc = await freshService();
+    const fastify = makeFastify();
+    svc.startTypingSweep(fastify); // interval scheduled off t=0: ticks at 1×, 2×, 3× ... TYPING_SWEEP_INTERVAL_MS
+    svc.typingStart(fastify, "conv-1", "user-a", "sock-a"); // expiresAt = TYPING_TIMEOUT_MS
+
+    // Advance ONE sweep interval at a time (not one large multi-interval
+    // tick) — node:test's mock timers advance Date.now() to the tick's full
+    // target before running any due callbacks in that span, so a single
+    // tick() spanning several interval periods would make an EARLIER
+    // firing incorrectly observe the LATER, already-advanced clock. Single-
+    // interval steps keep each firing's Date.now() exactly at its own
+    // boundary, so this genuinely proves each of the (TYPING_TIMEOUT_MS /
+    // TYPING_SWEEP_INTERVAL_MS - 1) sweep ticks BEFORE expiry leaves the
+    // entry untouched.
+    const ticksBeforeExpiry = TYPING_TIMEOUT_MS / TYPING_SWEEP_INTERVAL_MS - 1;
+    for (let i = 1; i <= ticksBeforeExpiry; i++) {
+      mock.timers.tick(TYPING_SWEEP_INTERVAL_MS);
+      assert.equal(
+        fastify._emitted.filter((e) => e.payload.isTyping === false).length,
+        0,
+        `must still be active after sweep tick #${i} (t=${i * TYPING_SWEEP_INTERVAL_MS}ms), before expiry at t=${TYPING_TIMEOUT_MS}ms`,
+      );
+    }
+
+    // The next tick lands exactly at expiresAt — this is the one that clears it.
+    mock.timers.tick(TYPING_SWEEP_INTERVAL_MS);
+    const stopEvent = fastify._emitted.find((e) => e.payload.isTyping === false);
+    assert.ok(stopEvent, "the sweep tick reaching expiresAt must clear the now-expired entry");
+    assert.equal(stopEvent!.payload.userId, "user-a");
+
+    await fastify._close();
+  });
+
   it("a steady typer past the timeout stays active when refreshed within the window", async () => {
     mock.timers.enable({ apis: ["Date", "setInterval", "setTimeout"] });
     const svc = await freshService();
