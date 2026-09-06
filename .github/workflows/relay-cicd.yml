@@ -70,13 +70,14 @@ jobs:
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
-      bitnami-minio:
-        image: bitnami/minio:2025.7.23
+      minio:
+        image: minio/minio:RELEASE.2025-09-07T16-13-09Z
         env:
           MINIO_ROOT_USER: relay_test
           MINIO_ROOT_PASSWORD: relay_test
         ports:
           - "9000:9000"
+        command: server /data
         options: >-
           --health-cmd "curl -f http://localhost:9000/minio/health/live"
           --health-interval 10s
