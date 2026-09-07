@@ -30,21 +30,12 @@ const mediaRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
       // Trust a recognized browser MIME; otherwise sniff the extension (DNG/.mov
       // often arrive as octet-stream/empty).
       const mimeType = resolveUploadMime(data.mimetype, data.filename);
-      // TEMP DEBUG - remove before commit
-      console.log("[media.upload DEBUG]", JSON.stringify({
-        rawMimetype: data.mimetype,
-        rawFilename: data.filename,
-        rawFieldname: data.fieldname,
-        resolvedMimeType: mimeType,
-      }));
       const buffer   = await data.toBuffer();
 
       if (buffer.length === 0) throw new ProblemError("bad_request", "Empty file.");
 
       const clientUploadId = (request.headers["x-upload-id"] as string | undefined) ?? null;
       const kind           = mediaKindFromMime(mimeType);
-      // TEMP DEBUG - remove before commit
-      console.log("[media.upload DEBUG] kind resolved to:", kind);
 
       // Phase 6B: client picks delivery mode in the composer. Default optimized;
       // the server may auto-promote to lss (DNG/HEVC). Anything else is rejected.
@@ -80,6 +71,9 @@ const mediaRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
         }
         if (code === "ECONNREFUSED" || code === "ENOTFOUND") {
           throw new ProblemError("internal_error", "Storage is temporarily unavailable. Try again shortly.");
+        }
+        if (code === "processing_unavailable") {
+          throw new ProblemError("internal_error", "Video processing is temporarily unavailable. Try again shortly.");
         }
         throw err;
       }

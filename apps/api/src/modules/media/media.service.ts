@@ -244,7 +244,19 @@ export async function uploadVideo(
   let probe;
   try {
     probe = await probeVideo(buffer);
-  } catch {
+  } catch (err) {
+    const cause = err as NodeJS.ErrnoException;
+    // Always surface the real cause — a missing/misconfigured ffprobe binary
+    // (ENOENT) looks identical to a genuinely corrupt file from here unless
+    // logged explicitly (this exact class of bug cost a multi-round
+    // investigation before the underlying ENOENT was found).
+    console.error("[uploadVideo] probeVideo failed:", cause.code ?? "(no code)", cause.message);
+    // ENOENT means ffprobe itself couldn't be found/run — an infra problem,
+    // not something wrong with the uploaded file. Don't lump it in with
+    // unsupported_mime, which tells the user their FILE is the problem.
+    if (cause.code === "ENOENT") {
+      throw Object.assign(new Error("Video processing is temporarily unavailable"), { code: "processing_unavailable" });
+    }
     throw Object.assign(new Error("Unreadable video"), { code: "unsupported_mime" });
   }
 

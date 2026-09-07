@@ -29,7 +29,7 @@ RUN cd apps/api && pnpm prisma generate && pnpm build
 FROM node:22-alpine AS runtime
 WORKDIR /repo
 ENV NODE_ENV=production
-RUN apk add --no-cache tini
+RUN apk add --no-cache tini ffmpeg
 COPY --from=build /repo/node_modules ./node_modules
 COPY --from=build /repo/apps/api/node_modules ./apps/api/node_modules
 COPY --from=build /repo/apps/api/dist ./apps/api/dist
