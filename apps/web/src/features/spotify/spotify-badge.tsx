@@ -22,7 +22,12 @@ function relativeTime(iso: string): string {
 // A small "now playing / last played" badge for a user's profile. Renders
 // nothing when there's no badge to show (not connected, hidden, or quiet for
 // 24h+) — the caller doesn't need to know which of those it is.
-export function SpotifyBadge({ userId }: { userId: string }) {
+//
+// `compact` swaps the default two-line pill (art + track/artist stacked) for
+// a single truncated text line — for spots like the thread header where it
+// has to sit inline next to other text, not on its own row. Same data
+// fetch/poll either way; only the rendering branches.
+export function SpotifyBadge({ userId, compact }: { userId: string; compact?: boolean }) {
   const [badge, setBadge] = useState<SpotifyBadgeData | null>(null);
   const [loaded, setLoaded] = useState(false);
 
@@ -47,6 +52,25 @@ export function SpotifyBadge({ userId }: { userId: string }) {
   }, [userId]);
 
   if (!loaded || !badge) return null;
+
+  if (compact) {
+    const compactContent = (
+      <span
+        className="flex min-w-0 items-center gap-1 truncate text-[10px] tracking-[0.04em]"
+        style={{ fontFamily: mono, color: badge.isPlaying ? "#1ed760" : "var(--color-text-muted)" }}
+      >
+        <Music2 className="h-2.5 w-2.5 shrink-0" />
+        <span className="truncate">{badge.trackName}</span>
+      </span>
+    );
+    return badge.trackUrl ? (
+      <a href={badge.trackUrl} target="_blank" rel="noreferrer" className="min-w-0 truncate">
+        {compactContent}
+      </a>
+    ) : (
+      compactContent
+    );
+  }
 
   const content = (
     <div

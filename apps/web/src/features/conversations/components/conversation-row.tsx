@@ -89,10 +89,12 @@ export function ConversationRow({ conversation }: { conversation: ConversationLi
         </div>
 
         {/* Spotify "now playing" — typing always wins, so this never renders
-            alongside or in place of the typing indicator above. */}
+            alongside or in place of the typing indicator above. Desktop only
+            (lg+, same breakpoint sidebar-nav/bottom-tab-bar use for mobile vs
+            desktop) — hidden entirely on narrow/mobile viewports. */}
         {!isTyping && spotify && (
-          <span className="truncate text-sm text-[var(--color-text-muted)]">
-            🎵 {spotify.trackName}
+          <span className="hidden truncate text-sm text-[var(--color-text-muted)] lg:block">
+            {spotify.trackName}
           </span>
         )}
       </div>

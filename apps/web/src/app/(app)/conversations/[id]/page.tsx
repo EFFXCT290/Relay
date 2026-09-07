@@ -1334,18 +1334,20 @@ export default function ChatThreadPage() {
                 >
                   @{detail.participant.username}
                 </span>
-                <span
-                  className="text-[10px] tracking-[0.04em]"
-                  style={{
-                    color: detail.participant.isOnline
-                      ? "var(--color-online)"
-                      : "var(--color-text-muted)",
-                    fontFamily: mono,
-                  }}
-                >
-                  {formatLastSeen(detail.participant.lastSeenAt, detail.participant.isOnline)}
-                </span>
-                <SpotifyBadge userId={detail.participant.userId} />
+                <div className="flex min-w-0 items-center gap-1.5">
+                  <span
+                    className="shrink-0 text-[10px] tracking-[0.04em]"
+                    style={{
+                      color: detail.participant.isOnline
+                        ? "var(--color-online)"
+                        : "var(--color-text-muted)",
+                      fontFamily: mono,
+                    }}
+                  >
+                    {formatLastSeen(detail.participant.lastSeenAt, detail.participant.isOnline)}
+                  </span>
+                  <SpotifyBadge userId={detail.participant.userId} compact />
+                </div>
               </div>
             </>
           ) : (
