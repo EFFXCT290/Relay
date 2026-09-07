@@ -29,6 +29,7 @@ import { ImageLightbox, type LightboxState } from "@/features/messages/component
 import { EphemeralViewer } from "@/features/messages/components/ephemeral-viewer";
 import { ACK_EVENT, MEDIA_EVENTS, VOICE_EVENTS, PRESENCE_EVENTS, SYNC_EVENTS, TYPING_EVENTS, USER_EVENTS, type MediaReadyEvent, type MediaProcessedEvent, type MediaViewedEvent, type VoiceTranscriptReadyEvent, type ImageAttachment, type VideoAttachment, type MediaViewResponse, type DeliveryMode, type EphemeralSend, type PresenceSyncResponse, type ReplayResponse, type TypingSyncResponse, type UserProfileUpdatedEvent } from "@relay/contracts";
 import { formatLastSeen } from "@/frontend-core/format-presence";
+import { SpotifyBadge } from "@/features/spotify/spotify-badge";
 import { useCall } from "@/features/calls/call-provider";
 import { useMe } from "@/providers/me-provider";
 
@@ -1344,6 +1345,7 @@ export default function ChatThreadPage() {
                 >
                   {formatLastSeen(detail.participant.lastSeenAt, detail.participant.isOnline)}
                 </span>
+                <SpotifyBadge userId={detail.participant.userId} />
               </div>
             </>
           ) : (

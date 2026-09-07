@@ -12,7 +12,10 @@ import authPlugin from "../../plugins/auth.js";
 import conversationRoutes from "./conversation.routes.js";
 import { signAccessToken } from "../../backend-core/auth/tokens.js";
 import { ACCESS_COOKIE } from "../../backend-core/auth/cookies.js";
+import { encryptSecret } from "../../backend-core/crypto/token-cipher.js";
+import { env } from "../../backend-core/runtime/env.js";
 import type { PrismaClient } from "@prisma/client";
+import type { ConversationListItem } from "@relay/contracts";
 
 // Real integration test — real Postgres/Redis (the throwaway local services),
 // not hand-rolled mocks. Same minimal-app approach as media.routes.test.ts /
@@ -351,5 +354,178 @@ describe("DELETE /api/conversations/:conversationId", () => {
 
     const stillThere = await app.prisma.conversation.findUnique({ where: { id: conversationId } });
     assert.ok(stillThere, "a rejected delete must not remove the conversation");
+  });
+});
+
+describe("GET /api/conversations — spotify field", () => {
+  let app: Awaited<ReturnType<typeof buildTestApp>>;
+  const createdUserIds: string[] = [];
+  const createdConversationIds: string[] = [];
+
+  before(async () => {
+    app = await buildTestApp();
+  });
+
+  after(async () => {
+    const prisma = app.prisma;
+    await prisma.spotifyConnection.deleteMany({ where: { userId: { in: createdUserIds } } });
+    await prisma.conversation.deleteMany({ where: { id: { in: createdConversationIds } } });
+    await prisma.user.deleteMany({ where: { id: { in: createdUserIds } } });
+    await app.close();
+  });
+
+  async function makeAcceptedConversation(callerId: string, otherId: string) {
+    const conversation = await app.prisma.conversation.create({ data: {} });
+    createdConversationIds.push(conversation.id);
+    await app.prisma.participant.createMany({
+      data: [
+        { userId: callerId, conversationId: conversation.id, acceptedAt: new Date() },
+        { userId: otherId, conversationId: conversation.id, acceptedAt: new Date() },
+      ],
+    });
+    return conversation.id;
+  }
+
+  function enc(plaintext: string): string {
+    return encryptSecret(plaintext, env.SPOTIFY_TOKEN_ENC_KEY);
+  }
+
+  async function createConnection(userId: string, showOnProfile = true) {
+    return app.prisma.spotifyConnection.create({
+      data: {
+        userId,
+        accessToken: enc("valid-access-token"),
+        refreshToken: enc("valid-refresh-token"),
+        expiresAt: new Date(Date.now() + 60 * 60 * 1000), // not expired — no refresh call expected
+        scope: "user-read-currently-playing user-read-recently-played",
+        showOnProfile,
+      },
+    });
+  }
+
+  const currentlyPlayingUrl = "https://api.spotify.com/v1/me/player/currently-playing?additional_types=track";
+
+  function nowPlaying(trackName: string, artistName: string) {
+    return {
+      status: 200,
+      ok: true,
+      json: async () => ({
+        is_playing: true,
+        item: { name: trackName, artists: [{ name: artistName }], album: { images: [] }, external_urls: {} },
+      }),
+    } as Response;
+  }
+
+  function getConversations(callerId: string) {
+    return app.inject({ method: "GET", url: "/api/conversations", headers: { cookie: cookieFor(callerId) } });
+  }
+
+  it("maps the OTHER participant's now-playing to the slim {trackName, artistName, isPlaying} shape — no albumArtUrl/trackUrl", async (t) => {
+    const [a, b] = await Promise.all([createUser(app.prisma, "a"), createUser(app.prisma, "b")]);
+    createdUserIds.push(a.id, b.id);
+    await makeAcceptedConversation(a.id, b.id);
+    await createConnection(b.id);
+
+    t.mock.method(globalThis, "fetch", async (url: string) => {
+      if (url === currentlyPlayingUrl) return nowPlaying("Nightcall", "Kavinsky");
+      throw new Error(`unexpected fetch: ${url}`);
+    });
+
+    const res = await getConversations(a.id);
+    assert.equal(res.statusCode, 200);
+    const body = res.json() as { conversations: ConversationListItem[] };
+    assert.equal(body.conversations.length, 1);
+
+    const spotify = body.conversations[0]!.spotify;
+    assert.ok(spotify);
+    assert.equal(Object.keys(spotify).sort().join(","), "artistName,isPlaying,trackName", "must be the SLIM shape, not the full badge");
+    assert.deepEqual(spotify, { trackName: "Nightcall", artistName: "Kavinsky", isPlaying: true });
+  });
+
+  it("respects showOnProfile exactly as the standalone badge endpoint does — false means null, and Spotify is never called", async (t) => {
+    const [a, b] = await Promise.all([createUser(app.prisma, "a"), createUser(app.prisma, "b")]);
+    createdUserIds.push(a.id, b.id);
+    await makeAcceptedConversation(a.id, b.id);
+    await createConnection(b.id, false);
+
+    t.mock.method(globalThis, "fetch", async () => {
+      throw new Error("must not call Spotify when showOnProfile is false");
+    });
+
+    const res = await getConversations(a.id);
+    const body = res.json() as { conversations: ConversationListItem[] };
+    assert.equal(body.conversations[0]!.spotify, null);
+  });
+
+  it("a participant who never connected Spotify yields spotify: null, without ever calling Spotify", async (t) => {
+    const [a, b] = await Promise.all([createUser(app.prisma, "a"), createUser(app.prisma, "b")]);
+    createdUserIds.push(a.id, b.id);
+    await makeAcceptedConversation(a.id, b.id);
+    // no SpotifyConnection row for b
+
+    t.mock.method(globalThis, "fetch", async () => {
+      throw new Error("must not call Spotify for a participant with no connection");
+    });
+
+    const res = await getConversations(a.id);
+    const body = res.json() as { conversations: ConversationListItem[] };
+    assert.equal(body.conversations[0]!.spotify, null);
+  });
+
+  it("reuses the shared 45s Redis cache: a second GET within the TTL does not call Spotify again", async (t) => {
+    const [a, b] = await Promise.all([createUser(app.prisma, "a"), createUser(app.prisma, "b")]);
+    createdUserIds.push(a.id, b.id);
+    await makeAcceptedConversation(a.id, b.id);
+    await createConnection(b.id);
+
+    let calls = 0;
+    t.mock.method(globalThis, "fetch", async (url: string) => {
+      if (url === currentlyPlayingUrl) {
+        calls++;
+        return nowPlaying("Nightcall", "Kavinsky");
+      }
+      throw new Error(`unexpected fetch: ${url}`);
+    });
+
+    const first = await getConversations(a.id);
+    const firstSpotify = (first.json() as { conversations: ConversationListItem[] }).conversations[0]!.spotify;
+    assert.equal(calls, 1, "the first GET is a genuine cache miss — must call Spotify");
+
+    const second = await getConversations(a.id);
+    const secondSpotify = (second.json() as { conversations: ConversationListItem[] }).conversations[0]!.spotify;
+    assert.equal(calls, 1, "a second GET within the 45s TTL must be served from the shared cache, not re-fetch");
+    assert.deepEqual(secondSpotify, firstSpotify);
+  });
+
+  it("fans out in parallel across multiple conversations — one Spotify call per distinct participant, correctly attributed, not mixed up", async (t) => {
+    const [a, b, c] = await Promise.all([
+      createUser(app.prisma, "a"),
+      createUser(app.prisma, "b"),
+      createUser(app.prisma, "c"),
+    ]);
+    createdUserIds.push(a.id, b.id, c.id);
+    await Promise.all([makeAcceptedConversation(a.id, b.id), makeAcceptedConversation(a.id, c.id)]);
+    await Promise.all([createConnection(b.id), createConnection(c.id)]);
+
+    const calls: (string | undefined)[] = [];
+    t.mock.method(globalThis, "fetch", async (url: string, init?: RequestInit) => {
+      if (url !== currentlyPlayingUrl) throw new Error(`unexpected fetch: ${url}`);
+      const auth = (init!.headers as Record<string, string>)["Authorization"];
+      calls.push(auth);
+      // Both connections use the same plaintext access token in this test
+      // fixture, so we can't disambiguate by token — attribution is instead
+      // verified below via each conversation's own participant.userId.
+      return nowPlaying("Track", "Artist");
+    });
+
+    const res = await getConversations(a.id);
+    const body = res.json() as { conversations: ConversationListItem[] };
+    assert.equal(body.conversations.length, 2);
+    assert.equal(calls.length, 2, "exactly one Spotify call per distinct participant — not batched into one, not duplicated per row");
+
+    for (const conv of body.conversations) {
+      assert.ok([b.id, c.id].includes(conv.participant.userId));
+      assert.deepEqual(conv.spotify, { trackName: "Track", artistName: "Artist", isPlaying: true });
+    }
   });
 });

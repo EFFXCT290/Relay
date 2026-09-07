@@ -32,3 +32,11 @@ export const SpotifyConnectionStatusSchema = Type.Object({
 export const UpdateSpotifyPreferencesPayloadSchema = Type.Object({
     showOnProfile: Type.Boolean(),
 });
+// ── Conversation-list summary ───────────────────────────────────────────────
+// Deliberately smaller than SpotifyBadge — no albumArtUrl/trackUrl — since this
+// rides along on every GET /api/conversations response, one per row.
+export const SpotifyConversationSummarySchema = Type.Object({
+    trackName: Type.String(),
+    artistName: Type.String(),
+    isPlaying: Type.Boolean(),
+});

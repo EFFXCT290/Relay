@@ -1,13 +1,14 @@
 import type { FastifyPluginAsyncTypebox } from "@fastify/type-provider-typebox";
 import { Type } from "@sinclair/typebox";
 import { ProblemError } from "../../backend-core/http/errors.js";
-import { MESSAGE_EVENTS } from "@relay/contracts";
+import { MESSAGE_EVENTS, SpotifyConversationSummarySchema, type SpotifyConversationSummary } from "@relay/contracts";
 import {
   emitConversationAccepted,
   emitConversationDeleted,
   emitConversationRequest,
 } from "./conversation.socket.js";
 import { PresenceService } from "../presence/presence.service.js";
+import { SpotifyService } from "../spotify/spotify.service.js";
 
 const ParticipantSchema = Type.Object({
   userId:     Type.String({ format: "uuid" }),
@@ -28,6 +29,37 @@ async function presencesFor(
   return new Map(results.map((r) => [r.userId, r]));
 }
 
+// Batch "now playing" for the list. Each lookup goes through
+// SpotifyService.getBadgeForUser() — the SAME method the standalone badge
+// endpoint uses — which checks the 45s Redis cache FIRST and only calls
+// Spotify's API on a genuine miss. Running it once per conversation here
+// therefore still hits that one shared cache; it does not bypass it or stand
+// up a second cache layer, and repeat views within the TTL cost a Redis GET
+// per participant, not a Spotify API call. Lookups fan out via Promise.all,
+// so N conversations cost one round trip's worth of latency, not N
+// sequential ones. showOnProfile / 24h-hide / needsReconnect are already
+// enforced inside getBadgeForUser — this only reshapes its result down to
+// the slim {trackName, artistName, isPlaying} shape this list needs, it does
+// not re-implement any of that logic.
+async function spotifySummariesFor(
+  fastify: import("fastify").FastifyInstance,
+  userIds: string[],
+): Promise<Map<string, SpotifyConversationSummary | null>> {
+  if (userIds.length === 0) return new Map();
+  const service = new SpotifyService(fastify.prisma, fastify.redis, fastify.log);
+  const uniqueIds = [...new Set(userIds)];
+  const entries = await Promise.all(
+    uniqueIds.map(async (id): Promise<[string, SpotifyConversationSummary | null]> => {
+      const badge = await service.getBadgeForUser(id);
+      return [
+        id,
+        badge ? { trackName: badge.trackName, artistName: badge.artistName, isPlaying: badge.isPlaying } : null,
+      ];
+    }),
+  );
+  return new Map(entries);
+}
+
 const ListItemSchema = Type.Object({
   conversationId: Type.String({ format: "uuid" }),
   participant: ParticipantSchema,
@@ -41,6 +73,10 @@ const ListItemSchema = Type.Object({
     }),
   ]),
   unreadCount: Type.Integer({ minimum: 0 }),
+  // Optional: only GET /conversations populates this (see spotifySummariesFor
+  // below); GET /conversations/requests shares this same schema and simply
+  // omits the field rather than paying for a lookup pending requests don't need.
+  spotify: Type.Optional(Type.Union([SpotifyConversationSummarySchema, Type.Null()])),
   updatedAt: Type.String({ format: "date-time" }),
 });
 
@@ -205,9 +241,10 @@ const conversationRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
         return other?.userId ?? callerId;
       });
 
-      const [unreadCounts, presences] = await Promise.all([
+      const [unreadCounts, presences, spotifies] = await Promise.all([
         unreadCountsFor(fastify, callerId, slice.map((c) => c.id)),
         presencesFor(fastify, otherIds),
+        spotifySummariesFor(fastify, otherIds),
       ]);
 
       return {
@@ -230,6 +267,7 @@ const conversationRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
                 }
               : null,
             unreadCount: unreadCounts.get(c.id) ?? 0,
+            spotify: spotifies.get(other?.userId ?? callerId) ?? null,
             updatedAt: c.updatedAt.toISOString(),
           };
         })),

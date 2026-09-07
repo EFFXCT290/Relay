@@ -32,3 +32,9 @@ export declare const UpdateSpotifyPreferencesPayloadSchema: import("@sinclair/ty
     showOnProfile: import("@sinclair/typebox").TBoolean;
 }>;
 export type UpdateSpotifyPreferencesPayload = Static<typeof UpdateSpotifyPreferencesPayloadSchema>;
+export declare const SpotifyConversationSummarySchema: import("@sinclair/typebox").TObject<{
+    trackName: import("@sinclair/typebox").TString;
+    artistName: import("@sinclair/typebox").TString;
+    isPlaying: import("@sinclair/typebox").TBoolean;
+}>;
+export type SpotifyConversationSummary = Static<typeof SpotifyConversationSummarySchema>;

@@ -1,5 +1,6 @@
 // CONTRACT CATEGORY: domain
 import { Type, type Static } from "@sinclair/typebox";
+import { SpotifyConversationSummarySchema } from "./spotify.contract.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Conversations source of truth. The frontend list uses `ConversationListItem`
@@ -32,6 +33,12 @@ export const ConversationListItemSchema = Type.Object({
   unreadCount:    Type.Optional(Type.Number()),
   isTyping:       Type.Optional(Type.Boolean()),
   captureAlert:   Type.Optional(Type.Boolean()),
+  // The OTHER participant's "now playing", already respecting showOnProfile —
+  // null covers not-connected, hidden, and quiet-24h+ alike (same privacy
+  // collapsing as the standalone badge endpoint). Optional because rows built
+  // client-side from socket events (e.g. an incoming conversation:request)
+  // don't set it.
+  spotify:        Type.Optional(Type.Union([SpotifyConversationSummarySchema, Type.Null()])),
   updatedAt:      Type.String({ format: "date-time" }),
 });
 export type ConversationListItem = Static<typeof ConversationListItemSchema>;

@@ -25,7 +25,7 @@ export function formatTime(iso: string): string {
 }
 
 export function ConversationRow({ conversation }: { conversation: ConversationListItem }) {
-  const { participant, lastMessage, unreadCount, isTyping, captureAlert } = conversation;
+  const { participant, lastMessage, unreadCount, isTyping, captureAlert, spotify } = conversation;
   const hasUnread = (unreadCount ?? 0) > 0;
 
   return (
@@ -87,6 +87,14 @@ export function ConversationRow({ conversation }: { conversation: ConversationLi
             <span className="truncate text-sm text-[var(--color-text-muted)]">No messages yet</span>
           )}
         </div>
+
+        {/* Spotify "now playing" — typing always wins, so this never renders
+            alongside or in place of the typing indicator above. */}
+        {!isTyping && spotify && (
+          <span className="truncate text-sm text-[var(--color-text-muted)]">
+            🎵 {spotify.trackName}
+          </span>
+        )}
       </div>
 
       <div className="flex w-[52px] shrink-0 flex-col items-end gap-1.5">

@@ -30,6 +30,11 @@ export declare const ConversationListItemSchema: import("@sinclair/typebox").TOb
     unreadCount: import("@sinclair/typebox").TOptional<import("@sinclair/typebox").TNumber>;
     isTyping: import("@sinclair/typebox").TOptional<import("@sinclair/typebox").TBoolean>;
     captureAlert: import("@sinclair/typebox").TOptional<import("@sinclair/typebox").TBoolean>;
+    spotify: import("@sinclair/typebox").TOptional<import("@sinclair/typebox").TUnion<[import("@sinclair/typebox").TObject<{
+        trackName: import("@sinclair/typebox").TString;
+        artistName: import("@sinclair/typebox").TString;
+        isPlaying: import("@sinclair/typebox").TBoolean;
+    }>, import("@sinclair/typebox").TNull]>>;
     updatedAt: import("@sinclair/typebox").TString;
 }>;
 export type ConversationListItem = Static<typeof ConversationListItemSchema>;
