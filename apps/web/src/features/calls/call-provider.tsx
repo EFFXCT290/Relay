@@ -55,6 +55,13 @@ type CallContextValue = {
 
 const CallContext = createContext<CallContextValue | null>(null);
 
+// Grace period given to a "disconnected" pc.connectionState (spec-transient —
+// a NAT rebind or brief network hiccup) before it's treated as dead. Distinct
+// from CALL_RING_TIMEOUT_MS (contracts): that one is pre-connect signaling
+// shared with the server; this is purely local post-connect recovery, so it
+// has no reason to live in the shared contract.
+export const ICE_DISCONNECT_GRACE_MS = 8_000;
+
 // Streams are UI-only once attached: the element holds a reference, the sender
 // owns the network tracks. Set srcObject once per lifecycle change (the === guard
 // stops per-track ontrack firings from thrashing it) and drive .play() so iOS
@@ -102,11 +109,21 @@ export function CallProvider({
   const localStreamRef  = useRef<MediaStream | null>(null);
   const remoteStreamRef = useRef<MediaStream | null>(null);
   const resetTimer  = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Armed while pc.connectionState === "disconnected", waiting to see whether
+  // it recovers on its own (or via the restartIce() kick below) before we give
+  // up. Cleared on "connected", on "failed" (which always wins immediately),
+  // on a fresh "disconnected" (no stacking), and by teardown() itself so a
+  // stale timer from a finished call can never fire against a later one.
+  const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // The single client cleanup routine. Idempotent: close() guards itself, and a
   // "terminated" dispatch from idle is a no-op. Shows the terminal phase briefly,
   // then resets — unless a new call has already started.
   const teardown = useCallback((phase: "ended" | "failed") => {
+    if (reconnectTimer.current) {
+      clearTimeout(reconnectTimer.current);
+      reconnectTimer.current = null;
+    }
     webrtcRef.current?.close();
     webrtcRef.current = null;
     callIdRef.current = null;
@@ -144,8 +161,48 @@ export function CallProvider({
         attachStream(remoteAudioRef.current, stream);
       },
       onConnectionState: (s) => {
-        if (s === "connected") dispatch({ t: "connected" });
-        else if (s === "failed") teardown("failed");
+        if (s === "connected") {
+          if (reconnectTimer.current) {
+            clearTimeout(reconnectTimer.current);
+            reconnectTimer.current = null;
+          }
+          dispatch({ t: "connected" });
+        } else if (s === "disconnected") {
+          // Transient per spec — give it a grace window instead of hanging up.
+          // Only the original offerer (the "outgoing" side) drives the ICE
+          // restart, so both peers never renegotiate at once and collide.
+          if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
+          if (stateRef.current.direction === "outgoing") {
+            const callId = callIdRef.current;
+            const activeController = webrtcRef.current;
+            if (callId && activeController) {
+              activeController.restartIce();
+              void (async () => {
+                try {
+                  const offer = await activeController.createOffer();
+                  if (webrtcRef.current === activeController) {
+                    emitOffer(getSocket(), { callId, sdp: offer });
+                  }
+                } catch {
+                  /* pc already closed (e.g. user hung up mid-restart) — ignore */
+                }
+              })();
+            }
+          }
+          reconnectTimer.current = setTimeout(() => {
+            reconnectTimer.current = null;
+            teardown("failed");
+          }, ICE_DISCONNECT_GRACE_MS);
+        } else if (s === "failed") {
+          // Fast path: restartIce() itself can fail synchronously in some
+          // cases, so "failed" always wins immediately rather than waiting
+          // out a grace period that's no longer relevant.
+          if (reconnectTimer.current) {
+            clearTimeout(reconnectTimer.current);
+            reconnectTimer.current = null;
+          }
+          teardown("failed");
+        }
       },
       onFacingChange: (facing) => dispatch({ t: "facing", value: facing }),
     });

@@ -164,6 +164,15 @@ export class WebRtcController {
     for (const track of this.localStream?.getVideoTracks() ?? []) track.enabled = enabled;
   }
 
+  // Mark the ICE agent for a fresh restart (new ufrag/pwd) on the *next*
+  // offer/answer — this alone does not renegotiate. The caller must follow up
+  // with createOffer()/createAnswer() and send it through signaling for the
+  // restart to actually take effect.
+  restartIce(): void {
+    if (!this.pc || this.closed) return;
+    this.pc.restartIce();
+  }
+
   // Flip front/back. replaceTrack is the authoritative network swap (no SDP
   // renegotiation); localStream is kept in sync so the self-preview reflects the
   // new camera. Exactly one video track in the stream at all times.
