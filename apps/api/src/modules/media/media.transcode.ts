@@ -85,12 +85,21 @@ export function transcodeH264(input: Buffer, height: number, crf: number): Promi
   ]);
 }
 
-/** Container-normalize without re-encoding (HEVC passthrough / LSS). */
-export function remuxPassthrough(input: Buffer): Promise<Buffer> {
+/**
+ * Container-normalize without re-encoding. Used both for genuinely-HEVC
+ * sources (auto-promoted to LSS) and for a plain non-HEVC source the client
+ * explicitly requested LSS for — resolveDeliveryMode() only ever forces LSS
+ * for HEVC/DNG, it never restricts LSS to them, so this must handle both.
+ */
+export function remuxPassthrough(input: Buffer, isHevc: boolean): Promise<Buffer> {
   return transform(input, ".mp4", (i, o) => [
     "-i", i,
     "-c", "copy",
-    "-tag:v", "hvc1",                    // Apple/Safari-friendly HEVC tag; ignored for non-HEVC copy
+    // ffmpeg validates -tag:v against the actual copied codec and refuses
+    // ("Tag hvc1 incompatible with output codec id...") if they don't match
+    // — it does NOT silently ignore a mismatched tag. Only force the
+    // Apple/Safari-compatible hvc1 tag when the source really is HEVC.
+    ...(isHevc ? ["-tag:v", "hvc1"] : []),
     "-movflags", "+faststart",
     o,
   ]);

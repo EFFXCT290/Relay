@@ -417,7 +417,7 @@ async function processVideo(deps: WorkerDeps, data: ProcessVideoJobData) {
   try {
     await repo.setTaskState(mediaId, "TRANSCODE", "PROCESSING");
     if (isLss || isHevc) {
-      const passthrough = await remuxPassthrough(original);
+      const passthrough = await remuxPassthrough(original, isHevc);
       await put({ name: "passthrough", group: "optimized", filename: "passthrough.mp4", type: "OPTIMIZED", label: "passthrough", buf: passthrough, mime: "video/mp4", codec: isHevc ? "hevc" : null, height });
       streamKey = produced[produced.length - 1]!.key;
     } else {
