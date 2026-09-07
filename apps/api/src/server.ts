@@ -35,6 +35,7 @@ import callRoutes from "./modules/calls/calls.routes.js";
 import messageRoutes from "./modules/messages/message.routes.js";
 import notificationRoutes from "./modules/notifications/notification.routes.js";
 import pushRoutes from "./modules/push/push.routes.js";
+import spotifyRoutes from "./modules/spotify/spotify.routes.js";
 import syncRoutes from "./modules/sync/sync.routes.js";
 import devRoutes from "./modules/dev/dev.routes.js";
 
@@ -140,6 +141,7 @@ export async function buildServer() {
   await app.register(messageRoutes, { prefix: "/api" });
   await app.register(notificationRoutes, { prefix: "/api" });
   await app.register(pushRoutes, { prefix: "/api" });
+  await app.register(spotifyRoutes, { prefix: "/api" });
   await app.register(syncRoutes, { prefix: "/api" });
 
   if (!isProd) {

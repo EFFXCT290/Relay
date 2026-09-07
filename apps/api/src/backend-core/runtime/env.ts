@@ -35,6 +35,12 @@ export const env = {
 
   COOKIE_SECRET: required("COOKIE_SECRET"),
 
+  // AES-256-GCM key (32 bytes, hex) for encrypting Spotify OAuth tokens at rest
+  // (see backend-core/crypto/token-cipher.ts). Lives ONLY here, alongside the
+  // other secrets above — NEVER in the database next to the ciphertext it
+  // protects, or the encryption is pointless. Generate with: openssl rand -hex 32
+  SPOTIFY_TOKEN_ENC_KEY: required("SPOTIFY_TOKEN_ENC_KEY"),
+
   MINIO_ENDPOINT:          optional("MINIO_ENDPOINT", "localhost"),
   MINIO_PORT:              int("MINIO_PORT", 9000),
   MINIO_USE_SSL:           (process.env["MINIO_USE_SSL"] ?? "false") === "true",
@@ -86,6 +92,14 @@ export const env = {
   // during the Discord→push migration. "discord,push" runs both in parallel;
   // flip to "push" to retire Discord with no code change.
   NOTIFICATION_PROVIDER: optional("NOTIFICATION_PROVIDER", "discord,push"),
+
+  // Spotify "recently played" badge (OAuth Authorization Code flow). All three
+  // blank → the feature is disabled: /spotify/connect redirects back with a
+  // config error instead of crashing the server (mirrors the VAPID/TURN
+  // pattern), so a deploy without Spotify credentials still boots fine.
+  SPOTIFY_CLIENT_ID:     optional("SPOTIFY_CLIENT_ID", ""),
+  SPOTIFY_CLIENT_SECRET: optional("SPOTIFY_CLIENT_SECRET", ""),
+  SPOTIFY_REDIRECT_URI:  optional("SPOTIFY_REDIRECT_URI", ""),
 } as const;
 
 export const isProd = env.NODE_ENV === "production";
@@ -98,4 +112,8 @@ const enabledNotificationProviders = new Set(
 );
 export function isNotificationProviderEnabled(name: "discord" | "push"): boolean {
   return enabledNotificationProviders.has(name);
+}
+
+export function isSpotifyConfigured(): boolean {
+  return Boolean(env.SPOTIFY_CLIENT_ID && env.SPOTIFY_CLIENT_SECRET && env.SPOTIFY_REDIRECT_URI);
 }

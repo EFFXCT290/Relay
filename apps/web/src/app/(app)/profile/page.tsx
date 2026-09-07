@@ -20,6 +20,8 @@ import {
 import { Avatar } from "@/shared/components/avatar";
 import { Toggle } from "@/shared/components/toggle";
 import { PushToggle } from "@/features/notifications/push/push-toggle";
+import { SpotifyBadge } from "@/features/spotify/spotify-badge";
+import { SpotifyConnectCard } from "@/features/spotify/spotify-connect-card";
 import { ApiError, api } from "@/frontend-core/api";
 import { usersApi } from "@/frontend-core/api-client/users";
 import { cropToSquareWebp } from "@/shared/utils/crop-image";
@@ -241,6 +243,11 @@ export default function ProfilePage() {
               joined {me ? formatJoined(me.createdAt) : "—"}
             </span>
           </div>
+          {me && (
+            <div className="pt-1">
+              <SpotifyBadge userId={me.userId} />
+            </div>
+          )}
         </div>
       </header>
 
@@ -258,6 +265,11 @@ export default function ProfilePage() {
       {/* Notifications */}
       <Section title="Notifications">
         <PushToggle />
+      </Section>
+
+      {/* Spotify */}
+      <Section title="Spotify">
+        <SpotifyConnectCard />
       </Section>
 
       {/* Privacy */}

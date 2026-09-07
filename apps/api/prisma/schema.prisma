@@ -45,6 +45,7 @@ model User {
   outgoingCalls     Call[]             @relation("OutgoingCalls")
   incomingCalls     Call[]             @relation("IncomingCalls")
   eventOutbox       EventOutbox[]
+  spotifyConnection SpotifyConnection?
 
   @@index([username])
 }
@@ -430,6 +431,31 @@ model PushSubscription {
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+//  Spotify "recently played" profile badge
+// ────────────────────────────────────────────────────────────────────────────
+// One row per connected user (1:1, keyed by userId — same shape as UserPresence).
+// accessToken/refreshToken are ciphertext (AES-256-GCM via SPOTIFY_TOKEN_ENC_KEY,
+// see backend-core/crypto/token-cipher.ts); the decryption key lives ONLY in env,
+// never in this table, so a DB dump alone can't recover a usable token. scope
+// records what Spotify actually granted (it can differ from what was requested).
+// needsReconnect is set when a refresh_token exchange fails (e.g. the user
+// revoked access on Spotify's side) so the badge endpoint can stop retrying a
+// doomed refresh on every profile view and instead prompt the user to
+// reconnect; it's cleared the next time /spotify/connect completes.
+model SpotifyConnection {
+  userId         String   @id
+  accessToken    String
+  refreshToken   String
+  expiresAt      DateTime
+  scope          String
+  showOnProfile  Boolean  @default(true)
+  needsReconnect Boolean  @default(false)
+  connectedAt    DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 }
 
 model JtiBlocklist {
