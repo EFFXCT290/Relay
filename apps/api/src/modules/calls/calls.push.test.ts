@@ -169,7 +169,7 @@ describe("CallService push notifications — real Postgres + Redis", () => {
     createdUserIds.push(caller.id, recipient.id);
 
     const callId = randomUUID();
-    callRuntime.create({ callId, callerId: caller.id, recipientId: recipient.id, type: "AUDIO", state: "ringing", callerUsername: "alice" });
+    callRuntime.create({ callId, callerId: caller.id, recipientId: recipient.id, type: "AUDIO", state: "ringing", iceCandidateCount: 0, callerUsername: "alice" });
     await createRingingCallRow(app.prisma, callId, caller.id, recipient.id);
 
     const svc = new CallService({ ...app, io: fakeIo() } as never);
@@ -190,7 +190,7 @@ describe("CallService push notifications — real Postgres + Redis", () => {
     createdUserIds.push(caller.id, recipient.id);
 
     const callId = randomUUID();
-    callRuntime.create({ callId, callerId: caller.id, recipientId: recipient.id, type: "AUDIO", state: "ringing", callerUsername: "alice" });
+    callRuntime.create({ callId, callerId: caller.id, recipientId: recipient.id, type: "AUDIO", state: "ringing", iceCandidateCount: 0, callerUsername: "alice" });
     await createRingingCallRow(app.prisma, callId, caller.id, recipient.id);
 
     const svc = new CallService({ ...app, io: fakeIo() } as never);
@@ -209,7 +209,7 @@ describe("CallService push notifications — real Postgres + Redis", () => {
     createdUserIds.push(caller.id, recipient.id);
 
     const callId = randomUUID();
-    callRuntime.create({ callId, callerId: caller.id, recipientId: recipient.id, type: "AUDIO", state: "ringing", pushNotified: true });
+    callRuntime.create({ callId, callerId: caller.id, recipientId: recipient.id, type: "AUDIO", state: "ringing", iceCandidateCount: 0, pushNotified: true });
     await createRingingCallRow(app.prisma, callId, caller.id, recipient.id);
 
     const svc = new CallService({ ...app, io: fakeIo() } as never);
@@ -229,7 +229,7 @@ describe("CallService push notifications — real Postgres + Redis", () => {
     createdUserIds.push(caller.id, recipient.id);
 
     const callId = randomUUID();
-    callRuntime.create({ callId, callerId: caller.id, recipientId: recipient.id, type: "AUDIO", state: "ringing", pushNotified: true });
+    callRuntime.create({ callId, callerId: caller.id, recipientId: recipient.id, type: "AUDIO", state: "ringing", iceCandidateCount: 0, pushNotified: true });
     await createRingingCallRow(app.prisma, callId, caller.id, recipient.id);
 
     const svc = new CallService({ ...app, io: fakeIo() } as never);

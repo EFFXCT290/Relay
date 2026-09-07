@@ -16,6 +16,8 @@ import {
   type CallEndedEvent,
   type CallFailedEvent,
   type CallPeerMediaStateEvent,
+  type CallClientStateInbound,
+  type CallConnectionStatsInbound,
 } from "@relay/contracts";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -97,4 +99,14 @@ export function emitIce(socket: Socket, payload: CallIceInbound): void {
 }
 export function emitMediaState(socket: Socket, payload: CallMediaStateInbound): void {
   socket.emit(CALL_EVENTS.MEDIA_STATE, payload);
+}
+
+// Observability only — logged server-side, never relayed, never acted on. See
+// calls.socket.ts. Callers must wrap these in try/catch: a failed/slow emit
+// must never affect the actual call.
+export function emitClientState(socket: Socket, payload: CallClientStateInbound): void {
+  socket.emit(CALL_EVENTS.CLIENT_STATE, payload);
+}
+export function emitConnectionStats(socket: Socket, payload: CallConnectionStatsInbound): void {
+  socket.emit(CALL_EVENTS.CONNECTION_STATS, payload);
 }

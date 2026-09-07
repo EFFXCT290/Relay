@@ -46,6 +46,11 @@ export const CALL_EVENTS = {
   // camera" so they can swap the remote stage to a frozen-frame + badge instead
   // of looking at a black <video>.
   MEDIA_STATE: "call:media-state",   // { callId, cameraOn }  either → server → other peer
+  // Observability only (client → server). Logged as-received and otherwise a
+  // total no-op: never relayed to the peer, never acted on. See
+  // apps/api/src/modules/calls/calls.socket.ts.
+  CLIENT_STATE:      "call:client-state",      // { callId, state, ... }        pc.connectionState transitions
+  CONNECTION_STATS:  "call:connection-stats",  // { callId, ... }               periodic getStats() summary
   // server → client
   RINGING:           "call:ringing",           // → recipient: incoming call
   ACCEPTED:          "call:accepted",          // → caller: recipient accepted; begin createOffer()
@@ -69,6 +74,38 @@ export type CallIceInbound   = { callId: string; candidate: RTCIceCandidateInitL
 // Phase 7D media-state hint (client → server → other peer). Camera only for now;
 // the envelope leaves room for `micOn?` if/when a peer-mute indicator lands.
 export type CallMediaStateInbound = { callId: string; cameraOn: boolean };
+
+// ── Observability-only payloads (client → server) ────────────────────────────
+// Best-effort telemetry: the client must never let a failed/slow emit affect
+// the actual call (fire-and-forget, wrapped in try/catch at the call site).
+// The server only logs these — no relay, no side effects, no business logic.
+
+// Mirrors RTCPeerConnectionState's value set without depending on lib.dom.
+export type CallClientConnectionState =
+  | "new" | "connecting" | "connected" | "disconnected" | "failed" | "closed";
+
+export type CallClientStateInbound = {
+  callId:    string;
+  state:     CallClientConnectionState;
+  timestamp: number; // client epoch ms — server receive time can lag under load
+  // Set on a "disconnected" report: did THIS client attempt an ICE restart
+  // (only the original offerer/"outgoing" side ever does — see
+  // call-provider.tsx), and which role is reporting.
+  iceRestartAttempted?: boolean;
+  iceRestartBy?:        "outgoing" | "incoming";
+  // Set when a prior "disconnected" episode resolves one way or the other.
+  outcome?: "recovered" | "timed_out";
+};
+
+export type CallIceCandidateType = "host" | "srflx" | "prflx" | "relay" | "unknown";
+
+export type CallConnectionStatsInbound = {
+  callId: string;
+  candidateType:      CallIceCandidateType;
+  bytesSentDelta:     number; // since the previous report, not cumulative
+  bytesReceivedDelta: number;
+  packetLoss?:        number; // fraction 0..1, only when computable
+};
 
 // ICE server config minted per call and handed to each peer at setup time.
 // Mirrors only the RTCIceServer fields we use, keeping shared code free of

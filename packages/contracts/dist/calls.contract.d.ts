@@ -12,6 +12,8 @@ export declare const CALL_EVENTS: {
     readonly ICE: "call:ice-candidate";
     readonly END: "call:end";
     readonly MEDIA_STATE: "call:media-state";
+    readonly CLIENT_STATE: "call:client-state";
+    readonly CONNECTION_STATS: "call:connection-stats";
     readonly RINGING: "call:ringing";
     readonly ACCEPTED: "call:accepted";
     readonly BUSY: "call:busy";
@@ -40,6 +42,23 @@ export type CallIceInbound = {
 export type CallMediaStateInbound = {
     callId: string;
     cameraOn: boolean;
+};
+export type CallClientConnectionState = "new" | "connecting" | "connected" | "disconnected" | "failed" | "closed";
+export type CallClientStateInbound = {
+    callId: string;
+    state: CallClientConnectionState;
+    timestamp: number;
+    iceRestartAttempted?: boolean;
+    iceRestartBy?: "outgoing" | "incoming";
+    outcome?: "recovered" | "timed_out";
+};
+export type CallIceCandidateType = "host" | "srflx" | "prflx" | "relay" | "unknown";
+export type CallConnectionStatsInbound = {
+    callId: string;
+    candidateType: CallIceCandidateType;
+    bytesSentDelta: number;
+    bytesReceivedDelta: number;
+    packetLoss?: number;
 };
 export type IceServer = {
     urls: string | string[];

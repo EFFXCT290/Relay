@@ -9,7 +9,7 @@ import {
   useRef,
   type ReactNode,
 } from "react";
-import type { CallType, IceServer } from "@relay/contracts";
+import type { CallType, IceServer, CallClientStateInbound, CallConnectionStatsInbound } from "@relay/contracts";
 import { getSocket } from "@/frontend-core/socket";
 import {
   callReducer,
@@ -17,11 +17,13 @@ import {
   type CallPeer,
   type CallState,
 } from "./call-store";
-import { WebRtcController } from "./webrtc";
+import { WebRtcController, type ConnectionStatsSummary } from "./webrtc";
 import {
   bindCallSocket,
   emitAccept,
   emitAnswer,
+  emitClientState,
+  emitConnectionStats,
   emitEnd,
   emitIce,
   emitInit,
@@ -70,6 +72,24 @@ function attachStream(el: HTMLMediaElement | null, stream: MediaStream): void {
   if (!el || el.srcObject === stream) return;
   el.srcObject = stream;
   void el.play?.().catch(() => {});
+}
+
+// Observability only (Part 2/3). Fire-and-forget, best-effort: a socket that's
+// momentarily down or a synchronous emit failure must never affect the actual
+// call, so both are swallowed here rather than at every call site.
+function reportClientState(payload: CallClientStateInbound): void {
+  try {
+    emitClientState(getSocket(), payload);
+  } catch {
+    /* telemetry only */
+  }
+}
+function reportConnectionStats(payload: CallConnectionStatsInbound): void {
+  try {
+    emitConnectionStats(getSocket(), payload);
+  } catch {
+    /* telemetry only */
+  }
 }
 
 export function useCall(): CallContextValue {
@@ -162,17 +182,29 @@ export function CallProvider({
       },
       onConnectionState: (s) => {
         if (s === "connected") {
+          const wasRecovering = reconnectTimer.current !== null;
           if (reconnectTimer.current) {
             clearTimeout(reconnectTimer.current);
             reconnectTimer.current = null;
           }
           dispatch({ t: "connected" });
+          const callId = callIdRef.current;
+          if (callId) {
+            reportClientState({
+              callId,
+              state: s,
+              timestamp: Date.now(),
+              outcome: wasRecovering ? "recovered" : undefined,
+            });
+          }
         } else if (s === "disconnected") {
           // Transient per spec — give it a grace window instead of hanging up.
           // Only the original offerer (the "outgoing" side) drives the ICE
           // restart, so both peers never renegotiate at once and collide.
           if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
-          if (stateRef.current.direction === "outgoing") {
+          const direction = stateRef.current.direction;
+          const iceRestartAttempted = direction === "outgoing";
+          if (iceRestartAttempted) {
             const callId = callIdRef.current;
             const activeController = webrtcRef.current;
             if (callId && activeController) {
@@ -189,8 +221,22 @@ export function CallProvider({
               })();
             }
           }
+          const disconnectedCallId = callIdRef.current;
+          if (disconnectedCallId) {
+            reportClientState({
+              callId: disconnectedCallId,
+              state: s,
+              timestamp: Date.now(),
+              iceRestartAttempted,
+              iceRestartBy: direction ?? undefined,
+            });
+          }
           reconnectTimer.current = setTimeout(() => {
             reconnectTimer.current = null;
+            const timedOutCallId = callIdRef.current;
+            if (timedOutCallId) {
+              reportClientState({ callId: timedOutCallId, state: s, timestamp: Date.now(), outcome: "timed_out" });
+            }
             teardown("failed");
           }, ICE_DISCONNECT_GRACE_MS);
         } else if (s === "failed") {
@@ -201,8 +247,14 @@ export function CallProvider({
             clearTimeout(reconnectTimer.current);
             reconnectTimer.current = null;
           }
+          const callId = callIdRef.current;
+          if (callId) reportClientState({ callId, state: s, timestamp: Date.now() });
           teardown("failed");
         }
+      },
+      onConnectionStats: (summary: ConnectionStatsSummary) => {
+        const callId = callIdRef.current;
+        if (callId) reportConnectionStats({ callId, ...summary });
       },
       onFacingChange: (facing) => dispatch({ t: "facing", value: facing }),
     });

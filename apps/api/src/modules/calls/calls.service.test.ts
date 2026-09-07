@@ -42,6 +42,7 @@ function seedSession(overrides: Partial<ActiveCallSession> & { callId: string; c
     type: "AUDIO",
     state: "ringing",
     callerUsername: "alice",
+    iceCandidateCount: 0,
     ...overrides,
   };
   callRuntime.create(session);

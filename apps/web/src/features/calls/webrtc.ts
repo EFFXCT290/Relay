@@ -1,6 +1,7 @@
 import type {
   RTCSessionDescriptionInitLike,
   RTCIceCandidateInitLike,
+  CallIceCandidateType,
 } from "@relay/contracts";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -28,6 +29,19 @@ const VIDEO_CONSTRAINTS: MediaTrackConstraints = {
   facingMode: "user",
 };
 
+// Observability only (Part 3) — periodic pc.getStats() summary while a call is
+// live. 7s: within the 5-10s window asked for, and distinct from
+// ICE_DISCONNECT_GRACE_MS (call-provider.tsx) so the two aren't mistaken for
+// the same knob.
+export const CONNECTION_STATS_INTERVAL_MS = 7_000;
+
+export type ConnectionStatsSummary = {
+  candidateType:      CallIceCandidateType;
+  bytesSentDelta:     number; // since the previous report, not cumulative
+  bytesReceivedDelta: number;
+  packetLoss?:        number;
+};
+
 export type WebRtcCallbacks = {
   onIceCandidate:    (candidate: RTCIceCandidateInitLike) => void;
   onLocalStream:     (stream: MediaStream) => void;
@@ -36,6 +50,10 @@ export type WebRtcCallbacks = {
   // Fires after the initial getUserMedia and after every successful flip, so the
   // UI knows whether to mirror the self-preview (front camera) or not (rear).
   onFacingChange:    (facing: "user" | "environment") => void;
+  // Fires every CONNECTION_STATS_INTERVAL_MS once the call is connected. Pure
+  // observability — the caller (call-provider.tsx) reports it for logging only
+  // and must never let it affect the call.
+  onConnectionStats: (summary: ConnectionStatsSummary) => void;
 };
 
 export class WebRtcController {
@@ -47,6 +65,11 @@ export class WebRtcController {
   private closed = false;
   private facingMode: "user" | "environment" = "user";
   private iceServers: RTCIceServer[] = DEFAULT_ICE_SERVERS;
+  private statsTimer: ReturnType<typeof setInterval> | null = null;
+  // Cumulative totals as of the last report — every emitted summary is a delta
+  // against these, not the raw cumulative counters getStats() returns.
+  private lastBytesSent = 0;
+  private lastBytesReceived = 0;
 
   constructor(private cb: WebRtcCallbacks) {}
 
@@ -90,7 +113,14 @@ export class WebRtcController {
       this.cb.onRemoteStream(this.remoteStream);
     };
     pc.onconnectionstatechange = () => {
-      if (!this.closed) this.cb.onConnectionState(pc.connectionState);
+      if (this.closed) return;
+      this.cb.onConnectionState(pc.connectionState);
+      // Start once, on the first real connection — no point polling stats for
+      // a pc that was never up, and this must never restart on a later
+      // reconnect (that would reset the delta baseline mid-call).
+      if (pc.connectionState === "connected" && !this.statsTimer) {
+        this.statsTimer = setInterval(() => { void this.reportStats(); }, CONNECTION_STATS_INTERVAL_MS);
+      }
     };
 
     this.pc = pc;
@@ -173,6 +203,30 @@ export class WebRtcController {
     this.pc.restartIce();
   }
 
+  // Best-effort observability (Part 3) — reads the currently-selected candidate
+  // pair and inbound packet counters, diffs bytes against the last report, and
+  // hands a slim summary to the caller. Any failure here (a browser quirk in
+  // getStats(), a closed pc mid-call) is swallowed: this must never affect the
+  // actual call.
+  private async reportStats(): Promise<void> {
+    if (!this.pc || this.closed) return;
+    try {
+      const report = await this.pc.getStats();
+      const summary = summarizeStats(report, this.lastBytesSent, this.lastBytesReceived);
+      if (!summary) return;
+      this.lastBytesSent = summary.totalBytesSent;
+      this.lastBytesReceived = summary.totalBytesReceived;
+      this.cb.onConnectionStats({
+        candidateType:      summary.candidateType,
+        bytesSentDelta:     summary.bytesSentDelta,
+        bytesReceivedDelta: summary.bytesReceivedDelta,
+        packetLoss:         summary.packetLoss,
+      });
+    } catch {
+      /* getStats() is observability-only — never let it affect the call */
+    }
+  }
+
   // Flip front/back. replaceTrack is the authoritative network swap (no SDP
   // renegotiation); localStream is kept in sync so the self-preview reflects the
   // new camera. Exactly one video track in the stream at all times.
@@ -217,6 +271,10 @@ export class WebRtcController {
   close(): void {
     if (this.closed) return;
     this.closed = true;
+    if (this.statsTimer) {
+      clearInterval(this.statsTimer);
+      this.statsTimer = null;
+    }
     for (const track of this.localStream?.getTracks() ?? []) track.stop();
     for (const track of this.remoteStream?.getTracks() ?? []) track.stop();
     if (this.pc) {
@@ -230,4 +288,70 @@ export class WebRtcController {
     this.remoteStream = null;
     this.pendingIce = [];
   }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Pure parsing of an RTCStatsReport into the slim shape Part 3 reports. Exported
+// standalone (rather than inlined in reportStats()) so it's unit-testable
+// against a hand-built fake report — no real getStats()/RTCPeerConnection
+// needed, same rationale as the fakes in webrtc.test.ts.
+//
+// Bytes/candidate-type come from the currently-selected ("succeeded",
+// nominated) candidate pair — exactly "the current candidate pair", per spec.
+// Packet loss is approximated from summed inbound-rtp packetsLost/packetsReceived
+// across all m-lines (audio + video), since candidate-pair stats don't carry
+// loss directly. Returns null when there's no succeeded pair yet (e.g. very
+// early in negotiation) — reportStats() just skips that tick.
+// ─────────────────────────────────────────────────────────────────────────────
+export function summarizeStats(
+  report: RTCStatsReport,
+  prevBytesSent: number,
+  prevBytesReceived: number,
+): {
+  candidateType:      CallIceCandidateType;
+  bytesSentDelta:     number;
+  bytesReceivedDelta: number;
+  packetLoss?:        number;
+  totalBytesSent:     number;
+  totalBytesReceived: number;
+} | null {
+  const byId = new Map<string, Record<string, unknown>>();
+  let pair: Record<string, unknown> | null = null;
+  let totalPacketsLost = 0;
+  let totalPacketsReceived = 0;
+  let sawInboundRtp = false;
+
+  report.forEach((stat: Record<string, unknown>) => {
+    byId.set(stat.id as string, stat);
+    if (stat.type === "candidate-pair" && stat.state === "succeeded" && stat.nominated !== false) {
+      pair = stat;
+    } else if (stat.type === "inbound-rtp" && !stat.isRemote) {
+      sawInboundRtp = true;
+      totalPacketsLost += (stat.packetsLost as number | undefined) ?? 0;
+      totalPacketsReceived += (stat.packetsReceived as number | undefined) ?? 0;
+    }
+  });
+  if (!pair) return null;
+
+  const activePair = pair as Record<string, unknown>;
+  let candidateType: CallIceCandidateType = "unknown";
+  const localId = activePair.localCandidateId as string | undefined;
+  const local = localId ? byId.get(localId) : undefined;
+  if (typeof local?.candidateType === "string") candidateType = local.candidateType as CallIceCandidateType;
+
+  const totalBytesSent = (activePair.bytesSent as number | undefined) ?? 0;
+  const totalBytesReceived = (activePair.bytesReceived as number | undefined) ?? 0;
+  const lossDenominator = totalPacketsLost + totalPacketsReceived;
+
+  return {
+    candidateType,
+    // Math.max(0, …) guards a candidate-pair switch mid-call: the newly
+    // selected pair's cumulative counters legitimately start below the
+    // previous pair's, which must read as "no data yet", not negative traffic.
+    bytesSentDelta:     Math.max(0, totalBytesSent - prevBytesSent),
+    bytesReceivedDelta: Math.max(0, totalBytesReceived - prevBytesReceived),
+    packetLoss:         sawInboundRtp && lossDenominator > 0 ? totalPacketsLost / lossDenominator : undefined,
+    totalBytesSent,
+    totalBytesReceived,
+  };
 }

@@ -1,5 +1,5 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
-import { WebRtcController, type WebRtcCallbacks } from "./webrtc";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { WebRtcController, type WebRtcCallbacks, CONNECTION_STATS_INTERVAL_MS, summarizeStats } from "./webrtc";
 import type { RTCIceCandidateInitLike } from "@relay/contracts";
 
 // jsdom has no WebRTC implementation at all (no RTCPeerConnection, no
@@ -90,6 +90,13 @@ class FakePeerConnection {
   close() {
     this.closed = true;
   }
+  // A real Map satisfies RTCStatsReport for these tests — its .forEach(value,
+  // key, map) signature already matches, no fake needed. Tests set this
+  // directly before advancing the stats timer.
+  statsReport: RTCStatsReport = new Map() as unknown as RTCStatsReport;
+  async getStats(): Promise<RTCStatsReport> {
+    return this.statsReport;
+  }
 }
 
 function makeCallbacks(): WebRtcCallbacks {
@@ -99,6 +106,7 @@ function makeCallbacks(): WebRtcCallbacks {
     onRemoteStream: vi.fn(),
     onConnectionState: vi.fn(),
     onFacingChange: vi.fn(),
+    onConnectionStats: vi.fn(),
   };
 }
 
@@ -216,5 +224,150 @@ describe("WebRtcController — guaranteed mic/camera release on teardown", () =>
 
     await expect(controller.startLocalMedia({ video: true })).rejects.toThrow("Permission denied");
     expect(() => controller.close()).not.toThrow();
+  });
+});
+
+// Builds a fake RTCStatsReport (a real Map satisfies it — see FakePeerConnection
+// above) from plain stat objects, keyed by their own `id` field like the real API.
+function makeStatsReport(stats: Array<Record<string, unknown>>): RTCStatsReport {
+  const map = new Map<string, Record<string, unknown>>();
+  for (const s of stats) map.set(s.id as string, s);
+  return map as unknown as RTCStatsReport;
+}
+
+describe("summarizeStats — pure RTCStatsReport parsing (Part 3)", () => {
+  it("returns null when there is no succeeded candidate-pair yet", () => {
+    const report = makeStatsReport([{ id: "cp1", type: "candidate-pair", state: "waiting" }]);
+    expect(summarizeStats(report, 0, 0)).toBeNull();
+  });
+
+  it("picks the succeeded/nominated pair, resolves candidateType via its local-candidate, and diffs bytes against the previous report", () => {
+    const report = makeStatsReport([
+      { id: "cp1", type: "candidate-pair", state: "succeeded", nominated: true, localCandidateId: "local1", bytesSent: 5_000, bytesReceived: 3_000 },
+      { id: "local1", type: "local-candidate", candidateType: "srflx" },
+      { id: "rtp1", type: "inbound-rtp", isRemote: false, packetsLost: 2, packetsReceived: 998 },
+    ]);
+
+    const summary = summarizeStats(report, 4_000, 2_500);
+    expect(summary).toEqual({
+      candidateType: "srflx",
+      bytesSentDelta: 1_000,
+      bytesReceivedDelta: 500,
+      packetLoss: 2 / 1000,
+      totalBytesSent: 5_000,
+      totalBytesReceived: 3_000,
+    });
+  });
+
+  it("sums packetsLost/packetsReceived across multiple m-lines (audio + video)", () => {
+    const report = makeStatsReport([
+      { id: "cp1", type: "candidate-pair", state: "succeeded", localCandidateId: "local1", bytesSent: 100, bytesReceived: 100 },
+      { id: "local1", type: "local-candidate", candidateType: "host" },
+      { id: "audio-rtp", type: "inbound-rtp", isRemote: false, packetsLost: 1, packetsReceived: 199 },
+      { id: "video-rtp", type: "inbound-rtp", isRemote: false, packetsLost: 9, packetsReceived: 791 },
+    ]);
+
+    expect(summarizeStats(report, 0, 0)?.packetLoss).toBeCloseTo(10 / 1000);
+  });
+
+  it("omits packetLoss when there is no inbound-rtp data at all", () => {
+    const report = makeStatsReport([
+      { id: "cp1", type: "candidate-pair", state: "succeeded", localCandidateId: "local1", bytesSent: 100, bytesReceived: 0 },
+      { id: "local1", type: "local-candidate", candidateType: "relay" },
+    ]);
+    expect(summarizeStats(report, 0, 0)?.packetLoss).toBeUndefined();
+  });
+
+  it("clamps to 0 instead of going negative when a candidate-pair switch resets the cumulative counters", () => {
+    // The newly-selected pair's own bytesSent starts lower than the previous
+    // pair's cumulative total — this must read as "no data yet", not -8000.
+    const report = makeStatsReport([
+      { id: "cp2", type: "candidate-pair", state: "succeeded", nominated: true, localCandidateId: "local2", bytesSent: 200, bytesReceived: 100 },
+      { id: "local2", type: "local-candidate", candidateType: "relay" },
+    ]);
+
+    const summary = summarizeStats(report, 8_000, 4_000);
+    expect(summary?.bytesSentDelta).toBe(0);
+    expect(summary?.bytesReceivedDelta).toBe(0);
+    expect(summary?.candidateType).toBe("relay");
+  });
+
+  it("defaults candidateType to \"unknown\" when the local-candidate entry can't be resolved", () => {
+    const report = makeStatsReport([
+      { id: "cp1", type: "candidate-pair", state: "succeeded", localCandidateId: "missing", bytesSent: 0, bytesReceived: 0 },
+    ]);
+    expect(summarizeStats(report, 0, 0)?.candidateType).toBe("unknown");
+  });
+});
+
+describe("WebRtcController — periodic connection-stats reporting (Part 3)", () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  it("does not poll before the first \"connected\" state, and stops polling after close()", async () => {
+    const callbacks = makeCallbacks();
+    const controller = new WebRtcController(callbacks);
+    await controller.createOffer();
+
+    await vi.advanceTimersByTimeAsync(CONNECTION_STATS_INTERVAL_MS * 2);
+    expect(callbacks.onConnectionStats).not.toHaveBeenCalled();
+
+    lastPc!.statsReport = makeStatsReport([
+      { id: "cp1", type: "candidate-pair", state: "succeeded", localCandidateId: "l1", bytesSent: 100, bytesReceived: 100 },
+      { id: "l1", type: "local-candidate", candidateType: "host" },
+    ]);
+    lastPc!.connectionState = "connected";
+    lastPc!.onconnectionstatechange!();
+
+    await vi.advanceTimersByTimeAsync(CONNECTION_STATS_INTERVAL_MS);
+    expect(callbacks.onConnectionStats).toHaveBeenCalledTimes(1);
+
+    controller.close();
+    await vi.advanceTimersByTimeAsync(CONNECTION_STATS_INTERVAL_MS * 3);
+    expect(callbacks.onConnectionStats).toHaveBeenCalledTimes(1); // no further ticks after close()
+  });
+
+  it("reports a DELTA against the previous tick, not the cumulative total", async () => {
+    const callbacks = makeCallbacks();
+    const controller = new WebRtcController(callbacks);
+    await controller.createOffer();
+    lastPc!.connectionState = "connected";
+    lastPc!.onconnectionstatechange!();
+
+    lastPc!.statsReport = makeStatsReport([
+      { id: "cp1", type: "candidate-pair", state: "succeeded", localCandidateId: "l1", bytesSent: 1_000, bytesReceived: 500 },
+      { id: "l1", type: "local-candidate", candidateType: "host" },
+    ]);
+    await vi.advanceTimersByTimeAsync(CONNECTION_STATS_INTERVAL_MS);
+    expect(callbacks.onConnectionStats).toHaveBeenNthCalledWith(1, expect.objectContaining({ bytesSentDelta: 1_000, bytesReceivedDelta: 500 }));
+
+    lastPc!.statsReport = makeStatsReport([
+      { id: "cp1", type: "candidate-pair", state: "succeeded", localCandidateId: "l1", bytesSent: 1_600, bytesReceived: 650 },
+      { id: "l1", type: "local-candidate", candidateType: "host" },
+    ]);
+    await vi.advanceTimersByTimeAsync(CONNECTION_STATS_INTERVAL_MS);
+    expect(callbacks.onConnectionStats).toHaveBeenNthCalledWith(2, expect.objectContaining({ bytesSentDelta: 600, bytesReceivedDelta: 150 }));
+  });
+
+  it("a getStats() rejection on one tick is swallowed — never affects the call, never crashes the timer", async () => {
+    const callbacks = makeCallbacks();
+    const controller = new WebRtcController(callbacks);
+    await controller.createOffer();
+    lastPc!.connectionState = "connected";
+    lastPc!.onconnectionstatechange!();
+
+    const realGetStats = lastPc!.getStats.bind(lastPc);
+    lastPc!.getStats = vi.fn()
+      .mockRejectedValueOnce(new Error("simulated getStats() failure"))
+      .mockImplementation(realGetStats);
+    await vi.advanceTimersByTimeAsync(CONNECTION_STATS_INTERVAL_MS);
+    expect(callbacks.onConnectionStats).not.toHaveBeenCalled();
+
+    lastPc!.statsReport = makeStatsReport([
+      { id: "cp1", type: "candidate-pair", state: "succeeded", localCandidateId: "l1", bytesSent: 10, bytesReceived: 10 },
+      { id: "l1", type: "local-candidate", candidateType: "host" },
+    ]);
+    await vi.advanceTimersByTimeAsync(CONNECTION_STATS_INTERVAL_MS);
+    expect(callbacks.onConnectionStats).toHaveBeenCalledTimes(1); // recovered on the next tick
   });
 });

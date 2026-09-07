@@ -31,6 +31,11 @@ export const CALL_EVENTS = {
     // camera" so they can swap the remote stage to a frozen-frame + badge instead
     // of looking at a black <video>.
     MEDIA_STATE: "call:media-state", // { callId, cameraOn }  either → server → other peer
+    // Observability only (client → server). Logged as-received and otherwise a
+    // total no-op: never relayed to the peer, never acted on. See
+    // apps/api/src/modules/calls/calls.socket.ts.
+    CLIENT_STATE: "call:client-state", // { callId, state, ... }        pc.connectionState transitions
+    CONNECTION_STATS: "call:connection-stats", // { callId, ... }               periodic getStats() summary
     // server → client
     RINGING: "call:ringing", // → recipient: incoming call
     ACCEPTED: "call:accepted", // → caller: recipient accepted; begin createOffer()

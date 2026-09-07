@@ -73,6 +73,8 @@ vi.mock("./call-socket", () => ({
   emitAnswer: vi.fn(),
   emitIce: vi.fn(),
   emitMediaState: vi.fn(),
+  emitClientState: vi.fn(),
+  emitConnectionStats: vi.fn(),
 }));
 
 vi.mock("@/frontend-core/socket", () => ({
@@ -82,7 +84,7 @@ vi.mock("@/frontend-core/socket", () => ({
 // eslint-disable-next-line import/first
 import { CallProvider, useCall, ICE_DISCONNECT_GRACE_MS } from "./call-provider";
 // eslint-disable-next-line import/first
-import { emitOffer } from "./call-socket";
+import { emitOffer, emitClientState, emitConnectionStats } from "./call-socket";
 
 function wrapper({ children }: { children: ReactNode }) {
   return <CallProvider selfUsername="me">{children}</CallProvider>;
@@ -270,5 +272,100 @@ describe("CallProvider ICE disconnect recovery", () => {
       await vi.advanceTimersByTimeAsync(ICE_DISCONNECT_GRACE_MS);
     });
     expect(controller.closed).toBe(true);
+  });
+});
+
+describe("CallProvider observability reporting (Part 2/3)", () => {
+  it("reports disconnected (with the restart attempt) then recovered, on the outgoing side", async () => {
+    const { result } = renderHook(() => useCall(), { wrapper });
+    const controller = await connectAsOutgoing(result);
+    vi.mocked(emitClientState).mockClear(); // drop the "connected" report from connectAsOutgoing
+
+    vi.useFakeTimers();
+    act(() => {
+      controller.cb.onConnectionState("disconnected");
+    });
+    expect(emitClientState).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ callId: "call-1", state: "disconnected", iceRestartAttempted: true, iceRestartBy: "outgoing" }),
+    );
+
+    act(() => {
+      controller.cb.onConnectionState("connected");
+    });
+    expect(emitClientState).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ callId: "call-1", state: "connected", outcome: "recovered" }),
+    );
+  });
+
+  it("reports a timed_out outcome right before the grace-period teardown fires", async () => {
+    const { result } = renderHook(() => useCall(), { wrapper });
+    const controller = await connectAsOutgoing(result);
+
+    vi.useFakeTimers();
+    act(() => {
+      controller.cb.onConnectionState("disconnected");
+    });
+    vi.mocked(emitClientState).mockClear();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(ICE_DISCONNECT_GRACE_MS);
+    });
+    expect(emitClientState).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ callId: "call-1", state: "disconnected", outcome: "timed_out" }),
+    );
+    expect(controller.closed).toBe(true);
+  });
+
+  it("reports the failed state before immediate teardown", async () => {
+    const { result } = renderHook(() => useCall(), { wrapper });
+    const controller = await connectAsOutgoing(result);
+    vi.mocked(emitClientState).mockClear();
+
+    act(() => {
+      controller.cb.onConnectionState("failed");
+    });
+    expect(emitClientState).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ callId: "call-1", state: "failed" }),
+    );
+    expect(controller.closed).toBe(true);
+  });
+
+  it("relays a periodic getStats() summary to the server with the callId attached", async () => {
+    const { result } = renderHook(() => useCall(), { wrapper });
+    const controller = await connectAsOutgoing(result);
+
+    act(() => {
+      controller.cb.onConnectionStats({
+        candidateType: "srflx",
+        bytesSentDelta: 1200,
+        bytesReceivedDelta: 900,
+        packetLoss: 0.01,
+      });
+    });
+
+    expect(emitConnectionStats).toHaveBeenCalledWith(expect.anything(), {
+      callId: "call-1",
+      candidateType: "srflx",
+      bytesSentDelta: 1200,
+      bytesReceivedDelta: 900,
+      packetLoss: 0.01,
+    });
+  });
+
+  it("a throwing telemetry emit never affects the actual call — connected still dispatches", async () => {
+    vi.mocked(emitClientState).mockImplementationOnce(() => {
+      throw new Error("socket momentarily down");
+    });
+    const { result } = renderHook(() => useCall(), { wrapper });
+
+    // connectAsOutgoing's final "connected" transition is exactly where the
+    // (now throwing) report fires — the call must still reach "connected".
+    const controller = await connectAsOutgoing(result);
+    expect(result.current.state.phase).toBe("connected");
+    expect(controller.closed).toBe(false);
   });
 });

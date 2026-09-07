@@ -37,6 +37,10 @@ export type ActiveCallSession = {
   // was delivered via push instead of a live socket emit — tells terminate()
   // whether a stale device notification needs clearing/replacing.
   pushNotified?: boolean;
+  // Running tally of relayed ICE candidates (both directions combined) —
+  // logged once as a total in terminate()'s summary rather than one log line
+  // per candidate, which would fire dozens of times per call for no signal.
+  iceCandidateCount: number;
 };
 
 const sessions = new Map<string, ActiveCallSession>();

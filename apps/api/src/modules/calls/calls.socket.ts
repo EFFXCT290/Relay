@@ -8,6 +8,8 @@ import {
   type CallIceInbound,
   type CallInitAck,
   type CallMediaStateInbound,
+  type CallClientStateInbound,
+  type CallConnectionStatsInbound,
 } from "@relay/contracts";
 import { CallService } from "./calls.service.js";
 
@@ -43,7 +45,7 @@ export function registerCallSocket(
         .initiate(userId, payload)
         .then(respond)
         .catch((err) => {
-          fastify.log.error({ err }, "call: initiate failed");
+          fastify.log.error({ err }, "[call] initiate failed");
           respond({ ok: false, reason: "error" });
         });
     },
@@ -82,6 +84,43 @@ export function registerCallSocket(
   socket.on(CALL_EVENTS.MEDIA_STATE, (payload: CallMediaStateInbound) => {
     if (!isNonEmptyString(payload?.callId) || typeof payload?.cameraOn !== "boolean") return;
     service.relayMediaState(userId, payload);
+  });
+
+  // ── Observability only (Part 2/3) ─────────────────────────────────────────
+  // Pure logging sinks — no callRuntime lookup, no relay, no side effects. The
+  // client sends these best-effort; a malformed/missing callId is silently
+  // dropped rather than logged, same guard style as every handler above.
+  socket.on(CALL_EVENTS.CLIENT_STATE, (payload: CallClientStateInbound) => {
+    if (!isNonEmptyString(payload?.callId)) return;
+    fastify.log.info(
+      {
+        callId:               payload.callId,
+        userId,
+        state:                payload.state,
+        clientTimestamp:      payload.timestamp,
+        iceRestartAttempted:  payload.iceRestartAttempted ?? false,
+        iceRestartBy:         payload.iceRestartBy ?? null,
+        outcome:              payload.outcome ?? null,
+      },
+      "[call] client-state",
+    );
+  });
+
+  socket.on(CALL_EVENTS.CONNECTION_STATS, (payload: CallConnectionStatsInbound) => {
+    if (!isNonEmptyString(payload?.callId)) return;
+    // debug level: this fires every ~5-10s for the length of every call, unlike
+    // the low-frequency signaling/state-transition events above.
+    fastify.log.debug(
+      {
+        callId:              payload.callId,
+        userId,
+        candidateType:       payload.candidateType,
+        bytesSentDelta:      payload.bytesSentDelta,
+        bytesReceivedDelta:  payload.bytesReceivedDelta,
+        packetLoss:          payload.packetLoss ?? null,
+      },
+      "[call] connection-stats",
+    );
   });
 
   socket.on("disconnect", () => {

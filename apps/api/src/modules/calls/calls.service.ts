@@ -81,6 +81,7 @@ export class CallService {
       state: "ringing",
       conversationId,
       callerUsername: caller?.username ?? "",
+      iceCandidateCount: 0,
     };
     callRuntime.create(session);
 
@@ -88,7 +89,7 @@ export class CallService {
       await this.repo.createRinging({ id: callId, callerId, recipientId: targetUserId, type, conversationId });
     } catch (err) {
       callRuntime.destroy(callId);
-      this.fastify.log.error({ err, callId }, "call: createRinging failed");
+      this.fastify.log.error({ err, callId }, "[call] createRinging failed");
       return { ok: false, reason: "error" };
     }
 
@@ -98,6 +99,11 @@ export class CallService {
       void this.terminate(callId, { status: "MISSED", event: CALL_EVENTS.TIMEOUT, notify: [callerId, targetUserId] });
     }, CALL_RING_TIMEOUT_MS);
     session.ringTimer.unref?.();
+
+    this.fastify.log.info(
+      { callId, callerId, targetUserId, type, conversationId: conversationId ?? null, isOnline },
+      "[call] init",
+    );
 
     // Mint per-peer TURN credentials (own userId for coturn-log traceability) so
     // each side builds its peer connection with relay support. Falls back to
@@ -115,7 +121,6 @@ export class CallService {
       session.pushNotified = true;
       void this.pushIncomingCall(session, ringing.caller.username);
     }
-    callDebug(this.fastify.log, "ringing", { callId, callerId, recipientId: targetUserId, type, isOnline });
     return { ok: true, callId, iceServers: generateTurnCredentials(callerId).iceServers };
   }
 
@@ -132,7 +137,7 @@ export class CallService {
     session.answeredAt = Date.now();
 
     this.emitTo(session.callerId, CALL_EVENTS.ACCEPTED, { callId });
-    callDebug(this.fastify.log, "ringing → active", { callId, acceptedBy: userId });
+    this.fastify.log.info({ callId, acceptedBy: userId, status: "ANSWERED" }, "[call] accepted");
   }
 
   // Called on every new socket connection (plugins/socket.ts), mirroring
@@ -160,20 +165,25 @@ export class CallService {
     const session = callRuntime.get(input.callId);
     if (!session || !callRuntime.isParticipant(session, userId)) return;
     this.emitTo(callRuntime.peerOf(session, userId), CALL_EVENTS.OFFER, input);
-    callDebug(this.fastify.log, "relay offer", { callId: input.callId, from: userId });
+    // SDP content is never logged (privacy + volume) — only that one was sent.
+    this.fastify.log.info({ callId: input.callId, from: userId, direction: "offer" }, "[call] sdp relayed");
   }
 
   relayAnswer(userId: string, input: CallSdpInbound): void {
     const session = callRuntime.get(input.callId);
     if (!session || !callRuntime.isParticipant(session, userId)) return;
     this.emitTo(callRuntime.peerOf(session, userId), CALL_EVENTS.ANSWER, input);
-    callDebug(this.fastify.log, "relay answer", { callId: input.callId, from: userId });
+    this.fastify.log.info({ callId: input.callId, from: userId, direction: "answer" }, "[call] sdp relayed");
   }
 
   relayIce(userId: string, input: CallIceInbound): void {
     const session = callRuntime.get(input.callId);
     if (!session || !callRuntime.isParticipant(session, userId)) return;
     this.emitTo(callRuntime.peerOf(session, userId), CALL_EVENTS.ICE, input);
+    // Candidates fire dozens of times per call — never log per-candidate. Just
+    // tally a running count; the total is surfaced once in terminate()'s
+    // summary log line.
+    session.iceCandidateCount += 1;
   }
 
   // UI-state hint (Phase 7D). Relayed verbatim to the other peer so they can
@@ -190,6 +200,7 @@ export class CallService {
   async reject(userId: string, callId: string): Promise<void> {
     const session = callRuntime.get(callId);
     if (!session || session.recipientId !== userId) return;
+    this.fastify.log.info({ callId, userId, status: "REJECTED" }, "[call] reject");
     await this.terminate(callId, {
       status: "REJECTED",
       endedByUserId: userId,
@@ -201,6 +212,7 @@ export class CallService {
   async end(userId: string, callId: string): Promise<void> {
     const session = callRuntime.get(callId);
     if (!session || !callRuntime.isParticipant(session, userId)) return;
+    this.fastify.log.info({ callId, userId, status: "ENDED" }, "[call] end");
     await this.terminate(callId, {
       status: "ENDED",
       endedByUserId: userId,
@@ -217,6 +229,10 @@ export class CallService {
     const peer = callRuntime.peerOf(session, userId);
 
     if (session.state === "active") {
+      this.fastify.log.info(
+        { callId: session.callId, userId, reason: "socket disconnect", fromState: session.state },
+        "[call] disconnect",
+      );
       await this.terminate(session.callId, {
         status: "FAILED",
         endedByUserId: userId,
@@ -226,6 +242,10 @@ export class CallService {
     } else {
       // Disconnected while still ringing — never connected → MISSED, and stop
       // the peer's UI (caller's outgoing ring or recipient's incoming modal).
+      this.fastify.log.info(
+        { callId: session.callId, userId, reason: "socket disconnect", fromState: session.state },
+        "[call] disconnect",
+      );
       await this.terminate(session.callId, {
         status: "MISSED",
         event: CALL_EVENTS.ENDED,
@@ -252,25 +272,29 @@ export class CallService {
       // Idempotent no-op — a later terminal path lost the race. Tracing this
       // makes double-fires (disconnect vs. explicit end, stale ring timer)
       // visible instead of invisible.
-      callDebug(this.fastify.log, "terminate (no-op, already gone)", { callId, status: opts.status });
+      this.fastify.log.warn({ callId, status: opts.status }, "[call] terminate no-op (already gone)");
       return;
     }
 
     const durationSec = session.answeredAt
       ? Math.round((Date.now() - session.answeredAt) / 1000)
       : 0;
-    callDebug(this.fastify.log, "terminate", {
-      callId,
-      status: opts.status,
-      fromState: session.state,
-      durationSec,
-      endedByUserId: opts.endedByUserId ?? null,
-    });
+    this.fastify.log.info(
+      {
+        callId,
+        status:              opts.status,
+        fromState:           session.state,
+        durationSec,
+        endedByUserId:       opts.endedByUserId ?? null,
+        iceCandidatesRelayed: session.iceCandidateCount,
+      },
+      "[call] terminated",
+    );
 
     try {
       await this.repo.markEnded(callId, opts.status, durationSec, opts.endedByUserId);
     } catch (err) {
-      this.fastify.log.error({ err, callId }, "call: markEnded failed");
+      this.fastify.log.error({ err, callId }, "[call] markEnded failed");
     }
     callRuntime.destroy(callId);
 
