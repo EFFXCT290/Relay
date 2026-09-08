@@ -9,9 +9,13 @@ import { ProblemError, problemResponse } from "../../backend-core/http/errors.js
 import prismaPlugin from "../../plugins/prisma.js";
 import redisPlugin from "../../plugins/redis.js";
 import authPlugin from "../../plugins/auth.js";
-import messageRoutes from "./message.routes.js";
+import messageRoutes, { currentReactionState } from "./message.routes.js";
 import { signAccessToken } from "../../backend-core/auth/tokens.js";
 import { ACCESS_COOKIE } from "../../backend-core/auth/cookies.js";
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 // Real integration test — real Postgres/Redis (the throwaway CI services), not
 // hand-rolled mocks. Same minimal-app approach as message.routes.test.ts: does
@@ -179,5 +183,100 @@ describe("POST /api/messages/:messageId/react — concurrent race recovery", () 
 
     const count = await app.prisma.reaction.count({ where: { messageId, userId: reactorId } });
     assert.ok(count === 0 || count === 1, `expected 0 or 1 reaction row(s) after the race settled, got ${count}`);
+  });
+});
+
+describe("currentReactionState() — atomic re-fetch, deterministic race injection", () => {
+  let app: Awaited<ReturnType<typeof buildTestApp>>;
+  let userId: string;
+  let conversationId: string;
+  let messageId: string;
+
+  before(async () => {
+    app = await buildTestApp();
+    const prisma = app.prisma;
+
+    const suffix = randomUUID().slice(0, 8);
+    const passwordHash = "not-a-real-hash";
+    const passwordSalt = randomBytes(32).toString("hex");
+    const user = await prisma.user.create({ data: { username: `react-atomic-${suffix}`, passwordHash, passwordSalt } });
+    userId = user.id;
+
+    const conversation = await prisma.conversation.create({ data: {} });
+    conversationId = conversation.id;
+    await prisma.participant.create({ data: { userId, conversationId, acceptedAt: new Date() } });
+
+    const message = await prisma.message.create({
+      data: { conversationId, senderId: userId, type: "TEXT", body: "atomic re-fetch target" },
+    });
+    messageId = message.id;
+  });
+
+  after(async () => {
+    const prisma = app.prisma;
+    await prisma.reaction.deleteMany({ where: { messageId } });
+    await prisma.message.delete({ where: { id: messageId } });
+    await prisma.participant.deleteMany({ where: { conversationId } });
+    await prisma.conversation.delete({ where: { id: conversationId } });
+    await prisma.user.delete({ where: { id: userId } });
+    await app.close();
+  });
+
+  // Forces the exact interleaving that produced the CI failure — a reaction
+  // row committed by a concurrent request lands strictly BETWEEN whichever
+  // read(s) currentReactionState issues. The old implementation split that
+  // into two independent, unsynchronized queries (groupBy + findUnique via
+  // Promise.all); this delays each candidate read's DISPATCH so a raw insert
+  // can land in the gap between them. Against the old code: groupBy is left
+  // undelayed (resolves immediately against the still-empty table) while
+  // findUnique is delayed past the insert — it "arrives late" and finds the
+  // row groupBy already missed, reproducing "myReaction reported but not
+  // reflected in reactions count" exactly. Against the fixed code: only
+  // findMany exists, so delaying it just shifts WHEN its one snapshot is
+  // taken — before or after the insert — never splits it. Both mocks are
+  // installed unconditionally so this same test is valid evidence against
+  // either implementation without editing it per revert.
+  it("myReaction and reactions always agree, even when a reaction commits mid-read (regression: CI's non-atomic groupBy+findUnique split)", async () => {
+    await app.prisma.reaction.deleteMany({ where: { messageId, userId } });
+
+    // A minimal stub matching only the shape currentReactionState reads
+    // (fastify.prisma.reaction.*), delegating to the real client per method
+    // with an artificial dispatch delay on the candidate "second read" —
+    // avoids monkey-patching Prisma's real Proxy-based client, which
+    // t.mock.method doesn't handle cleanly here.
+    const realReaction = app.prisma.reaction;
+    const delayedFastify = {
+      prisma: {
+        reaction: {
+          // groupBy intentionally undelayed: old code's groupBy fires
+          // immediately and resolves against the pre-insert (empty) state —
+          // that asymmetry is what actually produces the split pre-fix.
+          groupBy: (...args: Parameters<typeof realReaction.groupBy>) => (realReaction.groupBy as (...a: unknown[]) => unknown)(...args),
+          findUnique: async (...args: Parameters<typeof realReaction.findUnique>) => {
+            await sleep(40); // dispatch late — old code: "arrives after" the insert below
+            return realReaction.findUnique(...args);
+          },
+          findMany: async (...args: Parameters<typeof realReaction.findMany>) => {
+            await sleep(40); // new code: delaying the ONLY read just shifts its single snapshot point
+            return realReaction.findMany(...args);
+          },
+        },
+      },
+    } as unknown as import("fastify").FastifyInstance;
+
+    const [state] = await Promise.all([
+      currentReactionState(delayedFastify, messageId, userId),
+      (async () => {
+        await sleep(15); // land after groupBy/undelayed reads, before the 40ms-delayed ones resolve
+        await app.prisma.reaction.create({ data: { messageId, userId, emoji: "🔥" } });
+      })(),
+    ]);
+
+    if (state.myReaction !== null) {
+      assert.ok(
+        (state.reactions[state.myReaction] ?? 0) >= 1,
+        `myReaction ("${state.myReaction}") reported but not reflected in reactions count (${JSON.stringify(state.reactions)}) — the two fields were derived from different snapshots`,
+      );
+    }
   });
 });

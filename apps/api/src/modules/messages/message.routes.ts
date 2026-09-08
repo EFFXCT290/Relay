@@ -98,24 +98,32 @@ function visibleBody(
 // shared by the normal write path and the P2002/P2025 race-recovery path in
 // POST /messages/:messageId/react, so a concurrent loser reports whatever
 // actually landed rather than blindly echoing its own request.
-async function currentReactionState(
+//
+// Deliberately ONE query (findMany), not groupBy+findUnique run in parallel.
+// Two independent reads have no shared snapshot — a concurrent write from
+// the other side of the exact race this function exists to recover from can
+// land between them, so one read observes it and the other doesn't. That
+// produced a real CI failure: myReaction non-null but its count 0/undefined
+// in the same response. A single read can't split like that — reactions and
+// myReaction are always derived from the same rowset. Same discipline as
+// findExistingByClientMessageId's single findUnique for the message-create
+// P2002 path above.
+export async function currentReactionState(
   fastify: import("fastify").FastifyInstance,
   messageId: string,
   callerId: string,
 ) {
-  const [all, mine] = await Promise.all([
-    fastify.prisma.reaction.groupBy({
-      by: ["emoji"],
-      where: { messageId },
-      _count: { emoji: true },
-    }),
-    fastify.prisma.reaction.findUnique({
-      where: { messageId_userId: { messageId, userId: callerId } },
-      select: { emoji: true },
-    }),
-  ]);
-  const reactions = Object.fromEntries(all.map((r) => [r.emoji, r._count.emoji]));
-  return { messageId, reactions, myReaction: mine?.emoji ?? null };
+  const rows = await fastify.prisma.reaction.findMany({
+    where: { messageId },
+    select: { emoji: true, userId: true },
+  });
+  const reactions: Record<string, number> = {};
+  let myReaction: string | null = null;
+  for (const r of rows) {
+    reactions[r.emoji] = (reactions[r.emoji] ?? 0) + 1;
+    if (r.userId === callerId) myReaction = r.emoji;
+  }
+  return { messageId, reactions, myReaction };
 }
 
 // Shape shared by pin-create's include and the GET /pins list's include —
