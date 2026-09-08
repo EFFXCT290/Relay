@@ -538,6 +538,43 @@ describe("WebRtcController — routing incoming tracks: camera+mic vs. peer's sc
     const passedStream = vi.mocked(callbacks.onRemoteScreenStream).mock.calls.at(-1)![0] as unknown as FakeMediaStream;
     expect(passedStream.getTracks()).toHaveLength(2);
   });
+
+  it("REGRESSION: a second share session (stop -> start again) does not leave the first session's dead track in the stream handed to onRemoteScreenStream", async () => {
+    // Real-world mechanism (confirmed against MDN's addTrack spec): a sender
+    // that ever sent (currentDirection sendonly/sendrecv) can NEVER be reused
+    // by a later addTrack(), so restarting a share always mints a genuinely
+    // NEW transceiver/stream id on the wire — never the first session's. This
+    // test models exactly that: two DIFFERENT stream ids, one per session.
+    //
+    // A MediaStream with >1 video track only renders the first one added and
+    // never auto-switches — so if session #1's now-dead track is still sitting
+    // in the accumulator when session #2's track arrives, the remote <video>
+    // stays black even though the new track is technically present.
+    const callbacks = makeCallbacks();
+    const controller = new WebRtcController(callbacks);
+    await controller.createOffer();
+
+    const cameraStream = new FakeMediaStream([new FakeTrack("audio")], "camera-bundle");
+    lastPc!.ontrack!({ streams: [cameraStream], track: cameraStream.getTracks()[0]! });
+
+    // Session #1: starts, then (conceptually) stops — stopping fires no ontrack
+    // at all (a direction-only change only mutes the track, it doesn't end it
+    // or trigger a new event), so there's nothing to simulate for the stop.
+    const session1Stream = new FakeMediaStream([new FakeTrack("video")], "screen-session-1");
+    const session1Track = session1Stream.getTracks()[0]!;
+    lastPc!.ontrack!({ streams: [session1Stream], track: session1Track });
+
+    // Session #2: a brand-new transceiver/stream id, exactly as addTrack()
+    // guarantees once the first sender has ever sent.
+    const session2Stream = new FakeMediaStream([new FakeTrack("video")], "screen-session-2");
+    const session2Track = session2Stream.getTracks()[0]!;
+    lastPc!.ontrack!({ streams: [session2Stream], track: session2Track });
+
+    const latestStream = vi.mocked(callbacks.onRemoteScreenStream).mock.calls.at(-1)![0] as unknown as FakeMediaStream;
+    const latestTracks = latestStream.getTracks();
+    expect(latestTracks).toEqual([session2Track]); // ONLY the live track — session #1's dead one must be gone
+    expect(latestTracks).not.toContain(session1Track);
+  });
 });
 
 describe("WebRtcController — mid-call renegotiation glare guard (createOffer/acceptOffer)", () => {

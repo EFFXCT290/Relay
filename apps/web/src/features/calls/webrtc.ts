@@ -96,6 +96,17 @@ export class WebRtcController {
   // Screen share (additive track, never a replaceTrack swap of the camera).
   private localScreenStream: MediaStream | null = null;
   private remoteScreenStream: MediaStream | null = null;
+  // Which session's stream id remoteScreenStream currently accumulates. A
+  // sender that has ever sent (currentDirection sendonly/sendrecv) can never
+  // be reused by a later addTrack() (MDN's addTrack spec), so every
+  // stop-then-restart mints a genuinely new transceiver/stream id — never the
+  // previous session's. Tracked here so ontrack (below) can tell "another
+  // track of THIS session" (keep accumulating) apart from "a NEW session"
+  // (start fresh) — without it, a restarted share's live track would land in
+  // the same MediaStream as the previous session's now-permanently-muted one,
+  // and since a <video> only ever renders the FIRST video track a stream ever
+  // held, the element stays stuck on the dead one.
+  private remoteScreenStreamId: string | null = null;
   // ontrack fires once per incoming stream. The FIRST stream id ever seen is
   // the camera+mic bundle established at call setup; any track that later
   // arrives on a DIFFERENT stream id is the peer's screen share. Only two
@@ -145,7 +156,17 @@ export class WebRtcController {
       if (stream && this.primaryRemoteStreamId === null) this.primaryRemoteStreamId = stream.id;
 
       if (isScreenShare) {
-        if (!this.remoteScreenStream) this.remoteScreenStream = new MediaStream();
+        // stream.id changing means a NEW session (see remoteScreenStreamId's
+        // comment) — start a clean accumulator so the previous session's dead
+        // track can never linger as the stream's first (and thus rendered)
+        // video track. Same stream.id (e.g. the video-then-audio firings of
+        // ONE session) keeps mutating the existing object in place, which
+        // attachStream()'s identity guard (call-provider.tsx) treats as a
+        // no-op — avoiding an srcObject reassignment per track arrival.
+        if (!this.remoteScreenStream || this.remoteScreenStreamId !== stream.id) {
+          this.remoteScreenStream = new MediaStream();
+          this.remoteScreenStreamId = stream.id;
+        }
         for (const t of stream.getTracks()) this.remoteScreenStream.addTrack(t);
         this.cb.onRemoteScreenStream(this.remoteScreenStream);
         return;
@@ -398,6 +419,7 @@ export class WebRtcController {
     this.remoteStream = null;
     this.localScreenStream = null;
     this.remoteScreenStream = null;
+    this.remoteScreenStreamId = null;
     this.pendingIce = [];
   }
 }
