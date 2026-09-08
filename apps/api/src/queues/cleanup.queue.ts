@@ -1,12 +1,14 @@
 import { Queue } from "bullmq";
 import { queueConnection } from "./media.queue.js";
 
-// Phase 6E: the project's first *repeatable* queue. A single recurring job sweeps
-// ephemeral media whose view budget is spent (TemporaryMedia.consumedAt set) and
-// purges the bytes from MinIO. Deletion is intentionally decoupled from the view
-// endpoint so it is batched, idempotent, and retried on failure — the read path
-// already refuses URLs the instant a medium is consumed, so security never waits
-// on this sweep.
+// Phase 6E: the project's first *repeatable* queue. A single recurring job runs
+// two independent sweeps (see cleanup.worker.ts): ephemeral media whose view
+// budget is spent (TemporaryMedia.consumedAt set) gets its MinIO bytes purged,
+// and disappearing messages whose condition (view limit or expiry) has been met
+// get soft-deleted (MessageDisappearState). Both are decoupled from their
+// synchronous read paths so they're batched, idempotent, and retried on failure —
+// the read paths already refuse access/serve nothing the instant a thing is
+// consumed, so correctness never waits on this sweep; it's cleanup + backstop.
 export const CLEANUP_QUEUE_NAME = "ephemeral-cleanup";
 export const SWEEP_JOB = "sweep-expired";
 

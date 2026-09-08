@@ -10,7 +10,12 @@ import {
   EphemeralSendSchema,
   MAX_PINNED_MESSAGES,
   PinnedMessageSchema,
+  DisappearSendSchema,
+  DisappearStateSchema,
+  MessageViewResponseSchema,
   type PinnedMessage,
+  type DisappearState,
+  type MessageDisappearProgressEvent,
 } from "@relay/contracts";
 import { serializeAttachment, mediaKindFromMime } from "../media/media.service.js";
 import { createMediaRepository } from "../media/media.repository.js";
@@ -27,6 +32,7 @@ import {
   emitMessagePinned,
   emitMessageReaction,
   emitMessageUnpinned,
+  emitMessageDisappearProgress,
 } from "./message.socket.js";
 import { extractUrls } from "./utils/extract-urls.js";
 import { fetchEmbed } from "./services/embed.service.js";
@@ -50,6 +56,29 @@ async function assertParticipant(
     throw new ProblemError("forbidden", "You are not a participant.");
   }
   return conv;
+}
+
+// Shape shared by every include that joins a message's disappear sidecar —
+// GET list, POST create, and the idempotent-replay re-fetch below.
+type DisappearRow = { mode: "VIEWS" | "TIME"; viewLimit: number | null; viewCount: number; expiresAt: Date | null } | null;
+
+function serializeDisappear(d: DisappearRow): DisappearState | null {
+  if (!d) return null;
+  return {
+    mode:      d.mode === "VIEWS" ? "views" : "time",
+    viewLimit: d.viewLimit,
+    viewCount: d.viewCount,
+    expiresAt: d.expiresAt ? d.expiresAt.toISOString() : null,
+  };
+}
+
+// VIEWS-mode messages never serialize `body` through a normal read path —
+// mirrors GET /media/:mediaId/url refusing ephemeral media entirely (see
+// media.routes.ts). The only path to the text is POST
+// /messages/:messageId/view, which reads the Message row's body directly.
+function visibleBody(body: string | null, isDeleted: boolean, disappearMode: "VIEWS" | "TIME" | undefined): string | null {
+  if (isDeleted || disappearMode === "VIEWS") return null;
+  return body;
 }
 
 // Recomputes the true post-write reaction state for a message from the DB —
@@ -154,6 +183,7 @@ const messageRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
           reads:       { select: { readerId: true, readAt: true } },
           embed:       true,
           attachments: { include: { media: { include: { variants: true, temporary: true } } } },
+          disappear:   true,
         },
         orderBy: { createdAt: "desc" },
         take: limit + 1,
@@ -184,7 +214,8 @@ const messageRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
           senderId:       m.senderId,
           senderUsername: m.sender.username,
           type:           m.type,
-          body:           m.isDeleted ? null : m.body,
+          body:           visibleBody(m.body, m.isDeleted, m.disappear?.mode),
+          disappear:      serializeDisappear(m.disappear),
           replyTo: m.replyTo
             ? {
                 messageId: m.replyTo.id,
@@ -233,6 +264,7 @@ const messageRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
           body:            Type.String({ minLength: 1, maxLength: 4000 }),
           replyToId:       Type.Optional(Type.Union([Type.String({ format: "uuid" }), Type.Null()])),
           clientMessageId: Type.Optional(Type.String({ format: "uuid" })),
+          disappear:       Type.Optional(DisappearSendSchema),
         }),
         response: {
           201: Type.Object({
@@ -241,13 +273,14 @@ const messageRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
             senderId:       Type.String({ format: "uuid" }),
             senderUsername: Type.String(),
             type:           Type.Literal("TEXT"),
-            body:           Type.String(),
+            body:           Type.Union([Type.String(), Type.Null()]),
             replyTo:        Type.Union([Type.Null(), Type.Object({ messageId: Type.String(), preview: Type.Union([Type.String(), Type.Null()]), type: Type.String() })]),
             reactions:      Type.Record(Type.String(), Type.Integer()),
             myReaction:     Type.Union([Type.String(), Type.Null()]),
             readBy:         Type.Array(Type.Object({ userId: Type.String({ format: "uuid" }), readAt: Type.String({ format: "date-time" }) })),
             deliveredAt:    Type.Union([Type.String({ format: "date-time" }), Type.Null()]),
             createdAt:      Type.String({ format: "date-time" }),
+            disappear:      Type.Optional(Type.Union([Type.Null(), DisappearStateSchema])),
           }),
         },
       },
@@ -256,7 +289,7 @@ const messageRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
     async (request, reply) => {
       const callerId = request.userId!;
       const { conversationId } = request.params;
-      const { body, replyToId, clientMessageId } = request.body;
+      const { body, replyToId, clientMessageId, disappear } = request.body;
       await assertParticipant(fastify, callerId, conversationId);
 
       // Existing-message response shape shared by both idempotency paths below:
@@ -265,8 +298,9 @@ const messageRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
         fastify.prisma.message.findUnique({
           where: { senderId_clientMessageId: { senderId: callerId, clientMessageId: clientMsgId } },
           include: {
-            sender:  { select: { username: true } },
-            replyTo: { select: { id: true, body: true, type: true, isDeleted: true } },
+            sender:    { select: { username: true } },
+            replyTo:   { select: { id: true, body: true, type: true, isDeleted: true } },
+            disappear: true,
           },
         });
       type ExistingMessage = NonNullable<Awaited<ReturnType<typeof findExistingByClientMessageId>>>;
@@ -276,7 +310,8 @@ const messageRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
         senderId:       existing.senderId,
         senderUsername: existing.sender.username,
         type:           "TEXT" as const,
-        body:           existing.body!,
+        body:           visibleBody(existing.body, existing.isDeleted, existing.disappear?.mode),
+        disappear:      serializeDisappear(existing.disappear),
         // See the GET list route's identical re-check — soft-delete never
         // clears `body`, so a deleted parent's text must not leak here either.
         replyTo:        existing.replyTo
@@ -338,6 +373,17 @@ const messageRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
             },
           });
           await tx.conversation.update({ where: { id: conversationId }, data: { updatedAt: new Date() } });
+          if (disappear) {
+            await tx.messageDisappearState.create({
+              data: {
+                messageId: msg.id,
+                mode:      disappear.mode === "views" ? "VIEWS" : "TIME",
+                ...(disappear.mode === "views"
+                  ? { viewLimit: disappear.viewLimit }
+                  : { expiresAt: new Date(Date.now() + disappear.ttlSeconds * 1000) }),
+              },
+            });
+          }
           return msg;
         });
       } catch (err) {
@@ -353,13 +399,22 @@ const messageRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
         throw err;
       }
 
+      // Wire disappear state directly from the request rather than re-fetching
+      // the just-created row — the values are already known and unchanged.
+      const disappearState: DisappearState | null = disappear
+        ? disappear.mode === "views"
+          ? { mode: "views", viewLimit: disappear.viewLimit, viewCount: 0, expiresAt: null }
+          : { mode: "time", viewLimit: null, viewCount: 0, expiresAt: new Date(Date.now() + disappear.ttlSeconds * 1000).toISOString() }
+        : null;
+
       const httpPayload = {
         messageId:      created.id,
         conversationId: created.conversationId,
         senderId:       created.senderId,
         senderUsername: created.sender.username,
         type:           "TEXT" as const,
-        body:           created.body!,
+        body:           visibleBody(created.body, false, disappearState ? (disappearState.mode === "views" ? "VIEWS" : "TIME") : undefined),
+        disappear:      disappearState,
         replyTo: created.replyTo
           ? { messageId: created.replyTo.id, preview: created.replyTo.isDeleted ? null : (created.replyTo.body ? created.replyTo.body.slice(0, 80) : null), type: created.replyTo.type }
           : null,
@@ -378,10 +433,15 @@ const messageRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
 
       const onlineIds = otherIds.filter((uid) => (fastify.io.sockets.adapter.rooms.get(`user:${uid}`)?.size ?? 0) > 0);
 
+      // A "views"-mode disappearing message's text must never leak through a
+      // side channel — Discord webhook or push notification preview would
+      // otherwise defeat the entire point of hiding `body` from the API.
+      const notifyBody = disappearState?.mode === "views" ? null : body;
+
       if (isNotificationProviderEnabled("discord")) {
         void maybeNotifyDiscord({
           senderUsername: created.sender.username,
-          body:           body,
+          body:           notifyBody,
           messageType:    "TEXT",
           recipientIds:   otherIds,
           onlineIds,
@@ -391,7 +451,7 @@ const messageRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
       if (isNotificationProviderEnabled("push")) {
         void maybeNotifyPush(fastify, {
           senderUsername: created.sender.username,
-          body:           body,
+          body:           notifyBody,
           messageType:    "TEXT",
           conversationId,
           recipientIds:   otherIds,
@@ -419,8 +479,11 @@ const messageRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
         ),
       );
 
-      // Async embed fetch — does not block the HTTP response.
-      void (async () => {
+      // Async embed fetch — does not block the HTTP response. Skipped entirely
+      // for a "views"-mode disappearing message: a fetched embed's title/
+      // description/image would leak a preview of the hidden text through a
+      // broadcast event, defeating the whole point of hiding `body`.
+      if (disappearState?.mode !== "views") void (async () => {
         try {
           const urls = extractUrls(body);
           const firstUrl = urls[0];
@@ -893,6 +956,13 @@ const messageRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
           data: { isDeleted: true, deletedAt: new Date() },
         });
         const removed = await tx.pinnedMessage.deleteMany({ where: { messageId: msg.id } });
+        // A manual delete pre-empts any pending disappear condition — stamp
+        // consumedAt so the sweep (cleanup.worker.ts) never reprocesses this
+        // message once it's already gone.
+        await tx.messageDisappearState.updateMany({
+          where: { messageId: msg.id, consumedAt: null },
+          data:  { consumedAt: new Date() },
+        });
         return { wasPinned: removed.count > 0 };
       });
 
@@ -908,6 +978,114 @@ const messageRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
       }
 
       return reply.code(204).send();
+    },
+  );
+
+  // ── POST /api/messages/:messageId/view (disappearing "views" mode) ────────
+  // Mirrors POST /api/media/:mediaId/view (media.routes.ts) closely: a guarded
+  // atomic increment so a double-tap can never over-count the view budget,
+  // refuses once spent, and the sender can never spend their own message's
+  // views (they already know what they typed — same exclusion as the
+  // uploader being forbidden from opening their own ephemeral media). Unlike
+  // media there are no bytes to purge, so the final look soft-deletes the
+  // Message immediately in this same request (mirroring the DELETE route's
+  // unpin-in-the-same-transaction discipline above) instead of waiting on the
+  // sweep — the sweep is only a crash-recovery backstop for this mode.
+  fastify.post(
+    "/messages/:messageId/view",
+    {
+      preHandler: [fastify.authenticate],
+      schema: {
+        params:   Type.Object({ messageId: Type.String({ format: "uuid" }) }),
+        response: { 200: MessageViewResponseSchema },
+      },
+      config: { rateLimit: { max: 60, timeWindow: "1 minute" } },
+    },
+    async (request) => {
+      const callerId = request.userId!;
+      const { messageId } = request.params;
+
+      const msg = await fastify.prisma.message.findUnique({
+        where: { id: messageId },
+        include: {
+          disappear:    true,
+          conversation: { include: { participants: { select: { userId: true } } } },
+        },
+      });
+      if (!msg) throw new ProblemError("not_found", "Message not found.");
+      if (!msg.conversation.participants.some((p) => p.userId === callerId)) {
+        throw new ProblemError("forbidden", "You are not a participant.");
+      }
+      if (msg.senderId === callerId) {
+        throw new ProblemError("forbidden", "You can't open your own disappearing message.");
+      }
+      const state = msg.disappear;
+      if (!state || state.mode !== "VIEWS" || state.viewLimit == null) {
+        throw new ProblemError("bad_request", "This message is not view-once.");
+      }
+      if (msg.isDeleted) {
+        throw new ProblemError("not_found", "This message is no longer available.");
+      }
+
+      // Already spent before this request → no body, no further mint.
+      if (state.consumedAt || state.viewCount >= state.viewLimit) {
+        return { consumed: true, viewCount: state.viewCount, viewLimit: state.viewLimit };
+      }
+
+      // Guarded atomic increment: bumps only while strictly under the cap, so
+      // a double-tap (or a second recipient, in a future group thread) can
+      // never over-count.
+      const viewedAt = new Date();
+      const bumped = await fastify.prisma.messageDisappearState.updateMany({
+        where: { messageId, viewCount: { lt: state.viewLimit } },
+        data:  { viewCount: { increment: 1 } },
+      });
+      const fresh = await fastify.prisma.messageDisappearState.findUnique({ where: { messageId } });
+      const viewCount = fresh?.viewCount ?? state.viewLimit;
+      const consumed  = viewCount >= state.viewLimit;
+
+      if (bumped.count === 0) {
+        // Lost the race for the last view — refuse, no body.
+        return { consumed: true, viewCount, viewLimit: state.viewLimit };
+      }
+
+      let wasPinned = false;
+      if (consumed && !fresh?.consumedAt) {
+        const result = await fastify.prisma.$transaction(async (tx) => {
+          await tx.message.update({
+            where: { id: messageId },
+            data:  { isDeleted: true, deletedAt: viewedAt },
+          });
+          const removed = await tx.pinnedMessage.deleteMany({ where: { messageId } });
+          await tx.messageDisappearState.updateMany({
+            where: { messageId, consumedAt: null },
+            data:  { consumedAt: viewedAt },
+          });
+          return { wasPinned: removed.count > 0 };
+        });
+        wasPinned = result.wasPinned;
+      }
+
+      const progressEvent: MessageDisappearProgressEvent = {
+        messageId,
+        conversationId: msg.conversationId,
+        viewCount,
+        viewLimit: state.viewLimit,
+        consumed,
+        viewedAt: viewedAt.toISOString(),
+      };
+      emitMessageDisappearProgress(fastify.io, msg.conversationId, progressEvent);
+      if (consumed) {
+        emitMessageDeleted(fastify.io, msg.conversationId, { messageId, conversationId: msg.conversationId });
+        if (wasPinned) {
+          emitMessageUnpinned(fastify.io, msg.conversationId, { messageId, conversationId: msg.conversationId });
+        }
+      }
+
+      // Whoever spends the last look still gets to read it this once — body
+      // is included whenever this call successfully processed a fresh look,
+      // regardless of whether that same look also just consumed the budget.
+      return { consumed, viewCount, viewLimit: state.viewLimit, body: msg.body! };
     },
   );
 

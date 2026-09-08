@@ -49,6 +49,38 @@ export const MessageEmbedSchema = Type.Object({
     faviconUrl: Type.Union([Type.String(), Type.Null()]),
     provider: Type.Optional(Type.Union([Type.String(), Type.Null()])),
 });
+// ── Disappearing messages ────────────────────────────────────────────────────
+// Two modes, mirroring the ephemeral-media pattern (media.contract.ts's
+// EphemeralSendSchema/EphemeralStateSchema) but for a TEXT message's body
+// instead of a media attachment:
+//   - "views": Snapchat-style. `body` is withheld from every normal read path
+//     (GET list, message:new, idempotent replay) exactly like an ephemeral
+//     attachment's URL is withheld — the only way to read it is spending a
+//     look via POST /messages/:messageId/view. The message soft-deletes once
+//     viewCount reaches viewLimit.
+//   - "time": Signal-style. `body` is visible immediately like a normal
+//     message; the message soft-deletes itself once expiresAt passes, swept
+//     by the same worker tick as ephemeral media's cleanup.worker.ts.
+export const DisappearSendSchema = Type.Union([
+    Type.Object({ mode: Type.Literal("views"), viewLimit: Type.Integer({ minimum: 1, maximum: 5 }) }),
+    Type.Object({ mode: Type.Literal("time"), ttlSeconds: Type.Integer({ minimum: 5, maximum: 604800 }) }), // 5s..7d
+]);
+// Wire state embedded in MessageSchema.disappear. viewLimit/expiresAt are
+// mutually exclusive with the mode, mirroring EphemeralState's shape.
+export const DisappearStateSchema = Type.Object({
+    mode: Type.Union([Type.Literal("views"), Type.Literal("time")]),
+    viewLimit: Type.Union([Type.Integer(), Type.Null()]),
+    viewCount: Type.Integer(),
+    expiresAt: Type.Union([Type.String({ format: "date-time" }), Type.Null()]),
+});
+// Response of POST /api/messages/:messageId/view. `body` is the freshly-spent
+// look's text, omitted once the message is consumed (mirrors MediaViewResponse).
+export const MessageViewResponseSchema = Type.Object({
+    consumed: Type.Boolean(),
+    viewCount: Type.Integer(),
+    viewLimit: Type.Integer(),
+    body: Type.Optional(Type.String()),
+});
 export const MessageSchema = Type.Object({
     messageId: Type.String({ format: "uuid" }),
     conversationId: Type.String({ format: "uuid" }),
@@ -70,6 +102,8 @@ export const MessageSchema = Type.Object({
     // Set only on message:new WS echoes for text sends — used by the sender's
     // client to atomically swap the optimistic tempId for the server's real ID.
     clientMessageId: Type.Optional(Type.Union([Type.String({ format: "uuid" }), Type.Null()])),
+    // Present iff this message was sent with disappear-on (see DisappearStateSchema).
+    disappear: Type.Optional(Type.Union([Type.Null(), DisappearStateSchema])),
 });
 // ── Request payloads ─────────────────────────────────────────────────────────
 export const SendMessagePayloadSchema = Type.Object({
@@ -100,4 +134,5 @@ export const MESSAGE_EVENTS = {
     EMBED_UPDATE: "message:embed:update",
     PINNED: "message:pinned",
     UNPINNED: "message:unpinned",
+    DISAPPEAR_PROGRESS: "message:disappear:progress",
 };

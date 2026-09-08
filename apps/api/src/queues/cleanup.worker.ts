@@ -6,6 +6,7 @@ import type { FastifyBaseLogger } from "fastify";
 import { env } from "../backend-core/runtime/env.js";
 import { CLEANUP_QUEUE_NAME } from "./cleanup.queue.js";
 import { queueConnection } from "./media.queue.js";
+import { emitMessageDeleted, emitMessageUnpinned } from "../modules/messages/message.socket.js";
 
 type WorkerDeps = {
   s3:     S3Client;
@@ -77,10 +78,78 @@ async function sweep(deps: WorkerDeps): Promise<void> {
   }
 }
 
+// One sweep tick: soft-delete every disappearing message whose condition has
+// been met but hasn't been handled yet — mirrors `sweep()` above, querying
+// MessageDisappearState directly (cheap and targeted) rather than scanning
+// all messages. Two candidate sets:
+//   - TIME mode: expiresAt has passed. This is the primary path — nothing
+//     else in the app ever closes out a TIME-mode row, so the sweep is the
+//     only thing that ever will.
+//   - VIEWS mode: viewCount already reached viewLimit. This is a backstop
+//     only — POST /messages/:messageId/view (message.routes.ts) already
+//     soft-deletes synchronously the instant the last look is spent; this
+//     just catches a row stranded by a crash between the increment and that
+//     soft-delete.
+// Idempotent — the `consumedAt: null` filter and the `isDeleted` check inside
+// the transaction make re-runs (and crashes mid-tick) safe. consumedAt is
+// stamped only after the Message is confirmed soft-deleted, so a partial
+// failure simply retries next tick.
+export async function sweepDisappearingMessages(deps: WorkerDeps): Promise<void> {
+  const { prisma, io, log } = deps;
+  const now = new Date();
+
+  const [timeExpired, viewsSpent] = await Promise.all([
+    prisma.messageDisappearState.findMany({
+      where: { mode: "TIME", consumedAt: null, expiresAt: { lte: now } },
+      take: 500,
+    }),
+    prisma.messageDisappearState.findMany({
+      where: { mode: "VIEWS", consumedAt: null, viewCount: { gt: 0 } },
+      take: 500,
+    }),
+  ]);
+  const candidates = [
+    ...timeExpired,
+    ...viewsSpent.filter((row) => row.viewLimit != null && row.viewCount >= row.viewLimit),
+  ];
+  if (candidates.length === 0) return;
+
+  for (const row of candidates) {
+    const result = await prisma.$transaction(async (tx) => {
+      const msg = await tx.message.findUnique({
+        where: { id: row.messageId },
+        select: { conversationId: true, isDeleted: true },
+      });
+      // Message already hard-gone (e.g. its conversation was hard-deleted in
+      // a test/admin path) — nothing left to soft-delete or broadcast.
+      if (!msg) return null;
+      if (!msg.isDeleted) {
+        await tx.message.update({
+          where: { id: row.messageId },
+          data:  { isDeleted: true, deletedAt: now },
+        });
+      }
+      const removed = await tx.pinnedMessage.deleteMany({ where: { messageId: row.messageId } });
+      await tx.messageDisappearState.update({
+        where: { id: row.id },
+        data:  { consumedAt: now },
+      });
+      return { conversationId: msg.conversationId, wasPinned: removed.count > 0 };
+    });
+    if (!result) continue;
+
+    emitMessageDeleted(io, result.conversationId, { messageId: row.messageId, conversationId: result.conversationId });
+    if (result.wasPinned) {
+      emitMessageUnpinned(io, result.conversationId, { messageId: row.messageId, conversationId: result.conversationId });
+    }
+    log.info({ messageId: row.messageId, mode: row.mode }, "disappearing-message: swept");
+  }
+}
+
 export function createCleanupWorker(deps: WorkerDeps) {
   const worker = new Worker(
     CLEANUP_QUEUE_NAME,
-    () => sweep(deps),
+    () => Promise.all([sweep(deps), sweepDisappearingMessages(deps)]).then(() => undefined),
     { connection, concurrency: 1 },
   );
   worker.on("failed", (_job, err) => {

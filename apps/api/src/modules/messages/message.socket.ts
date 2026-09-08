@@ -5,6 +5,7 @@ import {
   type MessageDeletedEvent,
   type MessageDeleteInbound,
   type MessageDeliveredEvent,
+  type MessageDisappearProgressEvent,
   type MessageEditInbound,
   type MessageEditedEvent,
   type MessageEmbedUpdateEvent,
@@ -121,4 +122,8 @@ export function emitMessagePinned(io: IOServer, conversationId: string, event: M
 
 export function emitMessageUnpinned(io: IOServer, conversationId: string, event: MessageUnpinnedEvent) {
   io.to(`conversation:${conversationId}`).emit(MESSAGE_EVENTS.UNPINNED, event);
+}
+
+export function emitMessageDisappearProgress(io: IOServer, conversationId: string, event: MessageDisappearProgressEvent) {
+  io.to(`conversation:${conversationId}`).emit(MESSAGE_EVENTS.DISAPPEAR_PROGRESS, event);
 }

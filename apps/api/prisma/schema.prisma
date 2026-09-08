@@ -121,10 +121,45 @@ model Message {
   reactions    Reaction[]
   embed        MessageEmbed?
   pinned       PinnedMessage?
+  disappear    MessageDisappearState?
 
   @@unique([senderId, clientMessageId])
   @@index([conversationId, createdAt])
   @@index([senderId])
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+//  Disappearing messages — mirrors TemporaryMedia's shape and purpose exactly:
+//  a sidecar row for an ephemeral thing with a view count or expiry that needs
+//  sweeping. Only a message sent with disappear-on gets a row. VIEWS mode
+//  hides the body until POST /messages/:id/view spends a look (Snapchat-style,
+//  same as ephemeral media's POST /media/:id/view); TIME mode shows the body
+//  immediately and the message expires itself later (Signal-style). The sweep
+//  (cleanup.worker.ts) queries THIS table directly — never a filtered scan
+//  across all messages — and soft-deletes the Message via the existing
+//  isDeleted/deletedAt mechanism once a mode's condition is met; it never
+//  hard-deletes. consumedAt is the single "done" marker (there is no separate
+//  purge phase like TemporaryMedia's MinIO purge — soft-deleting a row has no
+//  bytes to clean up), stamped once the Message has been soft-deleted so the
+//  sweep never reprocesses an already-handled message.
+model MessageDisappearState {
+  id         String        @id @default(uuid())
+  messageId  String        @unique
+  mode       DisappearMode
+  viewLimit  Int? // 1..5, required for mode VIEWS; null for TIME
+  viewCount  Int           @default(0)
+  expiresAt  DateTime? // required for mode TIME; null for VIEWS
+  consumedAt DateTime? // stamped once the condition is met AND the Message has been soft-deleted
+  createdAt  DateTime      @default(now())
+
+  message Message @relation(fields: [messageId], references: [id], onDelete: Cascade)
+
+  @@index([mode, consumedAt, expiresAt]) // sweep: TIME-mode candidates not yet consumed; VIEWS backstop
+}
+
+enum DisappearMode {
+  VIEWS
+  TIME
 }
 
 // One row per pinned message (max 3 per conversation, enforced in

@@ -35,6 +35,28 @@ export declare const MessageEmbedSchema: import("@sinclair/typebox").TObject<{
     provider: import("@sinclair/typebox").TOptional<import("@sinclair/typebox").TUnion<[import("@sinclair/typebox").TString, import("@sinclair/typebox").TNull]>>;
 }>;
 export type MessageEmbed = Static<typeof MessageEmbedSchema>;
+export declare const DisappearSendSchema: import("@sinclair/typebox").TUnion<[import("@sinclair/typebox").TObject<{
+    mode: import("@sinclair/typebox").TLiteral<"views">;
+    viewLimit: import("@sinclair/typebox").TInteger;
+}>, import("@sinclair/typebox").TObject<{
+    mode: import("@sinclair/typebox").TLiteral<"time">;
+    ttlSeconds: import("@sinclair/typebox").TInteger;
+}>]>;
+export type DisappearSend = Static<typeof DisappearSendSchema>;
+export declare const DisappearStateSchema: import("@sinclair/typebox").TObject<{
+    mode: import("@sinclair/typebox").TUnion<[import("@sinclair/typebox").TLiteral<"views">, import("@sinclair/typebox").TLiteral<"time">]>;
+    viewLimit: import("@sinclair/typebox").TUnion<[import("@sinclair/typebox").TInteger, import("@sinclair/typebox").TNull]>;
+    viewCount: import("@sinclair/typebox").TInteger;
+    expiresAt: import("@sinclair/typebox").TUnion<[import("@sinclair/typebox").TString, import("@sinclair/typebox").TNull]>;
+}>;
+export type DisappearState = Static<typeof DisappearStateSchema>;
+export declare const MessageViewResponseSchema: import("@sinclair/typebox").TObject<{
+    consumed: import("@sinclair/typebox").TBoolean;
+    viewCount: import("@sinclair/typebox").TInteger;
+    viewLimit: import("@sinclair/typebox").TInteger;
+    body: import("@sinclair/typebox").TOptional<import("@sinclair/typebox").TString>;
+}>;
+export type MessageViewResponse = Static<typeof MessageViewResponseSchema>;
 export declare const MessageSchema: import("@sinclair/typebox").TObject<{
     messageId: import("@sinclair/typebox").TString;
     conversationId: import("@sinclair/typebox").TString;
@@ -138,6 +160,12 @@ export declare const MessageSchema: import("@sinclair/typebox").TObject<{
         }>;
     }>]>>>;
     clientMessageId: import("@sinclair/typebox").TOptional<import("@sinclair/typebox").TUnion<[import("@sinclair/typebox").TString, import("@sinclair/typebox").TNull]>>;
+    disappear: import("@sinclair/typebox").TOptional<import("@sinclair/typebox").TUnion<[import("@sinclair/typebox").TNull, import("@sinclair/typebox").TObject<{
+        mode: import("@sinclair/typebox").TUnion<[import("@sinclair/typebox").TLiteral<"views">, import("@sinclair/typebox").TLiteral<"time">]>;
+        viewLimit: import("@sinclair/typebox").TUnion<[import("@sinclair/typebox").TInteger, import("@sinclair/typebox").TNull]>;
+        viewCount: import("@sinclair/typebox").TInteger;
+        expiresAt: import("@sinclair/typebox").TUnion<[import("@sinclair/typebox").TString, import("@sinclair/typebox").TNull]>;
+    }>]>>;
 }>;
 export type Message = Static<typeof MessageSchema>;
 export type MessageType = "TEXT" | "IMAGE" | "VIDEO" | "AUDIO";
@@ -164,6 +192,7 @@ export declare const MESSAGE_EVENTS: {
     readonly EMBED_UPDATE: "message:embed:update";
     readonly PINNED: "message:pinned";
     readonly UNPINNED: "message:unpinned";
+    readonly DISAPPEAR_PROGRESS: "message:disappear:progress";
 };
 export type MessageEventName = (typeof MESSAGE_EVENTS)[keyof typeof MESSAGE_EVENTS];
 export type MessageSendInbound = SendMessagePayload & {
@@ -223,4 +252,12 @@ export type MessagePinnedEvent = {
 export type MessageUnpinnedEvent = {
     messageId: string;
     conversationId: string;
+};
+export type MessageDisappearProgressEvent = {
+    messageId: string;
+    conversationId: string;
+    viewCount: number;
+    viewLimit: number;
+    consumed: boolean;
+    viewedAt: string;
 };
