@@ -20,7 +20,7 @@ import { generateTurnCredentials } from "./turn.helper.js";
 import { PushRepository } from "../push/push.repository.js";
 import type { PushPayload } from "../push/push.service.js";
 import { pushQueue, SEND_PUSH_JOB } from "../../queues/push.queue.js";
-import { isNotificationProviderEnabled } from "../../backend-core/runtime/env.js";
+import { env, isNotificationProviderEnabled } from "../../backend-core/runtime/env.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Call orchestration. Signaling is fire-and-forget over user rooms (raw emit,
@@ -33,6 +33,12 @@ import { isNotificationProviderEnabled } from "../../backend-core/runtime/env.js
 // disconnect racing an explicit end, or a stale ring timer firing after answer
 // — collapse to one DB write and one teardown. No terminal logic lives anywhere
 // else.
+//
+// A mid-call ("active") socket disconnect does NOT funnel into terminate()
+// immediately — it arms a CALL_DISCONNECT_GRACE_MS timer first (see
+// handleDisconnect/handleReconnect below), so a transient Socket.IO reconnect
+// doesn't race ahead of the client's own WebRTC-layer recovery and kill a call
+// that was about to heal itself.
 // ─────────────────────────────────────────────────────────────────────────────
 
 export class CallService {
@@ -229,19 +235,42 @@ export class CallService {
     const peer = callRuntime.peerOf(session, userId);
 
     if (session.state === "active") {
+      // Don't terminate on the spot — a Socket.IO disconnect is frequently a
+      // transient reconnect (brief network blip, tab backgrounding), the same
+      // class of event the client's WebRTC layer already rides out via
+      // ICE_DISCONNECT_GRACE_MS. Killing the call here, synchronously, would
+      // race ahead of that recovery and undermine it. Instead arm a grace
+      // timer; handleReconnect() cancels it if this same user reconnects in
+      // time, otherwise it fires terminate() itself once the window elapses.
+      if (session.disconnectGrace) clearTimeout(session.disconnectGrace.timer); // no stacking on a second drop
       this.fastify.log.info(
-        { callId: session.callId, userId, reason: "socket disconnect", fromState: session.state },
-        "[call] disconnect",
+        { callId: session.callId, userId, reason: "socket disconnect", fromState: session.state, graceMs: env.CALL_DISCONNECT_GRACE_MS },
+        "[call] disconnect — grace period armed",
       );
-      await this.terminate(session.callId, {
-        status: "FAILED",
-        endedByUserId: userId,
-        event: CALL_EVENTS.FAILED,
-        notify: [peer],
-      });
+      const timer = setTimeout(() => {
+        // Re-fetch rather than trust the closed-over `session`: if the call
+        // ended for a real, different reason in the meantime (peer hung up,
+        // ring timeout, the disconnected user's own later reject/end racing
+        // in), destroy() already cleared this exact timer — so reaching here
+        // at all means that didn't happen. terminate()'s own idempotency
+        // guard is the backstop if it somehow still did.
+        const current = callRuntime.get(session.callId);
+        if (current) current.disconnectGrace = undefined;
+        this.fastify.log.info({ callId: session.callId, userId }, "[call] disconnect grace expired");
+        void this.terminate(session.callId, {
+          status: "FAILED",
+          endedByUserId: userId,
+          event: CALL_EVENTS.FAILED,
+          notify: [peer],
+        });
+      }, env.CALL_DISCONNECT_GRACE_MS);
+      timer.unref?.();
+      session.disconnectGrace = { timer, disconnectedUserId: userId };
     } else {
       // Disconnected while still ringing — never connected → MISSED, and stop
       // the peer's UI (caller's outgoing ring or recipient's incoming modal).
+      // No grace period here: there's no established media session for a
+      // reconnect to resume, so an unanswered call gets treated as before.
       this.fastify.log.info(
         { callId: session.callId, userId, reason: "socket disconnect", fromState: session.state },
         "[call] disconnect",
@@ -252,6 +281,20 @@ export class CallService {
         notify: [peer],
       });
     }
+  }
+
+  // Called on every new socket connection (plugins/socket.ts), alongside
+  // resyncRinging. If this user has an active call with a disconnect grace
+  // timer pending FOR THEM specifically (disconnectedUserId check — the
+  // peer's own unrelated connection event must never cancel a grace timer
+  // that isn't theirs), cancel it: they're back before the window elapsed, so
+  // the call continues uninterrupted. No-op in every other case.
+  handleReconnect(userId: string): void {
+    const session = callRuntime.getByUser(userId);
+    if (!session?.disconnectGrace || session.disconnectGrace.disconnectedUserId !== userId) return;
+    clearTimeout(session.disconnectGrace.timer);
+    session.disconnectGrace = undefined;
+    this.fastify.log.info({ callId: session.callId, userId }, "[call] disconnect grace cancelled — reconnected");
   }
 
   // The single idempotent cleanup routine. First caller wins: it writes the

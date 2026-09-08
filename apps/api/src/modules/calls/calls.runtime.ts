@@ -41,6 +41,19 @@ export type ActiveCallSession = {
   // logged once as a total in terminate()'s summary rather than one log line
   // per candidate, which would fire dozens of times per call for no signal.
   iceCandidateCount: number;
+
+  // Armed by handleDisconnect() when a participant's socket drops mid-call
+  // (state "active"): gives them CALL_DISCONNECT_GRACE_MS to reconnect before
+  // the call is actually torn down. disconnectedUserId records WHICH
+  // participant dropped, so the other peer's own (unrelated) connection event
+  // can never be mistaken for the disconnected side reconnecting. Cleared by
+  // handleReconnect() on a timely reconnect, or consumed when the timer fires
+  // into terminate(); also cleared by destroy() so a disconnect racing a
+  // legitimate end()/reject() can never fire terminate() a second time.
+  disconnectGrace?: {
+    timer: NodeJS.Timeout;
+    disconnectedUserId: string;
+  };
 };
 
 const sessions = new Map<string, ActiveCallSession>();
@@ -82,6 +95,7 @@ export const callRuntime = {
     const session = sessions.get(callId);
     if (!session) return;
     if (session.ringTimer) clearTimeout(session.ringTimer);
+    if (session.disconnectGrace) clearTimeout(session.disconnectGrace.timer);
     sessions.delete(callId);
     if (byUser.get(session.callerId) === callId)    byUser.delete(session.callerId);
     if (byUser.get(session.recipientId) === callId) byUser.delete(session.recipientId);

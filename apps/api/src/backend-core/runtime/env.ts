@@ -70,6 +70,16 @@ export const env = {
   VIDEO_H264_CRF:    int("VIDEO_H264_CRF", 21),
   VIDEO_H264_PRESET: optional("VIDEO_H264_PRESET", "medium"),
 
+  // calls.service.ts handleDisconnect(): how long a participant's Socket.IO
+  // connection can be down mid-call before the call is actually torn down.
+  // Matches the client's ICE_DISCONNECT_GRACE_MS (call-provider.tsx) so a
+  // transient Socket.IO reconnect — the same class of brief network blip the
+  // WebRTC layer already tolerates — can't kill the call at the signaling
+  // layer before the media layer's own recovery even gets a chance. Overridden
+  // much lower in .env.test so calls.socket.test.ts's real disconnect/
+  // reconnect tests don't have to wait out a real 8s window.
+  CALL_DISCONNECT_GRACE_MS: int("CALL_DISCONNECT_GRACE_MS", 8_000),
+
   // WebRTC TURN relay. coturn run with `static-auth-secret` (the TURN REST API):
   // the API mints time-limited HMAC credentials per call, so no per-user TURN
   // accounts exist. Both left blank → calls fall back to STUN-only; that works on

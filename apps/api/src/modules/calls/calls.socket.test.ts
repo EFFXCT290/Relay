@@ -14,6 +14,7 @@ import { signAccessToken } from "../../backend-core/auth/tokens.js";
 import { ACCESS_COOKIE } from "../../backend-core/auth/cookies.js";
 import { CALL_EVENTS, type CallInitAck } from "@relay/contracts";
 import type { PrismaClient } from "@prisma/client";
+import { env } from "../../backend-core/runtime/env.js";
 
 // Real integration test — a real Socket.IO server bound to a real port, real
 // Postgres/Redis, driven by real socket.io-client connections. Same rationale
@@ -212,6 +213,91 @@ describe("calls.socket.ts — real Socket.IO handlers", () => {
       const bEnded = waitForEvent(bSocket, CALL_EVENTS.ENDED, 3000);
       aSocket.emit(CALL_EVENTS.END, { callId });
       await bEnded;
+    });
+  });
+
+  describe("disconnect grace period — a mid-call socket drop is not an instant hangup", () => {
+    it("a reconnect within the grace window cancels the pending termination — the call survives", async () => {
+      const [a, b] = await Promise.all([
+        createUser(app.prisma, "gr-a"),
+        createUser(app.prisma, "gr-b"),
+      ]);
+      createdUserIds.push(a.id, b.id);
+
+      const [aSocket, bSocket] = await Promise.all([connectSocket(url, a.id), connectSocket(url, b.id)]);
+      sockets.push(aSocket, bSocket);
+
+      const bRinging = waitForEvent(bSocket, CALL_EVENTS.RINGING, 3000);
+      const ack = await initAck(aSocket, { targetUserId: b.id, type: "AUDIO" });
+      assert.equal(ack.ok, true);
+      if (!ack.ok) return;
+      const callId = ack.callId;
+      await bRinging;
+
+      // Bring the call to "active" — the grace period only applies once
+      // media negotiation has actually started, not to a still-ringing call.
+      const aAccepted = waitForEvent(aSocket, CALL_EVENTS.ACCEPTED, 3000);
+      bSocket.emit(CALL_EVENTS.ACCEPT, { callId });
+      await aAccepted;
+
+      const terminalEvents: string[] = [];
+      aSocket.on(CALL_EVENTS.FAILED, () => terminalEvents.push("failed"));
+      aSocket.on(CALL_EVENTS.ENDED, () => terminalEvents.push("ended"));
+
+      bSocket.disconnect(); // simulates a dropped connection mid-call
+
+      // Reconnect as the SAME user well within the grace window — a fresh
+      // socket.io-client connection, exactly like a page reload would produce.
+      const bSocket2 = await connectSocket(url, b.id);
+      sockets.push(bSocket2);
+
+      // Outlive the grace window by a comfortable margin. If the reconnect
+      // hadn't cancelled the pending timer, terminate() would have fired well
+      // before this point.
+      await sleep(env.CALL_DISCONNECT_GRACE_MS + 500);
+      assert.equal(terminalEvents.length, 0, "the reconnect must have cancelled the grace timer — no terminal event should fire");
+
+      // Prove the session is genuinely still alive server-side, not just
+      // "hasn't failed yet": an explicit end() from the reconnected side must
+      // still succeed and reach A.
+      const aEnded = waitForEvent(aSocket, CALL_EVENTS.ENDED, 3000);
+      bSocket2.emit(CALL_EVENTS.END, { callId });
+      await aEnded;
+    });
+
+    it("a disconnect that's never followed by a reconnect ends in FAILED once the grace window elapses", async () => {
+      const [a, b] = await Promise.all([
+        createUser(app.prisma, "gt-a"),
+        createUser(app.prisma, "gt-b"),
+      ]);
+      createdUserIds.push(a.id, b.id);
+
+      const [aSocket, bSocket] = await Promise.all([connectSocket(url, a.id), connectSocket(url, b.id)]);
+      sockets.push(aSocket, bSocket);
+
+      const bRinging = waitForEvent(bSocket, CALL_EVENTS.RINGING, 3000);
+      const ack = await initAck(aSocket, { targetUserId: b.id, type: "AUDIO" });
+      assert.equal(ack.ok, true);
+      if (!ack.ok) return;
+      const callId = ack.callId;
+      await bRinging;
+
+      const aAccepted = waitForEvent(aSocket, CALL_EVENTS.ACCEPTED, 3000);
+      bSocket.emit(CALL_EVENTS.ACCEPT, { callId });
+      await aAccepted;
+
+      const aFailed = waitForEvent<{ callId: string; status: string }>(
+        aSocket,
+        CALL_EVENTS.FAILED,
+        env.CALL_DISCONNECT_GRACE_MS + 2000,
+      );
+      bSocket.disconnect(); // dropped, and never comes back
+
+      const failedPayload = await aFailed;
+      assert.deepEqual(failedPayload, { callId, status: "FAILED" });
+
+      const row = await app.prisma.call.findUnique({ where: { id: callId } });
+      assert.equal(row?.status, "FAILED");
     });
   });
 });

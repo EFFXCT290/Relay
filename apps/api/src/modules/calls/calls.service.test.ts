@@ -1,8 +1,9 @@
-import { describe, it, after } from "node:test";
+import { describe, it, after, beforeEach, mock } from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { CALL_EVENTS } from "@relay/contracts";
 import { callRuntime, type ActiveCallSession } from "./calls.runtime.js";
+import { env } from "../../backend-core/runtime/env.js";
 
 // calls.service.ts transitively imports the real BullMQ Queue singletons
 // (push.queue.ts, which itself imports media.queue.ts for queueConnection()).
@@ -429,7 +430,9 @@ describe("CallService.end — participant-only terminal transition (valid from r
 });
 
 describe("CallService.handleDisconnect — safety-net teardown on socket drop", () => {
-  it("disconnect during an active call: FAILED persisted and emitted to the peer", async () => {
+  beforeEach(() => { mock.timers.reset(); });
+
+  it("disconnect during an active call: arms a grace timer instead of terminating immediately", async () => {
     const CallService = await freshCallService();
     const callerId = randomUUID();
     const recipientId = randomUUID();
@@ -440,6 +443,31 @@ describe("CallService.handleDisconnect — safety-net teardown on socket drop", 
     const svc = new CallService(fastify);
     await svc.handleDisconnect(recipientId); // recipient's socket drops
 
+    assert.equal(callUpdates.length, 0, "must not terminate on the spot — a grace period is pending");
+    assert.equal(emitted.length, 0);
+    const session = callRuntime.get(callId);
+    assert.ok(session, "the session must survive while the grace window is open");
+    assert.equal(session!.disconnectGrace?.disconnectedUserId, recipientId);
+
+    callRuntime.destroy(callId);
+  });
+
+  it("disconnect during an active call that's never followed by a reconnect: FAILED persisted and emitted to the peer once the grace window elapses", async () => {
+    mock.timers.enable({ apis: ["setTimeout"] });
+    const CallService = await freshCallService();
+    const callerId = randomUUID();
+    const recipientId = randomUUID();
+    const callId = randomUUID();
+    const { fastify, callUpdates, emitted } = makeFastify({ users: [] });
+    seedSession({ callId, callerId, recipientId, state: "active", answeredAt: Date.now() });
+
+    const svc = new CallService(fastify);
+    await svc.handleDisconnect(recipientId); // recipient's socket drops
+    assert.equal(callUpdates.length, 0, "still inside the grace window");
+
+    mock.timers.tick(env.CALL_DISCONNECT_GRACE_MS);
+    await drain();
+
     assert.equal(callUpdates.length, 1);
     assert.equal(callUpdates[0]!.data.status, "FAILED");
     assert.equal(callUpdates[0]!.data.endedByUserId, recipientId);
@@ -448,6 +476,75 @@ describe("CallService.handleDisconnect — safety-net teardown on socket drop", 
     assert.equal(emitted[0]!.room, `user:${callerId}`);
     assert.equal(emitted[0]!.event, CALL_EVENTS.FAILED);
     assert.deepEqual(emitted[0]!.payload, { callId, status: "FAILED" });
+  });
+
+  it("reconnecting within the grace window cancels the pending timer — the call is never terminated", async () => {
+    mock.timers.enable({ apis: ["setTimeout"] });
+    const CallService = await freshCallService();
+    const callerId = randomUUID();
+    const recipientId = randomUUID();
+    const callId = randomUUID();
+    const { fastify, callUpdates, emitted } = makeFastify({ users: [] });
+    seedSession({ callId, callerId, recipientId, state: "active", answeredAt: Date.now() });
+
+    const svc = new CallService(fastify);
+    await svc.handleDisconnect(recipientId); // recipient's socket drops
+    svc.handleReconnect(recipientId);         // ...and reconnects before the timer fires
+
+    mock.timers.tick(env.CALL_DISCONNECT_GRACE_MS); // let the (now-cancelled) timer's scheduled time pass
+    await drain();
+
+    assert.equal(callUpdates.length, 0, "the call must not be terminated — the grace timer was cancelled");
+    assert.equal(emitted.length, 0);
+    const session = callRuntime.get(callId);
+    assert.ok(session, "the session must still be alive");
+    assert.equal(session!.disconnectGrace, undefined);
+
+    callRuntime.destroy(callId);
+  });
+
+  it("a reconnect from the OTHER (still-connected) participant does not cancel a grace timer that isn't theirs", async () => {
+    mock.timers.enable({ apis: ["setTimeout"] });
+    const CallService = await freshCallService();
+    const callerId = randomUUID();
+    const recipientId = randomUUID();
+    const callId = randomUUID();
+    const { fastify, callUpdates } = makeFastify({ users: [] });
+    seedSession({ callId, callerId, recipientId, state: "active", answeredAt: Date.now() });
+
+    const svc = new CallService(fastify);
+    await svc.handleDisconnect(recipientId); // recipient's socket drops
+    svc.handleReconnect(callerId);            // caller's unrelated connection event fires
+
+    mock.timers.tick(env.CALL_DISCONNECT_GRACE_MS);
+    await drain();
+
+    assert.equal(callUpdates.length, 1, "the recipient's own disconnect must still terminate on schedule");
+    assert.equal(callUpdates[0]!.data.status, "FAILED");
+  });
+
+  it("the other participant explicitly ending the call while a disconnect grace timer is pending: ENDED wins, and the timer that later elapses does not resurrect or double-terminate", async () => {
+    mock.timers.enable({ apis: ["setTimeout"] });
+    const CallService = await freshCallService();
+    const callerId = randomUUID();
+    const recipientId = randomUUID();
+    const callId = randomUUID();
+    const { fastify, callUpdates, emitted } = makeFastify({ users: [] });
+    seedSession({ callId, callerId, recipientId, state: "active", answeredAt: Date.now() });
+
+    const svc = new CallService(fastify);
+    await svc.handleDisconnect(recipientId); // recipient's socket drops, grace timer armed
+    assert.equal(callUpdates.length, 0);
+
+    await svc.end(callerId, callId); // caller hangs up for real before the grace window elapses
+    assert.equal(callUpdates.length, 1);
+    assert.equal(callUpdates[0]!.data.status, "ENDED");
+
+    mock.timers.tick(env.CALL_DISCONNECT_GRACE_MS); // the now-orphaned grace timer's scheduled time passes
+    await drain();
+
+    assert.equal(callUpdates.length, 1, "the expired grace timer must not write a second terminal row over the real ENDED");
+    assert.equal(emitted.length, 1, "and must not emit a second terminal event");
   });
 
   it("disconnect while still ringing (never answered): MISSED persisted, peer notified, and a missed-call push always targets the recipient — even when the CALLER is the one who disconnected", async () => {

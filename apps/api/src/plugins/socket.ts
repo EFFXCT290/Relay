@@ -70,8 +70,12 @@ export default fp(async (fastify) => {
     // Re-emit a still-RINGING call this user is the recipient of. Needed for a
     // device that was never live for the original ring (offline at initiate(),
     // woken by a push) — without this it would reconnect into a dead app with
-    // no way to learn a call is still waiting. Lives in CallService.
-    new CallService(fastify).resyncRinging(socket.userId);
+    // no way to learn a call is still waiting. Also cancels a pending
+    // disconnect-grace timer (see calls.service.ts handleDisconnect) if this
+    // connection IS that grace period's reconnect. Both live in CallService.
+    const callService = new CallService(fastify);
+    callService.resyncRinging(socket.userId);
+    callService.handleReconnect(socket.userId);
 
     registerAllSocketHandlers(socket, fastify, socket.userId);
   });
