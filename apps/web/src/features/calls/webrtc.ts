@@ -29,6 +29,18 @@ const VIDEO_CONSTRAINTS: MediaTrackConstraints = {
   facingMode: "user",
 };
 
+// 1080p60 ideal for screen share — "ideal" (not "exact"/"min") so the browser
+// still negotiates down instead of failing outright when the source can't
+// provide it. No custom bandwidth throttling here, same rationale as
+// VIDEO_CONSTRAINTS above: the browser's own WebRTC congestion control already
+// measures live bandwidth and adapts the encoder — a hand-rolled ceiling would
+// just fight it.
+const SCREEN_SHARE_CONSTRAINTS: MediaTrackConstraints = {
+  width:     { ideal: 1920 },
+  height:    { ideal: 1080 },
+  frameRate: { ideal: 60, max: 60 },
+};
+
 // Observability only (Part 3) — periodic pc.getStats() summary while a call is
 // live. 7s: within the 5-10s window asked for, and distinct from
 // ICE_DISCONNECT_GRACE_MS (call-provider.tsx) so the two aren't mistaken for
@@ -54,6 +66,17 @@ export type WebRtcCallbacks = {
   // observability — the caller (call-provider.tsx) reports it for logging only
   // and must never let it affect the call.
   onConnectionStats: (summary: ConnectionStatsSummary) => void;
+  // Fires when the PEER's screen-share track(s) arrive — a distinct MediaStream
+  // from onRemoteStream's camera+mic bundle (see ontrack below for how the two
+  // are told apart). There is no matching "removed" callback: the caller learns
+  // a share ended via the explicit call:media-state signal, not by polling this
+  // stream for dead tracks.
+  onRemoteScreenStream: (stream: MediaStream) => void;
+  // Fires when the LOCAL screen share ends via the browser's own native "Stop
+  // sharing" bar (getDisplayMedia()'s track "ended" event) rather than the
+  // in-app button — the caller must still run the same teardown/renegotiation
+  // as an explicit stopScreenShare() call.
+  onScreenShareEnded: () => void;
 };
 
 export class WebRtcController {
@@ -70,6 +93,15 @@ export class WebRtcController {
   // against these, not the raw cumulative counters getStats() returns.
   private lastBytesSent = 0;
   private lastBytesReceived = 0;
+  // Screen share (additive track, never a replaceTrack swap of the camera).
+  private localScreenStream: MediaStream | null = null;
+  private remoteScreenStream: MediaStream | null = null;
+  // ontrack fires once per incoming stream. The FIRST stream id ever seen is
+  // the camera+mic bundle established at call setup; any track that later
+  // arrives on a DIFFERENT stream id is the peer's screen share. Only two
+  // stream identities are ever in play (camera bundle, screen bundle), so this
+  // arrival-order heuristic is enough to route without a dedicated SDP marker.
+  private primaryRemoteStreamId: string | null = null;
 
   constructor(private cb: WebRtcCallbacks) {}
 
@@ -108,7 +140,17 @@ export class WebRtcController {
     };
     pc.ontrack = (e) => {
       if (this.closed || !this.remoteStream) return;
-      const tracks = e.streams[0]?.getTracks() ?? [e.track];
+      const stream = e.streams[0];
+      const isScreenShare = !!stream && this.primaryRemoteStreamId !== null && stream.id !== this.primaryRemoteStreamId;
+      if (stream && this.primaryRemoteStreamId === null) this.primaryRemoteStreamId = stream.id;
+
+      if (isScreenShare) {
+        if (!this.remoteScreenStream) this.remoteScreenStream = new MediaStream();
+        for (const t of stream.getTracks()) this.remoteScreenStream.addTrack(t);
+        this.cb.onRemoteScreenStream(this.remoteScreenStream);
+        return;
+      }
+      const tracks = stream?.getTracks() ?? [e.track];
       for (const t of tracks) this.remoteStream.addTrack(t);
       this.cb.onRemoteStream(this.remoteStream);
     };
@@ -134,15 +176,30 @@ export class WebRtcController {
     return pc;
   }
 
-  async createOffer(): Promise<RTCSessionDescriptionInitLike> {
+  // Returns null if a negotiation is already in flight (signalingState isn't
+  // "stable") — the caller (call-provider) just skips that emit. This is a
+  // guard against glare, not full perfect-negotiation rollback: matches the
+  // existing convention of avoiding renegotiation collisions rather than fully
+  // resolving them (see the ICE-restart comment in call-provider.tsx — only the
+  // "outgoing" side drives that one for the same reason). Two humans on a call
+  // starting a mid-call renegotiation (screen share, ICE restart) in the exact
+  // same tick is rare enough that a dropped, retriable attempt is an acceptable
+  // trade for not carrying full offer/answer rollback machinery.
+  async createOffer(): Promise<RTCSessionDescriptionInitLike | null> {
     const pc = this.ensurePc();
+    if (pc.signalingState !== "stable") return null;
     const offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
     return { type: "offer", sdp: offer.sdp };
   }
 
-  async acceptOffer(sdp: RTCSessionDescriptionInitLike): Promise<RTCSessionDescriptionInitLike> {
+  // Returns null when we ourselves have a pending local offer (the glare case
+  // above, from the answering side) — see createOffer()'s comment. Dropping the
+  // incoming offer here is safe: the in-flight offer/answer this side already
+  // started will still resolve on its own.
+  async acceptOffer(sdp: RTCSessionDescriptionInitLike): Promise<RTCSessionDescriptionInitLike | null> {
     const pc = this.ensurePc();
+    if (pc.signalingState === "have-local-offer") return null;
     await pc.setRemoteDescription(sdp as RTCSessionDescriptionInit);
     await this.flushPendingIce();
     const answer = await pc.createAnswer();
@@ -265,6 +322,57 @@ export class WebRtcController {
     this.cb.onFacingChange(next);
   }
 
+  // Additive: an extra video (+ optional audio) track/transceiver on top of the
+  // existing camera+mic senders, never a replaceTrack() swap. Both cameras keep
+  // flowing. Caller (call-provider) is responsible for the follow-up
+  // createOffer()/emitOffer() renegotiation — this only does the local media +
+  // track side of it, mirroring how switchCamera() leaves signaling to its
+  // caller too... except switchCamera never renegotiates (replaceTrack needs
+  // none) while this always does, since adding a track changes the SDP.
+  //
+  // Throws if getDisplayMedia is denied/cancelled or there's no active call —
+  // caller must catch and treat it as "share didn't start," not a call error.
+  async startScreenShare(): Promise<MediaStream> {
+    if (!this.pc || this.closed) throw new Error("no active call to share a screen into");
+    const stream = await navigator.mediaDevices.getDisplayMedia({
+      video: SCREEN_SHARE_CONSTRAINTS,
+      audio: true,
+    });
+    if (this.closed) {
+      for (const track of stream.getTracks()) track.stop();
+      throw new Error("call closed while requesting the screen share");
+    }
+    this.localScreenStream = stream;
+    for (const track of stream.getTracks()) {
+      this.pc.addTrack(track, stream);
+      // Only the video track reflects the OS-level "Stop sharing" bar — audio
+      // capture (when granted) ends alongside it, not independently.
+      if (track.kind === "video") {
+        track.onended = () => {
+          void this.stopScreenShare();
+          this.cb.onScreenShareEnded();
+        };
+      }
+    }
+    return stream;
+  }
+
+  // Removes the screen-share sender(s) and stops the local capture. Caller is
+  // responsible for the follow-up renegotiation, same as startScreenShare().
+  // Safe to call when nothing is being shared (no-op) — both the in-app button
+  // and the native "Stop sharing" bar's ended-track handler above call this.
+  async stopScreenShare(): Promise<void> {
+    if (!this.pc || !this.localScreenStream) return;
+    const stream = this.localScreenStream;
+    this.localScreenStream = null;
+    for (const track of stream.getTracks()) {
+      const sender = this.pc.getSenders().find((s) => s.track === track);
+      if (sender) this.pc.removeTrack(sender);
+      track.onended = null;
+      track.stop();
+    }
+  }
+
   // Idempotent full teardown. Stops EVERY local track (releases the mic), stops
   // remote tracks, detaches handlers, and closes the peer connection. This is
   // the one routine that guarantees no leaked microphone and no ghost pc.
@@ -277,6 +385,8 @@ export class WebRtcController {
     }
     for (const track of this.localStream?.getTracks() ?? []) track.stop();
     for (const track of this.remoteStream?.getTracks() ?? []) track.stop();
+    for (const track of this.localScreenStream?.getTracks() ?? []) track.stop();
+    for (const track of this.remoteScreenStream?.getTracks() ?? []) track.stop();
     if (this.pc) {
       this.pc.onicecandidate = null;
       this.pc.ontrack = null;
@@ -286,6 +396,8 @@ export class WebRtcController {
     this.pc = null;
     this.localStream = null;
     this.remoteStream = null;
+    this.localScreenStream = null;
+    this.remoteScreenStream = null;
     this.pendingIce = [];
   }
 }

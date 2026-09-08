@@ -43,9 +43,9 @@ export const CALL_EVENTS = {
   END:         "call:end",           // { callId }
   // UI-state hint relayed verbatim between peers (Phase 7D). Ephemeral, no DB
   // write. NOT a SDP/ICE substitute — purely tells the peer "I toggled my
-  // camera" so they can swap the remote stage to a frozen-frame + badge instead
-  // of looking at a black <video>.
-  MEDIA_STATE: "call:media-state",   // { callId, cameraOn }  either → server → other peer
+  // camera" (or started/stopped screen sharing) so they can update the remote
+  // stage without waiting on the renegotiated track itself to arrive/end.
+  MEDIA_STATE: "call:media-state",   // { callId, cameraOn, screenSharing? }  either → server → other peer
   // Observability only (client → server). Logged as-received and otherwise a
   // total no-op: never relayed to the peer, never acted on. See
   // apps/api/src/modules/calls/calls.socket.ts.
@@ -58,7 +58,7 @@ export const CALL_EVENTS = {
   TIMEOUT:           "call:timeout",           // → both: unanswered past CALL_RING_TIMEOUT_MS (MISSED)
   ENDED:             "call:ended",             // → peer: other side hung up / rejected
   FAILED:            "call:failed",            // → peer: disconnect / negotiation failure
-  PEER_MEDIA_STATE:  "call:peer-media-state",  // → peer: relayed { callId, cameraOn } from the other side
+  PEER_MEDIA_STATE:  "call:peer-media-state",  // → peer: relayed { callId, cameraOn, screenSharing? } from the other side
 } as const;
 export type CallEventName = (typeof CALL_EVENTS)[keyof typeof CALL_EVENTS];
 
@@ -71,9 +71,11 @@ export type CallInitInbound = {
 export type CallByIdInbound  = { callId: string };          // ACCEPT, REJECT, END
 export type CallSdpInbound   = { callId: string; sdp: RTCSessionDescriptionInitLike };
 export type CallIceInbound   = { callId: string; candidate: RTCIceCandidateInitLike };
-// Phase 7D media-state hint (client → server → other peer). Camera only for now;
-// the envelope leaves room for `micOn?` if/when a peer-mute indicator lands.
-export type CallMediaStateInbound = { callId: string; cameraOn: boolean };
+// Phase 7D media-state hint (client → server → other peer). `screenSharing` is
+// optional so a plain camera toggle doesn't have to know the current share
+// state; the envelope leaves room for `micOn?` if/when a peer-mute indicator
+// lands.
+export type CallMediaStateInbound = { callId: string; cameraOn: boolean; screenSharing?: boolean };
 
 // ── Observability-only payloads (client → server) ────────────────────────────
 // Best-effort telemetry: the client must never let a failed/slow emit affect
@@ -143,7 +145,7 @@ export type CallBusyEvent     = { callId: string };
 export type CallTimeoutEvent  = { callId: string };
 export type CallEndedEvent    = { callId: string; status: CallStatus };
 export type CallFailedEvent   = { callId: string };
-export type CallPeerMediaStateEvent = { callId: string; cameraOn: boolean };
+export type CallPeerMediaStateEvent = { callId: string; cameraOn: boolean; screenSharing?: boolean };
 
 // SDP/ICE are relayed verbatim; we avoid depending on lib.dom types in shared
 // code by mirroring just the fields WebRTC sends over the wire.

@@ -11,16 +11,24 @@ import type { RTCIceCandidateInitLike } from "@relay/contracts";
 class FakeTrack {
   enabled = true;
   stopped = false;
+  // Only screen-share video tracks ever get this wired up (webrtc.ts's
+  // startScreenShare) — mirrors the real MediaStreamTrack.onended used to
+  // detect the browser's native "Stop sharing" bar.
+  onended: (() => void) | null = null;
   constructor(public kind: "audio" | "video") {}
   stop() {
     this.stopped = true;
   }
 }
 
+let fakeStreamIdCounter = 0;
+
 class FakeMediaStream {
+  id: string;
   private tracks: FakeTrack[];
-  constructor(tracks: FakeTrack[] = []) {
+  constructor(tracks: FakeTrack[] = [], id?: string) {
     this.tracks = tracks;
+    this.id = id ?? `fake-stream-${++fakeStreamIdCounter}`;
   }
   getTracks() {
     return this.tracks;
@@ -32,6 +40,12 @@ class FakeMediaStream {
     return this.tracks.filter((t) => t.kind === "video");
   }
   addTrack(t: FakeTrack) {
+    // Matches the real MediaStream.addTrack spec: a no-op if the track is
+    // already in the stream's track set. Without this, a controller-owned
+    // accumulator stream fed by multiple ontrack firings over the same
+    // browser-side bundle (audio+video arriving as separate events) would
+    // double-count tracks that were already present.
+    if (this.tracks.includes(t)) return;
     this.tracks.push(t);
   }
   removeTrack(t: FakeTrack) {
@@ -58,9 +72,16 @@ class FakePeerConnection {
   connectionState = "new";
   closed = false;
   senders: FakeSender[] = [];
+  removeTrackCalls: FakeSender[] = [];
   addIceCandidateCalls: unknown[] = [];
   localDescription: unknown = null;
   remoteDescription: unknown = null;
+  // Mirrors just enough of the real RTCPeerConnection state machine for the
+  // glare guard in webrtc.ts (createOffer/acceptOffer check this) — "stable"
+  // initially, "have-local-offer" after we set a local offer, "have-remote-
+  // offer" after we set a remote offer, back to "stable" once the matching
+  // answer lands either side.
+  signalingState: "stable" | "have-local-offer" | "have-remote-offer" = "stable";
 
   constructor(public config: { iceServers: RTCIceServer[] }) {}
 
@@ -68,6 +89,10 @@ class FakePeerConnection {
     const sender = new FakeSender(track);
     this.senders.push(sender);
     return sender;
+  }
+  removeTrack(sender: FakeSender) {
+    this.removeTrackCalls.push(sender);
+    this.senders = this.senders.filter((s) => s !== sender);
   }
   getSenders() {
     return this.senders;
@@ -78,11 +103,13 @@ class FakePeerConnection {
   async createAnswer() {
     return { type: "answer" as const, sdp: "fake-answer-sdp" };
   }
-  async setLocalDescription(desc: unknown) {
+  async setLocalDescription(desc: { type?: string } | unknown) {
     this.localDescription = desc;
+    this.signalingState = (desc as { type?: string } | undefined)?.type === "offer" ? "have-local-offer" : "stable";
   }
-  async setRemoteDescription(desc: unknown) {
+  async setRemoteDescription(desc: { type?: string } | unknown) {
     this.remoteDescription = desc;
+    this.signalingState = (desc as { type?: string } | undefined)?.type === "offer" ? "have-remote-offer" : "stable";
   }
   async addIceCandidate(candidate: unknown) {
     this.addIceCandidateCalls.push(candidate);
@@ -107,11 +134,14 @@ function makeCallbacks(): WebRtcCallbacks {
     onConnectionState: vi.fn(),
     onFacingChange: vi.fn(),
     onConnectionStats: vi.fn(),
+    onRemoteScreenStream: vi.fn(),
+    onScreenShareEnded: vi.fn(),
   };
 }
 
 let lastPc: FakePeerConnection | null = null;
 let getUserMediaMock: ReturnType<typeof vi.fn>;
+let getDisplayMediaMock: ReturnType<typeof vi.fn>;
 
 beforeEach(() => {
   lastPc = null;
@@ -125,8 +155,9 @@ beforeEach(() => {
   vi.stubGlobal("MediaStream", FakeMediaStream);
 
   getUserMediaMock = vi.fn(async () => new FakeMediaStream([new FakeTrack("audio"), new FakeTrack("video")]));
+  getDisplayMediaMock = vi.fn(async () => new FakeMediaStream([new FakeTrack("video"), new FakeTrack("audio")], "fake-screen-stream"));
   Object.defineProperty(globalThis.navigator, "mediaDevices", {
-    value: { getUserMedia: getUserMediaMock },
+    value: { getUserMedia: getUserMediaMock, getDisplayMedia: getDisplayMediaMock },
     configurable: true,
   });
 });
@@ -369,5 +400,184 @@ describe("WebRtcController — periodic connection-stats reporting (Part 3)", ()
     ]);
     await vi.advanceTimersByTimeAsync(CONNECTION_STATS_INTERVAL_MS);
     expect(callbacks.onConnectionStats).toHaveBeenCalledTimes(1); // recovered on the next tick
+  });
+});
+
+describe("WebRtcController — screen share is additive (addTrack, never replaceTrack)", () => {
+  it("startScreenShare adds every captured track to the pc via addTrack, alongside the existing camera+mic senders", async () => {
+    const controller = new WebRtcController(makeCallbacks());
+    await controller.startLocalMedia({ video: true }); // camera+mic senders exist first
+    await controller.createOffer(); // creates the pc, attaches camera+mic
+
+    expect(lastPc!.senders.length).toBe(2); // audio + video from startLocalMedia
+
+    await controller.startScreenShare();
+
+    // Camera+mic senders are untouched; two MORE senders (screen video+audio)
+    // were added on top — never a replaceTrack of the existing ones.
+    expect(lastPc!.senders.length).toBe(4);
+    expect(lastPc!.senders.every((s) => s.replaceTrackCalls.length === 0)).toBe(true);
+    expect(getDisplayMediaMock).toHaveBeenCalledWith(
+      expect.objectContaining({ video: expect.objectContaining({ width: { ideal: 1920 }, height: { ideal: 1080 } }), audio: true }),
+    );
+  });
+
+  it("requests 'ideal' (not 'exact'/'min') dimensions and framerate, so the browser can still negotiate down", async () => {
+    const controller = new WebRtcController(makeCallbacks());
+    await controller.createOffer();
+    await controller.startScreenShare();
+
+    const call = getDisplayMediaMock.mock.calls[0]![0];
+    expect(call.video).toEqual({ width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 60, max: 60 } });
+    // No "exact"/"min" anywhere, and no custom bitrate-capping call site exists
+    // in webrtc.ts at all (verified by absence, not a mock assertion) — the
+    // browser's own congestion control is relied on instead.
+    expect(JSON.stringify(call.video)).not.toMatch(/exact|min/);
+  });
+
+  it("stopScreenShare removes the screen sender(s) and stops the local capture, leaving camera+mic senders intact", async () => {
+    const controller = new WebRtcController(makeCallbacks());
+    await controller.startLocalMedia({ video: true });
+    await controller.createOffer();
+    await controller.startScreenShare();
+    const screenTracks = (await getDisplayMediaMock.mock.results[0]!.value).getTracks() as FakeTrack[];
+
+    await controller.stopScreenShare();
+
+    expect(lastPc!.senders.length).toBe(2); // back to just camera+mic
+    expect(lastPc!.removeTrackCalls.length).toBe(2);
+    expect(screenTracks.every((t) => t.stopped)).toBe(true);
+  });
+
+  it("stopScreenShare is a safe no-op when nothing is being shared", async () => {
+    const controller = new WebRtcController(makeCallbacks());
+    await controller.createOffer();
+    await expect(controller.stopScreenShare()).resolves.toBeUndefined();
+    expect(lastPc!.removeTrackCalls.length).toBe(0);
+  });
+
+  it("the browser's native 'Stop sharing' bar (video track 'ended') tears down the share AND notifies the caller via onScreenShareEnded", async () => {
+    const callbacks = makeCallbacks();
+    const controller = new WebRtcController(callbacks);
+    await controller.createOffer();
+    await controller.startScreenShare();
+    const [videoTrack] = (await getDisplayMediaMock.mock.results[0]!.value).getTracks() as FakeTrack[];
+
+    expect(lastPc!.senders.length).toBe(2); // screen video + audio
+
+    videoTrack!.onended!();
+    // stopScreenShare() has no internal await, so by the time onended's
+    // synchronous body returns, the sender removal has already happened.
+    expect(lastPc!.senders.length).toBe(0);
+    expect(callbacks.onScreenShareEnded).toHaveBeenCalledTimes(1);
+  });
+
+  it("close() stops both local and remote screen-share tracks, not just the camera/mic ones", async () => {
+    const controller = new WebRtcController(makeCallbacks());
+    await controller.createOffer();
+    await controller.startScreenShare();
+    const localScreenTracks = (await getDisplayMediaMock.mock.results[0]!.value).getTracks() as FakeTrack[];
+
+    // First ontrack call ever on this controller becomes the "primary" (camera)
+    // stream per the arrival-order heuristic — prime it first so the SECOND,
+    // differently-id'd stream is the one actually routed as screen share.
+    const cameraBundle = new FakeMediaStream([new FakeTrack("audio")], "camera-bundle");
+    lastPc!.ontrack!({ streams: [cameraBundle], track: cameraBundle.getTracks()[0]! });
+    const remoteScreenBundle = new FakeMediaStream([new FakeTrack("video")], "remote-screen-bundle");
+    lastPc!.ontrack!({ streams: [remoteScreenBundle], track: remoteScreenBundle.getTracks()[0]! });
+
+    controller.close();
+    expect(localScreenTracks.every((t) => t.stopped)).toBe(true);
+    expect(remoteScreenBundle.getTracks().every((t) => t.stopped)).toBe(true);
+  });
+});
+
+describe("WebRtcController — routing incoming tracks: camera+mic vs. peer's screen share", () => {
+  it("the FIRST stream ontrack ever sees is treated as the camera+mic bundle (onRemoteStream)", async () => {
+    const callbacks = makeCallbacks();
+    const controller = new WebRtcController(callbacks);
+    await controller.createOffer();
+
+    const cameraStream = new FakeMediaStream([new FakeTrack("audio"), new FakeTrack("video")], "camera-bundle");
+    lastPc!.ontrack!({ streams: [cameraStream], track: cameraStream.getTracks()[0]! });
+
+    expect(callbacks.onRemoteStream).toHaveBeenCalled();
+    expect(callbacks.onRemoteScreenStream).not.toHaveBeenCalled();
+  });
+
+  it("a LATER track arriving on a DIFFERENT stream id is routed to onRemoteScreenStream, not merged into the camera stream", async () => {
+    const callbacks = makeCallbacks();
+    const controller = new WebRtcController(callbacks);
+    await controller.createOffer();
+
+    const cameraStream = new FakeMediaStream([new FakeTrack("audio"), new FakeTrack("video")], "camera-bundle");
+    lastPc!.ontrack!({ streams: [cameraStream], track: cameraStream.getTracks()[0]! });
+
+    const screenStream = new FakeMediaStream([new FakeTrack("video")], "screen-bundle");
+    lastPc!.ontrack!({ streams: [screenStream], track: screenStream.getTracks()[0]! });
+
+    expect(callbacks.onRemoteScreenStream).toHaveBeenCalledTimes(1);
+    const passedStream = vi.mocked(callbacks.onRemoteScreenStream).mock.calls[0]![0] as unknown as FakeMediaStream;
+    expect(passedStream.getTracks()).toHaveLength(1);
+    // Confirms it did NOT get merged into the camera stream's track list.
+    expect(cameraStream.getTracks().length).toBe(2);
+  });
+
+  it("multiple tracks arriving together on the same new (screen) stream id are all routed there, not just the first", async () => {
+    const callbacks = makeCallbacks();
+    const controller = new WebRtcController(callbacks);
+    await controller.createOffer();
+
+    const cameraStream = new FakeMediaStream([new FakeTrack("audio")], "camera-bundle");
+    lastPc!.ontrack!({ streams: [cameraStream], track: cameraStream.getTracks()[0]! });
+
+    const screenStream = new FakeMediaStream([new FakeTrack("video"), new FakeTrack("audio")], "screen-bundle");
+    lastPc!.ontrack!({ streams: [screenStream], track: screenStream.getTracks()[0]! });
+    lastPc!.ontrack!({ streams: [screenStream], track: screenStream.getTracks()[1]! });
+
+    const passedStream = vi.mocked(callbacks.onRemoteScreenStream).mock.calls.at(-1)![0] as unknown as FakeMediaStream;
+    expect(passedStream.getTracks()).toHaveLength(2);
+  });
+});
+
+describe("WebRtcController — mid-call renegotiation glare guard (createOffer/acceptOffer)", () => {
+  it("createOffer returns null (and does not touch the pc) when a negotiation is already in flight", async () => {
+    const controller = new WebRtcController(makeCallbacks());
+    await controller.createOffer(); // pc now in "have-local-offer"
+
+    const before = lastPc!.localDescription;
+    const result = await controller.createOffer();
+
+    expect(result).toBeNull();
+    expect(lastPc!.localDescription).toBe(before); // untouched — no second createOffer/setLocalDescription happened
+  });
+
+  it("createOffer succeeds again once the in-flight negotiation resolves (signalingState back to stable)", async () => {
+    const controller = new WebRtcController(makeCallbacks());
+    await controller.createOffer();
+    await controller.acceptAnswer({ type: "answer", sdp: "fake-answer-sdp" }); // back to stable
+
+    const result = await controller.createOffer();
+    expect(result).not.toBeNull();
+  });
+
+  it("acceptOffer returns null when we ourselves already have a pending local offer (both sides renegotiating at once)", async () => {
+    const controller = new WebRtcController(makeCallbacks());
+    await controller.createOffer(); // this side is also mid-offer ("have-local-offer")
+
+    const remoteBefore = lastPc!.remoteDescription;
+    const result = await controller.acceptOffer({ type: "offer", sdp: "peer-offer-sdp" });
+
+    expect(result).toBeNull();
+    expect(lastPc!.remoteDescription).toBe(remoteBefore); // the colliding offer was never applied
+  });
+
+  it("acceptOffer proceeds normally (the common case) when there is no pending local offer", async () => {
+    const controller = new WebRtcController(makeCallbacks());
+    await controller.createOffer(); // pc exists
+    await controller.acceptAnswer({ type: "answer", sdp: "fake-answer-sdp" }); // back to stable
+
+    const result = await controller.acceptOffer({ type: "offer", sdp: "renegotiation-offer-sdp" });
+    expect(result).toEqual({ type: "answer", sdp: "fake-answer-sdp" });
   });
 });

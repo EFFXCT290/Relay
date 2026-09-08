@@ -28,9 +28,9 @@ export const CALL_EVENTS = {
     END: "call:end", // { callId }
     // UI-state hint relayed verbatim between peers (Phase 7D). Ephemeral, no DB
     // write. NOT a SDP/ICE substitute — purely tells the peer "I toggled my
-    // camera" so they can swap the remote stage to a frozen-frame + badge instead
-    // of looking at a black <video>.
-    MEDIA_STATE: "call:media-state", // { callId, cameraOn }  either → server → other peer
+    // camera" (or started/stopped screen sharing) so they can update the remote
+    // stage without waiting on the renegotiated track itself to arrive/end.
+    MEDIA_STATE: "call:media-state", // { callId, cameraOn, screenSharing? }  either → server → other peer
     // Observability only (client → server). Logged as-received and otherwise a
     // total no-op: never relayed to the peer, never acted on. See
     // apps/api/src/modules/calls/calls.socket.ts.
@@ -43,7 +43,7 @@ export const CALL_EVENTS = {
     TIMEOUT: "call:timeout", // → both: unanswered past CALL_RING_TIMEOUT_MS (MISSED)
     ENDED: "call:ended", // → peer: other side hung up / rejected
     FAILED: "call:failed", // → peer: disconnect / negotiation failure
-    PEER_MEDIA_STATE: "call:peer-media-state", // → peer: relayed { callId, cameraOn } from the other side
+    PEER_MEDIA_STATE: "call:peer-media-state", // → peer: relayed { callId, cameraOn, screenSharing? } from the other side
 };
 // ── Schemas (TypeBox — for the GET /api/calls response) ──────────────────────
 export const CallHistoryItemSchema = Type.Object({

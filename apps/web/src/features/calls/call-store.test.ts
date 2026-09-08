@@ -52,6 +52,8 @@ describe("callReducer — exhaustive phase × action transition table", () => {
             isCameraOff: false,
             selfFacing: "user",
             peerCameraOff: false,
+            screenShare: { sharedBy: null },
+            showBothCameras: false,
             conversationId: "conv-2",
           });
         } else {
@@ -79,6 +81,8 @@ describe("callReducer — exhaustive phase × action transition table", () => {
             isCameraOff: false,
             selfFacing: "user",
             peerCameraOff: false,
+            screenShare: { sharedBy: null },
+            showBothCameras: false,
             conversationId: "conv-2",
           });
         } else {
@@ -172,6 +176,33 @@ describe("callReducer — field-setter actions (not phase-gated; documents actua
     it(`"peerCameraOff" sets peerCameraOff regardless of phase (${phase})`, () => {
       const state = makeState(phase);
       expect(callReducer(state, { t: "peerCameraOff", value: true })).toEqual({ ...state, peerCameraOff: true });
+    });
+
+    it(`"screenShareState" sets screenShare.sharedBy regardless of phase (${phase})`, () => {
+      const state = makeState(phase);
+      expect(callReducer(state, { t: "screenShareState", sharedBy: "local" })).toEqual({
+        ...state,
+        screenShare: { sharedBy: "local" },
+      });
+      expect(callReducer(state, { t: "screenShareState", sharedBy: "remote" })).toEqual({
+        ...state,
+        screenShare: { sharedBy: "remote" },
+      });
+      // Clearing (e.g. the sharer stopped, or the peer's screenSharing:false
+      // signal arrived) is just sharedBy: null, same setter.
+      const sharing = callReducer(state, { t: "screenShareState", sharedBy: "local" });
+      expect(callReducer(sharing, { t: "screenShareState", sharedBy: null })).toEqual({
+        ...state,
+        screenShare: { sharedBy: null },
+      });
+    });
+
+    it(`"toggleBothCameras" flips showBothCameras and is independent of screenShare.sharedBy (${phase})`, () => {
+      const state = makeState(phase);
+      expect(state.showBothCameras).toBe(false);
+      const toggled = callReducer(state, { t: "toggleBothCameras" });
+      expect(toggled).toEqual({ ...state, showBothCameras: true });
+      expect(callReducer(toggled, { t: "toggleBothCameras" })).toEqual({ ...state, showBothCameras: false });
     });
   }
 

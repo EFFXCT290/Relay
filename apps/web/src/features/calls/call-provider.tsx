@@ -45,14 +45,16 @@ import { CallUI } from "./call-ui";
 // ─────────────────────────────────────────────────────────────────────────────
 
 type CallContextValue = {
-  state:        CallState;
-  startCall:    (peer: CallPeer, type: CallType, conversationId?: string) => void;
-  accept:       () => void;
-  reject:       () => void;
-  hangup:       () => void;
-  toggleMute:   () => void;
-  toggleCamera: () => void;
-  switchCamera: () => void;
+  state:             CallState;
+  startCall:         (peer: CallPeer, type: CallType, conversationId?: string) => void;
+  accept:            () => void;
+  reject:            () => void;
+  hangup:            () => void;
+  toggleMute:        () => void;
+  toggleCamera:      () => void;
+  switchCamera:      () => void;
+  toggleScreenShare: () => void;
+  toggleBothCameras: () => void;
 };
 
 const CallContext = createContext<CallContextValue | null>(null);
@@ -124,10 +126,24 @@ export function CallProvider({
   const remoteVideoRef = useRef<HTMLVideoElement | null>(null);
   // Blurred fill behind the centered remote feed (muted — main video has audio).
   const remoteBgVideoRef = useRef<HTMLVideoElement | null>(null);
+  // Screen share — desktop only (call-ui.tsx hides the trigger on mobile/tablet).
+  // Separate elements/streams from the camera ones above: a share is an
+  // ADDITIVE track, so camera video keeps flowing in its own <video> the whole
+  // time (see call-layout.ts for which one call-ui shows where).
+  const localScreenVideoRef  = useRef<HTMLVideoElement | null>(null);
+  const remoteScreenVideoRef = useRef<HTMLVideoElement | null>(null);
   // The streams are captured here too, so we can re-attach them once the matching
   // media elements actually mount (they don't exist while phase === "idle").
   const localStreamRef  = useRef<MediaStream | null>(null);
   const remoteStreamRef = useRef<MediaStream | null>(null);
+  const localScreenStreamRef  = useRef<MediaStream | null>(null);
+  const remoteScreenStreamRef = useRef<MediaStream | null>(null);
+  // makeController (below) needs to hand the controller a callback for the
+  // native "Stop sharing" bar, but the actual handler (finishLocalScreenShare)
+  // is defined after it and would create a circular useCallback dependency.
+  // Mirrors the stateRef pattern already used in this file: always points at
+  // the latest closure, set on every render.
+  const finishLocalScreenShareRef = useRef<() => void>(() => {});
   const resetTimer  = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Armed while pc.connectionState === "disconnected", waiting to see whether
   // it recovers on its own (or via the restartIce() kick below) before we give
@@ -150,10 +166,14 @@ export function CallProvider({
     iceServersRef.current = null;
     localStreamRef.current = null;
     remoteStreamRef.current = null;
+    localScreenStreamRef.current = null;
+    remoteScreenStreamRef.current = null;
     if (remoteAudioRef.current) remoteAudioRef.current.srcObject = null;
     if (remoteVideoRef.current) remoteVideoRef.current.srcObject = null;
     if (remoteBgVideoRef.current) remoteBgVideoRef.current.srcObject = null;
     if (localVideoRef.current) localVideoRef.current.srcObject = null;
+    if (localScreenVideoRef.current) localScreenVideoRef.current.srcObject = null;
+    if (remoteScreenVideoRef.current) remoteScreenVideoRef.current.srcObject = null;
     dispatch({ t: "terminated", phase });
     if (resetTimer.current) clearTimeout(resetTimer.current);
     resetTimer.current = setTimeout(() => {
@@ -212,7 +232,7 @@ export function CallProvider({
               void (async () => {
                 try {
                   const offer = await activeController.createOffer();
-                  if (webrtcRef.current === activeController) {
+                  if (offer && webrtcRef.current === activeController) {
                     emitOffer(getSocket(), { callId, sdp: offer });
                   }
                 } catch {
@@ -257,6 +277,14 @@ export function CallProvider({
         if (callId) reportConnectionStats({ callId, ...summary });
       },
       onFacingChange: (facing) => dispatch({ t: "facing", value: facing }),
+      onRemoteScreenStream: (stream) => {
+        // Attach-only. Whether this ever becomes visible is driven by the
+        // explicit call:peer-media-state screenSharing signal (below), not by
+        // track arrival — the two can race, and the FSM is the source of truth.
+        remoteScreenStreamRef.current = stream;
+        attachStream(remoteScreenVideoRef.current, stream);
+      },
+      onScreenShareEnded: () => finishLocalScreenShareRef.current(),
     });
     webrtcRef.current = controller;
     return controller;
@@ -349,6 +377,69 @@ export function CallProvider({
     void webrtcRef.current?.switchCamera();
   }, []);
 
+  // Shared tail for both ways a local share can end: the in-app button
+  // (toggleScreenShare, which awaits controller.stopScreenShare() itself first)
+  // and the browser's native "Stop sharing" bar (webrtc.ts already called
+  // stopScreenShare() before invoking onScreenShareEnded — see its comment).
+  // Clears local state/refs, tells the peer, and renegotiates the SDP back down
+  // (removeTrack changes it same as addTrack did).
+  const finishLocalScreenShare = useCallback(() => {
+    localScreenStreamRef.current = null;
+    if (localScreenVideoRef.current) localScreenVideoRef.current.srcObject = null;
+    dispatch({ t: "screenShareState", sharedBy: null });
+    const callId = callIdRef.current;
+    const controller = webrtcRef.current;
+    if (callId) {
+      emitMediaState(getSocket(), { callId, cameraOn: !stateRef.current.isCameraOff, screenSharing: false });
+    }
+    if (callId && controller) {
+      void (async () => {
+        const offer = await controller.createOffer();
+        if (offer && webrtcRef.current === controller) emitOffer(getSocket(), { callId, sdp: offer });
+      })();
+    }
+  }, []);
+  finishLocalScreenShareRef.current = finishLocalScreenShare;
+
+  const toggleScreenShare = useCallback(() => {
+    const controller = webrtcRef.current;
+    const callId = callIdRef.current;
+    if (!controller || !callId) return;
+
+    if (stateRef.current.screenShare.sharedBy === "local") {
+      void (async () => {
+        await controller.stopScreenShare();
+        finishLocalScreenShare();
+      })();
+      return;
+    }
+    // Peer is already sharing — starting a second, local share concurrently
+    // isn't a designed case (see call-layout.ts); leave the toggle a no-op
+    // rather than layering ambiguous state on top of it.
+    if (stateRef.current.screenShare.sharedBy === "remote") return;
+
+    void (async () => {
+      let stream: MediaStream;
+      try {
+        stream = await controller.startScreenShare();
+      } catch {
+        return; // permission denied/cancelled — stay as-is, no error surfaced
+      }
+      if (webrtcRef.current !== controller) return; // call ended mid-request
+      localScreenStreamRef.current = stream;
+      attachStream(localScreenVideoRef.current, stream);
+      dispatch({ t: "screenShareState", sharedBy: "local" });
+      emitMediaState(getSocket(), { callId, cameraOn: !stateRef.current.isCameraOff, screenSharing: true });
+      const offer = await controller.createOffer();
+      if (offer && webrtcRef.current === controller) emitOffer(getSocket(), { callId, sdp: offer });
+    })();
+  }, [finishLocalScreenShare]);
+
+  // Local-only viewer preference — never emitted to the peer.
+  const toggleBothCameras = useCallback(() => {
+    dispatch({ t: "toggleBothCameras" });
+  }, []);
+
   // ── Signaling listeners — bound once for the provider's lifetime ────────────
   useEffect(() => {
     const socket = getSocket();
@@ -370,15 +461,20 @@ export function CallProvider({
         dispatch({ t: "connecting" });
         void (async () => {
           const offer = await controller.createOffer();
-          emitOffer(socket, { callId, sdp: offer });
+          if (offer) emitOffer(socket, { callId, sdp: offer });
         })();
       },
       onOffer: ({ callId, sdp }) => {
         const controller = webrtcRef.current;
         if (!controller) return;
         void (async () => {
+          // acceptOffer() also covers every mid-call renegotiation (screen
+          // share start/stop, ICE restart) — it's the same generic offer/
+          // answer exchange as the initial one, just arriving later. null means
+          // we're mid-glare (see webrtc.ts) — our own in-flight offer will
+          // still resolve on its own, so this one is just dropped.
           const answer = await controller.acceptOffer(sdp);
-          emitAnswer(socket, { callId, sdp: answer });
+          if (answer) emitAnswer(socket, { callId, sdp: answer });
         })();
       },
       onAnswer: ({ sdp }) => {
@@ -390,8 +486,11 @@ export function CallProvider({
       onTimeout: () => teardown("ended"),
       onEnded:   () => teardown("ended"),
       onFailed:  () => teardown("failed"),
-      onPeerMediaState: ({ cameraOn }) => {
+      onPeerMediaState: ({ cameraOn, screenSharing }) => {
         dispatch({ t: "peerCameraOff", value: !cameraOn });
+        if (screenSharing !== undefined) {
+          dispatch({ t: "screenShareState", sharedBy: screenSharing ? "remote" : null });
+        }
       },
     });
     return cleanup;
@@ -413,13 +512,20 @@ export function CallProvider({
       attachStream(remoteBgVideoRef.current, remoteStreamRef.current);
       attachStream(remoteAudioRef.current, remoteStreamRef.current);
     }
-  }, [state.phase, state.isCameraOff]);
+    // Screen-share elements only mount once state.screenShare.sharedBy says so
+    // (call-ui.tsx) — re-run this on that transition so a stream that arrived
+    // before its <video> existed still gets attached once it does.
+    if (localScreenStreamRef.current) attachStream(localScreenVideoRef.current, localScreenStreamRef.current);
+    if (remoteScreenStreamRef.current) attachStream(remoteScreenVideoRef.current, remoteScreenStreamRef.current);
+  }, [state.phase, state.isCameraOff, state.screenShare.sharedBy, state.showBothCameras]);
 
   // Release the mic if the provider ever unmounts.
   useEffect(() => () => { webrtcRef.current?.close(); }, []);
 
   return (
-    <CallContext.Provider value={{ state, startCall, accept, reject, hangup, toggleMute, toggleCamera, switchCamera }}>
+    <CallContext.Provider
+      value={{ state, startCall, accept, reject, hangup, toggleMute, toggleCamera, switchCamera, toggleScreenShare, toggleBothCameras }}
+    >
       {children}
       <CallUI
         state={state}
@@ -428,12 +534,16 @@ export function CallProvider({
         localVideoRef={localVideoRef}
         remoteVideoRef={remoteVideoRef}
         remoteBgVideoRef={remoteBgVideoRef}
+        localScreenVideoRef={localScreenVideoRef}
+        remoteScreenVideoRef={remoteScreenVideoRef}
         onAccept={accept}
         onReject={reject}
         onHangup={hangup}
         onToggleMute={toggleMute}
         onToggleCamera={toggleCamera}
         onSwitchCamera={switchCamera}
+        onToggleScreenShare={toggleScreenShare}
+        onToggleBothCameras={toggleBothCameras}
       />
     </CallContext.Provider>
   );

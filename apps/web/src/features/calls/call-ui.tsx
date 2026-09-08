@@ -2,10 +2,11 @@
 
 import { useEffect, useState, type RefObject } from "react";
 import { createPortal } from "react-dom";
-import { Mic, MicOff, Phone, PhoneOff, Video, VideoOff, SwitchCamera } from "lucide-react";
+import { Mic, MicOff, Phone, PhoneOff, Video, VideoOff, SwitchCamera, ScreenShare, ScreenShareOff, Columns2 } from "lucide-react";
 import { Avatar } from "@/shared/components/avatar";
 import { useIdle } from "@/shared/hooks/use-idle";
 import type { CallState } from "./call-store";
+import { computeCallLayout } from "./call-layout";
 
 const mono = "var(--font-mono)";
 const display = "var(--font-display)";
@@ -25,18 +26,22 @@ const display = "var(--font-display)";
 // ─────────────────────────────────────────────────────────────────────────────
 
 type Props = {
-  state:            CallState;
-  selfUsername:     string | null;
-  remoteAudioRef:   RefObject<HTMLAudioElement | null>;
-  localVideoRef:    RefObject<HTMLVideoElement | null>;
-  remoteVideoRef:   RefObject<HTMLVideoElement | null>;
-  remoteBgVideoRef: RefObject<HTMLVideoElement | null>;
-  onAccept:         () => void;
-  onReject:         () => void;
-  onHangup:         () => void;
-  onToggleMute:     () => void;
-  onToggleCamera:   () => void;
-  onSwitchCamera:   () => void;
+  state:                CallState;
+  selfUsername:         string | null;
+  remoteAudioRef:       RefObject<HTMLAudioElement | null>;
+  localVideoRef:        RefObject<HTMLVideoElement | null>;
+  remoteVideoRef:       RefObject<HTMLVideoElement | null>;
+  remoteBgVideoRef:     RefObject<HTMLVideoElement | null>;
+  localScreenVideoRef:  RefObject<HTMLVideoElement | null>;
+  remoteScreenVideoRef: RefObject<HTMLVideoElement | null>;
+  onAccept:             () => void;
+  onReject:             () => void;
+  onHangup:             () => void;
+  onToggleMute:         () => void;
+  onToggleCamera:       () => void;
+  onSwitchCamera:       () => void;
+  onToggleScreenShare:  () => void;
+  onToggleBothCameras:  () => void;
 };
 
 function statusLabel(state: CallState): string {
@@ -55,12 +60,20 @@ function statusLabel(state: CallState): string {
 export function CallUI({
   state, selfUsername,
   remoteAudioRef, localVideoRef, remoteVideoRef, remoteBgVideoRef,
+  localScreenVideoRef, remoteScreenVideoRef,
   onAccept, onReject, onHangup, onToggleMute, onToggleCamera, onSwitchCamera,
+  onToggleScreenShare, onToggleBothCameras,
 }: Props) {
   const { phase } = state;
   const isIncoming = phase === "incoming";
   const isVideo = state.type === "VIDEO";
   const isConnectedVideo = isVideo && phase === "connected";
+  const layout = computeCallLayout(state.screenShare.sharedBy, state.showBothCameras);
+  const isSharing = layout.mode === "screen-share";
+  // Narrow the discriminated union once here rather than re-checking layout.mode
+  // at every render site below.
+  const cameraLayoutMode = layout.mode === "screen-share" ? layout.cameraLayout : "corner-pip";
+  const screenSource = layout.mode === "screen-share" ? layout.screenSource : null;
 
   // Auto-hide the controls + top meta only during connected video calls. Every
   // other phase keeps them visible (incoming needs accept/reject obvious;
@@ -112,23 +125,85 @@ export function CallUI({
           frame on its own — unmounting would defeat the freeze UX. */}
       {isVideo && (
         <div className="absolute inset-0 overflow-hidden bg-black">
-          <video
-            ref={remoteBgVideoRef}
-            autoPlay
-            playsInline
-            muted
-            className="absolute inset-0 h-full w-full scale-110 object-cover opacity-40 blur-2xl"
-          />
-          <div className="absolute inset-0 flex items-center justify-center">
-            <video
-              ref={remoteVideoRef}
-              autoPlay
-              playsInline
-              className="max-h-full max-w-full object-contain"
-            />
-          </div>
-          {/* Peer camera-off badge — overlay only, video stays mounted underneath. */}
-          {state.peerCameraOff && phase === "connected" && (
+          {isSharing ? (
+            // Screen-share stage — whoever's screen is being shared (local or
+            // remote) fills the space; a "both cameras" viewer preference
+            // narrows it with a side column instead (see below). No blurred
+            // fill here (that treatment is tuned for a face-cam feed, not
+            // arbitrary screen content).
+            <div className="flex h-full w-full">
+              <div className="relative flex flex-1 items-center justify-center bg-black">
+                <video
+                  ref={screenSource === "local" ? localScreenVideoRef : remoteScreenVideoRef}
+                  autoPlay
+                  playsInline
+                  // Local screen audio is muted here — the sharer already hears
+                  // their own system audio directly; the remote share's audio
+                  // (if any) is real content the viewer wants to hear.
+                  muted={screenSource === "local"}
+                  className="max-h-full max-w-full object-contain"
+                />
+              </div>
+              {cameraLayoutMode === "both-column" && (
+                <div
+                  className="flex w-[26vw] max-w-[220px] shrink-0 flex-col gap-3 overflow-y-auto bg-black/40 p-3"
+                  style={{
+                    paddingTop: "calc(env(safe-area-inset-top) + 16px)",
+                    paddingBottom: "calc(env(safe-area-inset-bottom) + 96px)",
+                  }}
+                >
+                  <div className="aspect-square w-full shrink-0 overflow-hidden rounded-2xl border border-white/15 bg-black">
+                    {state.peerCameraOff ? (
+                      <div className="flex h-full w-full items-center justify-center">
+                        <Avatar username={peer.username} size={64} />
+                      </div>
+                    ) : (
+                      <video ref={remoteVideoRef} autoPlay playsInline className="h-full w-full object-cover" />
+                    )}
+                  </div>
+                  <div className="aspect-square w-full shrink-0 overflow-hidden rounded-2xl border border-white/15 bg-black">
+                    {state.isCameraOff ? (
+                      <div className="flex h-full w-full items-center justify-center">
+                        <Avatar username={selfUsername ?? "?"} size={64} />
+                      </div>
+                    ) : (
+                      <video
+                        ref={localVideoRef}
+                        autoPlay
+                        playsInline
+                        muted
+                        className="h-full w-full object-cover"
+                        style={{ transform: selfMirror }}
+                      />
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+          ) : (
+            <>
+              <video
+                ref={remoteBgVideoRef}
+                autoPlay
+                playsInline
+                muted
+                className="absolute inset-0 h-full w-full scale-110 object-cover opacity-40 blur-2xl"
+              />
+              <div className="absolute inset-0 flex items-center justify-center">
+                <video
+                  ref={remoteVideoRef}
+                  autoPlay
+                  playsInline
+                  className="max-h-full max-w-full object-contain"
+                />
+              </div>
+            </>
+          )}
+          {/* Peer camera-off badge — overlay only, video stays mounted underneath.
+              Screen-share modes show the peer's camera in a small tile instead
+              (corner PiP or column), where an off camera already falls back to
+              an Avatar — no need for this full-stage badge on top of that. */}
+          {!isSharing && state.peerCameraOff && phase === "connected" && (
             <div className="absolute inset-0 z-[3] flex items-center justify-center pointer-events-none">
               <div className="flex items-center gap-2 rounded-full bg-black/55 px-4 py-2 backdrop-blur-md">
                 <VideoOff className="h-4 w-4 text-white/80" />
@@ -165,11 +240,17 @@ export function CallUI({
         </div>
       )}
 
-      {/* Self preview — bottom-LEFT corner, fixed aspect-square, mirror tied to
-          facingMode so rear-camera doesn't render reversed. When local camera is
-          off, swap the <video> for an Avatar in the same frame; track stays live
-          on the controller, so toggling back is instant. */}
-      {isConnectedVideo && (
+      {/* Corner PiP — bottom-LEFT, fixed aspect-square. Two different sources
+          depending on mode, never both, and NEVER the local viewer's own
+          camera while a share is active (that's the whole point of the
+          rendering rule — own self-preview is hidden the moment anyone
+          shares):
+            • not sharing → own camera (existing self-preview, mirror tied to
+              facingMode so rear-camera doesn't render reversed)
+            • sharing, corner-pip layout → the OTHER participant's camera
+          "both-column" layout replaces this corner box entirely with the side
+          column above, so it's skipped here. */}
+      {isConnectedVideo && cameraLayoutMode !== "both-column" && (
         <div
           className="absolute z-[2] aspect-square w-[30vw] max-w-[150px] overflow-hidden rounded-2xl border border-white/15 shadow-xl sm:max-w-[180px]"
           style={{
@@ -178,7 +259,15 @@ export function CallUI({
             background: "#000",
           }}
         >
-          {state.isCameraOff ? (
+          {isSharing ? (
+            state.peerCameraOff ? (
+              <div className="flex h-full w-full items-center justify-center">
+                <Avatar username={peer.username} size={88} />
+              </div>
+            ) : (
+              <video ref={remoteVideoRef} autoPlay playsInline className="h-full w-full object-cover" />
+            )
+          ) : state.isCameraOff ? (
             <div className="flex h-full w-full items-center justify-center">
               <Avatar username={selfUsername ?? "?"} size={88} />
             </div>
@@ -257,6 +346,36 @@ export function CallUI({
           <CircleButton label="Flip camera" onClick={onSwitchCamera} bg="rgba(255,255,255,0.12)">
             <SwitchCamera className="h-6 w-6 text-white" />
           </CircleButton>
+          {/* Desktop/tablet only — same lg: breakpoint the rest of the app uses
+              for mobile-vs-desktop conditional rendering (e.g. sidebar-nav.tsx,
+              bottom-tab-bar.tsx). Starting a share on mobile would require
+              switching apps, which backgrounds the browser and — per the
+              disconnect investigation — suspends the WebRTC connection
+              entirely, dropping the whole call, not just the share. Viewing
+              the PEER's share works fine on mobile (no capture/app-switch
+              involved), so only this trigger is gated, not the screen-share
+              stage/layout above. */}
+          <CircleButton
+            label={screenSource === "local" ? "Stop sharing" : "Share screen"}
+            onClick={onToggleScreenShare}
+            bg={screenSource === "local" ? "rgba(255,255,255,0.25)" : "rgba(255,255,255,0.12)"}
+            className="hidden lg:flex"
+          >
+            {screenSource === "local" ? (
+              <ScreenShareOff className="h-6 w-6 text-white" />
+            ) : (
+              <ScreenShare className="h-6 w-6 text-white" />
+            )}
+          </CircleButton>
+          {isSharing && (
+            <CircleButton
+              label={state.showBothCameras ? "Hide both cameras" : "Show both cameras"}
+              onClick={onToggleBothCameras}
+              bg={state.showBothCameras ? "rgba(255,255,255,0.25)" : "rgba(255,255,255,0.12)"}
+            >
+              <Columns2 className="h-6 w-6 text-white" />
+            </CircleButton>
+          )}
           <CircleButton label="End call" onClick={onHangup} bg="#EF4444">
             <PhoneOff className="h-7 w-7 text-white" />
           </CircleButton>
@@ -301,14 +420,14 @@ export function CallUI({
 }
 
 function CircleButton({
-  label, onClick, bg, children,
-}: { label: string; onClick: () => void; bg: string; children: React.ReactNode }) {
+  label, onClick, bg, children, className = "flex",
+}: { label: string; onClick: () => void; bg: string; children: React.ReactNode; className?: string }) {
   return (
     <button
       type="button"
       aria-label={label}
       onClick={onClick}
-      className="flex h-16 w-16 items-center justify-center rounded-full transition-transform active:scale-95"
+      className={`${className} h-16 w-16 items-center justify-center rounded-full transition-transform active:scale-95`}
       style={{ background: bg }}
     >
       {children}

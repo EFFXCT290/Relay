@@ -42,6 +42,7 @@ export type CallIceInbound = {
 export type CallMediaStateInbound = {
     callId: string;
     cameraOn: boolean;
+    screenSharing?: boolean;
 };
 export type CallClientConnectionState = "new" | "connecting" | "connected" | "disconnected" | "failed" | "closed";
 export type CallClientStateInbound = {
@@ -110,6 +111,7 @@ export type CallFailedEvent = {
 export type CallPeerMediaStateEvent = {
     callId: string;
     cameraOn: boolean;
+    screenSharing?: boolean;
 };
 export type RTCSessionDescriptionInitLike = {
     type: "offer" | "answer";

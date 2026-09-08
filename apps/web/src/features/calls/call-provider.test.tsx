@@ -21,6 +21,12 @@ class FakeController {
   closed = false;
   restartIceCalls = 0;
   createOfferCalls = 0;
+  stopScreenShareCalls = 0;
+  // Tests override these to simulate glare (return null) or a rejected
+  // getDisplayMedia (permission denied/cancelled).
+  nextCreateOfferReturnsNull = false;
+  nextAcceptOfferReturnsNull = false;
+  startScreenShareImpl: () => Promise<MediaStream> = async () => ({}) as MediaStream;
 
   constructor(cb: WebRtcCallbacks) {
     this.cb = cb;
@@ -29,9 +35,17 @@ class FakeController {
   async startLocalMedia(): Promise<void> {}
   async createOffer() {
     this.createOfferCalls += 1;
+    if (this.nextCreateOfferReturnsNull) {
+      this.nextCreateOfferReturnsNull = false;
+      return null;
+    }
     return { type: "offer" as const, sdp: `offer-${this.createOfferCalls}` };
   }
   async acceptOffer() {
+    if (this.nextAcceptOfferReturnsNull) {
+      this.nextAcceptOfferReturnsNull = false;
+      return null;
+    }
     return { type: "answer" as const, sdp: "answer" };
   }
   async acceptAnswer(): Promise<void> {}
@@ -41,6 +55,12 @@ class FakeController {
   async switchCamera(): Promise<void> {}
   restartIce(): void {
     this.restartIceCalls += 1;
+  }
+  async startScreenShare(): Promise<MediaStream> {
+    return this.startScreenShareImpl();
+  }
+  async stopScreenShare(): Promise<void> {
+    this.stopScreenShareCalls += 1;
   }
   close(): void {
     this.closed = true;
@@ -84,7 +104,7 @@ vi.mock("@/frontend-core/socket", () => ({
 // eslint-disable-next-line import/first
 import { CallProvider, useCall, ICE_DISCONNECT_GRACE_MS } from "./call-provider";
 // eslint-disable-next-line import/first
-import { emitOffer, emitClientState, emitConnectionStats } from "./call-socket";
+import { emitOffer, emitAnswer, emitMediaState, emitClientState, emitConnectionStats } from "./call-socket";
 
 function wrapper({ children }: { children: ReactNode }) {
   return <CallProvider selfUsername="me">{children}</CallProvider>;
@@ -367,5 +387,183 @@ describe("CallProvider observability reporting (Part 2/3)", () => {
     const controller = await connectAsOutgoing(result);
     expect(result.current.state.phase).toBe("connected");
     expect(controller.closed).toBe(false);
+  });
+});
+
+describe("CallProvider screen share — mid-call renegotiation", () => {
+  it("starting a local share: attaches the stream, dispatches sharedBy:'local', tells the peer, and renegotiates via emitOffer", async () => {
+    const { result } = renderHook(() => useCall(), { wrapper });
+    const controller = await connectAsOutgoing(result);
+    vi.mocked(emitOffer).mockClear(); // drop the initial-offer call from connectAsOutgoing
+
+    const fakeStream = {} as MediaStream;
+    controller.startScreenShareImpl = async () => fakeStream;
+
+    act(() => {
+      result.current.toggleScreenShare();
+    });
+
+    await waitFor(() => expect(result.current.state.screenShare).toEqual({ sharedBy: "local" }));
+    expect(emitMediaState).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ callId: "call-1", screenSharing: true }),
+    );
+    // Adding the track changes the SDP — this must renegotiate, reusing the
+    // same call:offer path as the initial offer, not a bespoke one.
+    await waitFor(() =>
+      expect(emitOffer).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ callId: "call-1" })),
+    );
+  });
+
+  it("a permission-denied/cancelled getDisplayMedia leaves the FSM untouched — no crash, no false 'sharing' state", async () => {
+    const { result } = renderHook(() => useCall(), { wrapper });
+    const controller = await connectAsOutgoing(result);
+    controller.startScreenShareImpl = async () => {
+      throw new Error("Permission denied");
+    };
+
+    act(() => {
+      result.current.toggleScreenShare();
+    });
+
+    // Nothing to wait FOR here (the failure path never dispatches) — settle
+    // the microtask queue, then assert the FSM never moved.
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(result.current.state.screenShare).toEqual({ sharedBy: null });
+  });
+
+  it("stopping a local share (in-app button): calls controller.stopScreenShare(), clears FSM, tells the peer, and renegotiates back down", async () => {
+    const { result } = renderHook(() => useCall(), { wrapper });
+    const controller = await connectAsOutgoing(result);
+    controller.startScreenShareImpl = async () => ({}) as MediaStream;
+    act(() => {
+      result.current.toggleScreenShare();
+    });
+    await waitFor(() => expect(result.current.state.screenShare).toEqual({ sharedBy: "local" }));
+    vi.mocked(emitOffer).mockClear();
+    vi.mocked(emitMediaState).mockClear();
+
+    act(() => {
+      result.current.toggleScreenShare(); // same intent — toggles off now
+    });
+
+    await waitFor(() => expect(result.current.state.screenShare).toEqual({ sharedBy: null }));
+    expect(controller.stopScreenShareCalls).toBe(1);
+    expect(emitMediaState).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ callId: "call-1", screenSharing: false }),
+    );
+    await waitFor(() =>
+      expect(emitOffer).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ callId: "call-1" })),
+    );
+  });
+
+  it("the browser's native 'Stop sharing' bar (onScreenShareEnded) tears down the SAME way, without the provider calling stopScreenShare() again", async () => {
+    // webrtc.ts already calls stopScreenShare() itself before invoking this
+    // callback (see its own test coverage) — the provider's job here is just
+    // the FSM/signaling/renegotiation cleanup, not a second stop.
+    const { result } = renderHook(() => useCall(), { wrapper });
+    const controller = await connectAsOutgoing(result);
+    controller.startScreenShareImpl = async () => ({}) as MediaStream;
+    act(() => {
+      result.current.toggleScreenShare();
+    });
+    await waitFor(() => expect(result.current.state.screenShare).toEqual({ sharedBy: "local" }));
+    vi.mocked(emitOffer).mockClear();
+
+    act(() => {
+      controller.cb.onScreenShareEnded();
+    });
+
+    await waitFor(() => expect(result.current.state.screenShare).toEqual({ sharedBy: null }));
+    expect(controller.stopScreenShareCalls).toBe(0); // NOT called again by the provider
+    expect(emitMediaState).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ callId: "call-1", screenSharing: false }),
+    );
+    await waitFor(() => expect(emitOffer).toHaveBeenCalled());
+  });
+
+  it("a renegotiation offer arriving mid-call (peer's screen share) is accepted via the existing onOffer/acceptOffer/emitAnswer path", async () => {
+    const { result } = renderHook(() => useCall(), { wrapper });
+    await connectAsOutgoing(result);
+    vi.mocked(emitAnswer).mockClear();
+
+    act(() => {
+      socketHandlers!.onOffer({ callId: "call-1", sdp: { type: "offer", sdp: "peer-screen-share-offer" } });
+    });
+    await waitFor(() => expect(emitAnswer).toHaveBeenCalled());
+    expect(emitAnswer).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ callId: "call-1" }));
+  });
+
+  it("a glare-dropped acceptOffer (null) does not emit an answer", async () => {
+    const { result } = renderHook(() => useCall(), { wrapper });
+    const controller = await connectAsOutgoing(result);
+    controller.nextAcceptOfferReturnsNull = true;
+    vi.mocked(emitAnswer).mockClear();
+
+    act(() => {
+      socketHandlers!.onOffer({ callId: "call-1", sdp: { type: "offer", sdp: "colliding-offer" } });
+    });
+
+    // Nothing dispatches on this path (the offer was dropped), so there's no
+    // state change to waitFor — just let the handler's promise settle.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(emitAnswer).not.toHaveBeenCalled();
+  });
+
+  it("peer-media-state screenSharing:true sets sharedBy:'remote'; screenSharing:false clears it back to null", async () => {
+    const { result } = renderHook(() => useCall(), { wrapper });
+    await connectAsOutgoing(result);
+
+    act(() => {
+      socketHandlers!.onPeerMediaState({ callId: "call-1", cameraOn: true, screenSharing: true });
+    });
+    expect(result.current.state.screenShare).toEqual({ sharedBy: "remote" });
+
+    act(() => {
+      socketHandlers!.onPeerMediaState({ callId: "call-1", cameraOn: true, screenSharing: false });
+    });
+    expect(result.current.state.screenShare).toEqual({ sharedBy: null });
+  });
+
+  it("peer-media-state without a screenSharing field (a plain camera toggle) leaves screenShare untouched", async () => {
+    const { result } = renderHook(() => useCall(), { wrapper });
+    await connectAsOutgoing(result);
+
+    act(() => {
+      socketHandlers!.onPeerMediaState({ callId: "call-1", cameraOn: true, screenSharing: true });
+    });
+    expect(result.current.state.screenShare).toEqual({ sharedBy: "remote" });
+
+    act(() => {
+      socketHandlers!.onPeerMediaState({ callId: "call-1", cameraOn: false }); // plain camera-off toggle
+    });
+    expect(result.current.state.screenShare).toEqual({ sharedBy: "remote" }); // unchanged
+    expect(result.current.state.peerCameraOff).toBe(true);
+  });
+
+  it("hangup while sharing tears everything down through the same teardown() path (no leaked screen stream/state)", async () => {
+    const { result } = renderHook(() => useCall(), { wrapper });
+    const controller = await connectAsOutgoing(result);
+    controller.startScreenShareImpl = async () => ({}) as MediaStream;
+    act(() => {
+      result.current.toggleScreenShare();
+    });
+    await waitFor(() => expect(result.current.state.screenShare).toEqual({ sharedBy: "local" }));
+
+    act(() => {
+      result.current.hangup();
+    });
+
+    expect(controller.closed).toBe(true);
+    expect(result.current.state.phase).toBe("ended");
+    // teardown() resets phase eventually via its own timer — screenShare
+    // itself is reset the moment a NEW call starts (outgoing/incoming), which
+    // "ended" alone doesn't exercise; the invariant that actually matters here
+    // is already covered above: hangup routes through the one teardown() path
+    // (controller.closed), same as every other terminal trigger.
   });
 });

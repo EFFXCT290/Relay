@@ -21,6 +21,11 @@ export type CallPhase =
 export type CallDirection = "incoming" | "outgoing";
 export type CallPeer = { id: string; username: string };
 
+// null = no one sharing. "local"/"remote" says whose screen is currently on
+// the wire — never both from the same side (starting a new share while
+// already sharing is just a no-op button state in the UI).
+export type ScreenShareSharedBy = "local" | "remote" | null;
+
 export type CallState = {
   phase:           CallPhase;
   callId:          string | null;
@@ -34,6 +39,12 @@ export type CallState = {
   // reset to defaults on every transition into outgoing/incoming.
   selfFacing:      "user" | "environment";
   peerCameraOff:   boolean;
+  // Screen share (desktop only — see call-ui.tsx). sharedBy drives which
+  // layout call-layout.ts picks; showBothCameras is a LOCAL-ONLY viewer
+  // preference (never synced to the peer) for revealing both camera feeds
+  // alongside the share instead of just the non-sharing side's PiP.
+  screenShare:     { sharedBy: ScreenShareSharedBy };
+  showBothCameras: boolean;
   conversationId?: string;
 };
 
@@ -47,6 +58,8 @@ export const initialCallState: CallState = {
   isCameraOff:   false,
   selfFacing:    "user",
   peerCameraOff: false,
+  screenShare:     { sharedBy: null },
+  showBothCameras: false,
 };
 
 export type CallAction =
@@ -59,6 +72,8 @@ export type CallAction =
   | { t: "cameraOff"; value: boolean }
   | { t: "facing"; value: "user" | "environment" }
   | { t: "peerCameraOff"; value: boolean }
+  | { t: "screenShareState"; sharedBy: ScreenShareSharedBy }
+  | { t: "toggleBothCameras" }
   | { t: "reset" };
 
 const isLive = (p: CallPhase) => p !== "idle" && p !== "ended" && p !== "failed";
@@ -77,6 +92,8 @@ export function callReducer(state: CallState, action: CallAction): CallState {
         isCameraOff: false,
         selfFacing: "user",
         peerCameraOff: false,
+        screenShare: { sharedBy: null },
+        showBothCameras: false,
         conversationId: action.conversationId,
       };
 
@@ -92,6 +109,8 @@ export function callReducer(state: CallState, action: CallAction): CallState {
         isCameraOff: false,
         selfFacing: "user",
         peerCameraOff: false,
+        screenShare: { sharedBy: null },
+        showBothCameras: false,
         conversationId: action.conversationId,
       };
 
@@ -119,6 +138,12 @@ export function callReducer(state: CallState, action: CallAction): CallState {
 
     case "peerCameraOff":
       return { ...state, peerCameraOff: action.value };
+
+    case "screenShareState":
+      return { ...state, screenShare: { sharedBy: action.sharedBy } };
+
+    case "toggleBothCameras":
+      return { ...state, showBothCameras: !state.showBothCameras };
 
     case "reset":
       return initialCallState;
