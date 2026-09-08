@@ -328,7 +328,14 @@ function ReplyOrEditChip({
       className="mb-2 flex items-start gap-3 rounded-[14px] border bg-[var(--color-panel)] px-3 py-2"
       style={{ borderColor: "var(--color-hairline)", borderLeft: "2px solid var(--color-signal)" }}
     >
-      <div className="flex flex-1 flex-col gap-0.5">
+      {/* min-w-0 is load-bearing, not decoration: a flex item's default
+          min-width is auto (its content's intrinsic width), so without this
+          the row never shrinks below a long replied-to message's full
+          length — `truncate` below then has nothing to actually clip,
+          and the chip (and the composer below it) grows/pushes with it.
+          Same min-w-0 + truncate pairing as pinned-banner.tsx and
+          pinned-messages-list.tsx's identical previews. */}
+      <div className="flex min-w-0 flex-1 flex-col gap-0.5">
         <span
           className="text-[10px] font-semibold uppercase tracking-[0.06em] text-[var(--color-signal)]"
           style={{ fontFamily: mono }}

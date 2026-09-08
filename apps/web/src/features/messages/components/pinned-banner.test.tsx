@@ -97,4 +97,18 @@ describe("PinnedBanner", () => {
     fireEvent.click(screen.getByText("View all"));
     expect(onOpenList).toHaveBeenCalledTimes(1);
   });
+
+  it("a genuinely long preview renders with the real ellipsis truncation, not a manual substring cut", () => {
+    const longBody =
+      "A very long pinned message body — long enough that at full intrinsic width it would blow out the banner's single-row layout if truncation weren't actually engaged.";
+    const pin = makePin({ message: { senderId: "a", senderUsername: "alice", body: longBody, type: "TEXT", createdAt: new Date().toISOString() } });
+    render(<PinnedBanner pins={[pin]} onJump={vi.fn()} onOpenList={vi.fn()} />);
+
+    // Full text present (real CSS ellipsis, no server/client-side slicing).
+    const preview = screen.getByText(longBody);
+    expect(preview.className).toContain("truncate");
+    // min-w-0 on the flex-1 ancestor is what lets `truncate` actually clip —
+    // without it the row never shrinks below the text's intrinsic width.
+    expect(preview.closest("button")?.className).toContain("min-w-0");
+  });
 });
