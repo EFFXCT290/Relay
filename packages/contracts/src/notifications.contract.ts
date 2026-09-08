@@ -12,6 +12,7 @@ export const NotificationTypeSchema = Type.Union([
   Type.Literal("MESSAGE_RECEIVED"),
   Type.Literal("VIEW_COUNT_UPDATE"),
   Type.Literal("MEDIA_EXPIRED"),
+  Type.Literal("NICKNAME_SHARED"),
 ]);
 export type NotificationType = Static<typeof NotificationTypeSchema>;
 
@@ -35,6 +36,8 @@ export type NotificationPayload = {
   expiredAt?:     string;
   from?:          { userId: string; username: string };
   preview?:       string;
+  // NICKNAME_SHARED — `from` (above) is who shared it.
+  nickname?:      string;
 } & Record<string, unknown>;
 
 export const NotificationSchema = Type.Object({

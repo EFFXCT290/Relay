@@ -9,3 +9,4 @@ export * from "./typing.contract.js";
 export * from "./users.contract.js";
 export * from "./realtime.contract.js";
 export * from "./spotify.contract.js";
+export * from "./nicknames.contract.js";

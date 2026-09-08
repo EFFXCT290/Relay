@@ -1,6 +1,6 @@
 "use client";
 
-import { Clock, Eye, Image as ImageIcon, MessageSquare, ShieldCheck, ShieldOff } from "lucide-react";
+import { Clock, Eye, Image as ImageIcon, MessageSquare, ShieldCheck, ShieldOff, Tag } from "lucide-react";
 import type { Notification } from "@relay/contracts";
 
 export type { Notification };  // re-export so prior consumers via this path keep working
@@ -209,6 +209,21 @@ function compactMeta(n: Notification) {
         body: (
           <>
             A photo you sent <span className="font-bold">@{recipient ?? "someone"}</span> reached its view limit and was removed.
+          </>
+        ),
+        timestamp: t,
+      };
+    }
+    case "NICKNAME_SHARED": {
+      const from = n.payload.from?.username;
+      return {
+        icon: <Tag className="h-4 w-4" style={{ color: "var(--color-signal)" }} />,
+        tint: "rgba(59,130,246,0.10)",
+        tintBorder: "rgba(59,130,246,0.22)",
+        body: (
+          <>
+            <span className="font-bold">@{from ?? "someone"}</span> nicknamed you{" "}
+            <span className="font-bold">&lsquo;{n.payload.nickname ?? ""}&rsquo;</span>
           </>
         ),
         timestamp: t,

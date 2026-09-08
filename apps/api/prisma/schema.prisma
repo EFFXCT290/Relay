@@ -47,6 +47,8 @@ model User {
   eventOutbox       EventOutbox[]
   spotifyConnection SpotifyConnection?
   pinnedMessages    PinnedMessage[]
+  nicknamesGiven    UserNickname[]     @relation("NicknameOwner")
+  nicknamesReceived UserNickname[]     @relation("NicknameTarget")
 
   @@index([username])
 }
@@ -436,6 +438,7 @@ model Notification {
 enum NotificationType {
   SYSTEM_ALERT
   MESSAGE_RECEIVED
+  NICKNAME_SHARED
 }
 
 // One row per installed device/browser (a user can have many). We store the
@@ -518,4 +521,27 @@ model EventOutbox {
   // conversation delete cascading into EventOutbox would sequentially scan
   // the whole table to find matching rows.
   @@index([conversationId])
+}
+
+// Private, per-owner nicknames for a conversation partner. Two named relations
+// to User since both FKs point at the same model. Private by default
+// (sharedWithTarget: false) — a nickname override must never leak past its
+// owner unless they explicitly turn sharing on (see nickname.routes.ts).
+model UserNickname {
+  id               String   @id @default(uuid())
+  ownerId          String
+  targetUserId     String
+  nickname         String
+  sharedWithTarget Boolean  @default(false)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  owner  User @relation("NicknameOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  target User @relation("NicknameTarget", fields: [targetUserId], references: [id], onDelete: Cascade)
+
+  @@unique([ownerId, targetUserId])
+  // Postgres doesn't auto-index FK columns — without this, resolving "who has
+  // shared a nickname with ME" (the target-side lookup) would sequentially
+  // scan the whole table.
+  @@index([targetUserId])
 }

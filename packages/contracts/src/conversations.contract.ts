@@ -14,6 +14,12 @@ export const ConversationParticipantSchema = Type.Object({
   avatarUrl:  Type.Optional(Type.Union([Type.String(), Type.Null()])),
   isOnline:   Type.Optional(Type.Boolean()),
   lastSeenAt: Type.Optional(Type.Union([Type.String({ format: "date-time" }), Type.Null()])),
+  // The REQUESTING user's own private nickname for this participant — never
+  // global, never another viewer's. null/absent means "use username". The
+  // real username above is always still present alongside it — callers
+  // decide per-surface whether to substitute (see conversation-row.tsx) or
+  // show both (the Contact Info screen).
+  nickname:   Type.Optional(Type.Union([Type.String(), Type.Null()])),
 });
 
 export const ConversationLastMessageSchema = Type.Union([

@@ -9,6 +9,7 @@ import {
 } from "./conversation.socket.js";
 import { PresenceService } from "../presence/presence.service.js";
 import { SpotifyService } from "../spotify/spotify.service.js";
+import { NicknameService } from "../nicknames/nickname.service.js";
 
 const ParticipantSchema = Type.Object({
   userId:     Type.String({ format: "uuid" }),
@@ -16,6 +17,9 @@ const ParticipantSchema = Type.Object({
   avatarUrl:  Type.Optional(Type.Union([Type.String(), Type.Null()])),
   isOnline:   Type.Optional(Type.Boolean()),
   lastSeenAt: Type.Optional(Type.Union([Type.String({ format: "date-time" }), Type.Null()])),
+  // The CALLER's own private nickname for this participant — see
+  // ConversationParticipantSchema in @relay/contracts for the full contract.
+  nickname:   Type.Optional(Type.Union([Type.String(), Type.Null()])),
 });
 
 // Batch-fetch presence for a set of userIds. Returns a Map so callers
@@ -58,6 +62,31 @@ async function spotifySummariesFor(
     }),
   );
   return new Map(entries);
+}
+
+// Batch "my nickname for each of these people" — same Promise.all-friendly
+// Map-keyed-by-userId shape as spotifySummariesFor above, mirrored exactly per
+// the same batching convention. Two SEPARATE lookups are needed per
+// conversation, this being one direction (mine, for THEIR displayed name in
+// my own view); sharedNicknamesForMe below is the other (theirs, for me).
+async function myNicknamesFor(
+  fastify: import("fastify").FastifyInstance,
+  callerId: string,
+  userIds: string[],
+): Promise<Map<string, string>> {
+  return new NicknameService(fastify).myNicknamesFor(callerId, userIds);
+}
+
+// Batch "who among these participants has SHARED a nickname with me" — the
+// reverse direction, only ever consumed by the single-conversation detail
+// route below (the "X calls you: Y" badge is thread-scoped, not a list-row
+// feature).
+async function sharedNicknamesForMe(
+  fastify: import("fastify").FastifyInstance,
+  callerId: string,
+  ownerIds: string[],
+): Promise<Map<string, string>> {
+  return new NicknameService(fastify).sharedNicknamesForMe(callerId, ownerIds);
 }
 
 const ListItemSchema = Type.Object({
@@ -138,6 +167,11 @@ const conversationRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
       });
       if (!other) throw new ProblemError("not_found", "Participant not found.");
       const otherAvatarUrl = other.avatarKey ? await fastify.getMediaUrl(other.avatarKey) : null;
+      // A nickname can already exist even before any conversation did (e.g.
+      // set from a mutual-contacts surface elsewhere) — same batched lookup
+      // as every other participant-bearing response, just a single-element
+      // call here.
+      const nickname = (await myNicknamesFor(fastify, callerId, [other.id])).get(other.id) ?? null;
 
       // Look for an existing 1:1 conversation that has *exactly* these two
       // participants (so future group conversations don't collide).
@@ -155,7 +189,7 @@ const conversationRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
       if (existing && existing.participants.length === 2) {
         return reply.code(200).send({
           conversationId: existing.id,
-          participant: { userId: other.id, username: other.username, avatarUrl: otherAvatarUrl },
+          participant: { userId: other.id, username: other.username, avatarUrl: otherAvatarUrl, nickname },
           createdAt: existing.createdAt.toISOString(),
         });
       }
@@ -185,7 +219,7 @@ const conversationRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
 
       return reply.code(201).send({
         conversationId: created.id,
-        participant: { userId: other.id, username: other.username, avatarUrl: otherAvatarUrl },
+        participant: { userId: other.id, username: other.username, avatarUrl: otherAvatarUrl, nickname },
         createdAt: created.createdAt.toISOString(),
       });
     },
@@ -241,10 +275,11 @@ const conversationRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
         return other?.userId ?? callerId;
       });
 
-      const [unreadCounts, presences, spotifies] = await Promise.all([
+      const [unreadCounts, presences, spotifies, nicknames] = await Promise.all([
         unreadCountsFor(fastify, callerId, slice.map((c) => c.id)),
         presencesFor(fastify, otherIds),
         spotifySummariesFor(fastify, otherIds),
+        myNicknamesFor(fastify, callerId, otherIds),
       ]);
 
       return {
@@ -256,7 +291,14 @@ const conversationRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
           return {
             conversationId: c.id,
             participant: other
-              ? { userId: other.user.id, username: other.user.username, avatarUrl, isOnline: p?.isOnline, lastSeenAt: p?.lastSeen ?? null }
+              ? {
+                  userId: other.user.id,
+                  username: other.user.username,
+                  avatarUrl,
+                  isOnline: p?.isOnline,
+                  lastSeenAt: p?.lastSeen ?? null,
+                  nickname: nicknames.get(other.user.id) ?? null,
+                }
               : { userId: callerId, username: "—" },
             lastMessage: last
               ? {
@@ -313,9 +355,10 @@ const conversationRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
         return other?.userId ?? callerId;
       });
 
-      const [unreadCounts, presences] = await Promise.all([
+      const [unreadCounts, presences, nicknames] = await Promise.all([
         unreadCountsFor(fastify, callerId, rows.map((c) => c.id)),
         presencesFor(fastify, otherIds),
+        myNicknamesFor(fastify, callerId, otherIds),
       ]);
 
       return {
@@ -327,7 +370,14 @@ const conversationRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
           return {
             conversationId: c.id,
             participant: other
-              ? { userId: other.user.id, username: other.user.username, avatarUrl, isOnline: p?.isOnline, lastSeenAt: p?.lastSeen ?? null }
+              ? {
+                  userId: other.user.id,
+                  username: other.user.username,
+                  avatarUrl,
+                  isOnline: p?.isOnline,
+                  lastSeenAt: p?.lastSeen ?? null,
+                  nickname: nicknames.get(other.user.id) ?? null,
+                }
               : { userId: callerId, username: "—" },
             lastMessage: last
               ? {
@@ -358,6 +408,11 @@ const conversationRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
             participant: ParticipantSchema,
             createdAt: Type.String({ format: "date-time" }),
             myAcceptedAt: Type.Union([Type.String({ format: "date-time" }), Type.Null()]),
+            // THEIR nickname for ME, only present at all once they've shared
+            // it — the reverse direction from participant.nickname above.
+            // Drives the "X calls you: Y" badge; never leaks to anyone but
+            // the actual target (see conversation.routes.test.ts).
+            sharedNicknameForMe: Type.Union([Type.String(), Type.Null()]),
           }),
         },
       },
@@ -376,7 +431,11 @@ const conversationRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
       if (!me) throw new ProblemError("forbidden", "You are not a participant.");
 
       const other = conv.participants.find((p) => p.userId !== callerId) ?? conv.participants[0]!;
-      const presence = await new PresenceService(fastify).getFor(other.user.id);
+      const [presence, myNicknames, sharedNicknames] = await Promise.all([
+        new PresenceService(fastify).getFor(other.user.id),
+        myNicknamesFor(fastify, callerId, [other.user.id]),
+        sharedNicknamesForMe(fastify, callerId, [other.user.id]),
+      ]);
       return {
         conversationId: conv.id,
         participant: {
@@ -385,9 +444,11 @@ const conversationRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
           avatarUrl:  other.user.avatarKey ? await fastify.getMediaUrl(other.user.avatarKey) : null,
           isOnline:   presence.isOnline,
           lastSeenAt: presence.lastSeen ?? null,
+          nickname:   myNicknames.get(other.user.id) ?? null,
         },
         createdAt: conv.createdAt.toISOString(),
         myAcceptedAt: me.acceptedAt ? me.acceptedAt.toISOString() : null,
+        sharedNicknameForMe: sharedNicknames.get(other.user.id) ?? null,
       };
     },
   );

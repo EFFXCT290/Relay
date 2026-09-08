@@ -1,5 +1,5 @@
 import { type Static } from "@sinclair/typebox";
-export declare const NotificationTypeSchema: import("@sinclair/typebox").TUnion<[import("@sinclair/typebox").TLiteral<"SYSTEM_ALERT">, import("@sinclair/typebox").TLiteral<"MESSAGE_RECEIVED">, import("@sinclair/typebox").TLiteral<"VIEW_COUNT_UPDATE">, import("@sinclair/typebox").TLiteral<"MEDIA_EXPIRED">]>;
+export declare const NotificationTypeSchema: import("@sinclair/typebox").TUnion<[import("@sinclair/typebox").TLiteral<"SYSTEM_ALERT">, import("@sinclair/typebox").TLiteral<"MESSAGE_RECEIVED">, import("@sinclair/typebox").TLiteral<"VIEW_COUNT_UPDATE">, import("@sinclair/typebox").TLiteral<"MEDIA_EXPIRED">, import("@sinclair/typebox").TLiteral<"NICKNAME_SHARED">]>;
 export type NotificationType = Static<typeof NotificationTypeSchema>;
 export type NotificationPayload = {
     capturedBy?: {
@@ -30,6 +30,7 @@ export type NotificationPayload = {
         username: string;
     };
     preview?: string;
+    nickname?: string;
 } & Record<string, unknown>;
 export declare const NotificationSchema: import("@sinclair/typebox").TObject<{
     notificationId: import("@sinclair/typebox").TString;

@@ -27,6 +27,11 @@ export function formatTime(iso: string): string {
 export function ConversationRow({ conversation }: { conversation: ConversationListItem }) {
   const { participant, lastMessage, unreadCount, isTyping, captureAlert, spotify } = conversation;
   const hasUnread = (unreadCount ?? 0) > 0;
+  // Private, per-owner override — participant.nickname is already scoped to
+  // the requesting user server-side (see conversation.routes.ts), so this is
+  // a plain substitution, never a lookup. Falls straight back to the real
+  // username the instant a nickname is cleared.
+  const displayName = participant.nickname ?? participant.username;
 
   return (
     <Link
@@ -38,7 +43,7 @@ export function ConversationRow({ conversation }: { conversation: ConversationLi
       )}
     >
       <Avatar
-        username={participant.username}
+        username={displayName}
         src={participant.avatarUrl}
         isOnline={participant.isOnline}
         hasAlert={captureAlert}
@@ -50,7 +55,7 @@ export function ConversationRow({ conversation }: { conversation: ConversationLi
             className="truncate text-[16px] font-bold tracking-[-0.01em] text-[var(--color-text)]"
             style={{ fontFamily: display }}
           >
-            @{participant.username}
+            {participant.nickname ? participant.nickname : `@${participant.username}`}
           </span>
           {captureAlert && (
             <span

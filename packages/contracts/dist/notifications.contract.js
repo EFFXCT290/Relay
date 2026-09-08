@@ -10,6 +10,7 @@ export const NotificationTypeSchema = Type.Union([
     Type.Literal("MESSAGE_RECEIVED"),
     Type.Literal("VIEW_COUNT_UPDATE"),
     Type.Literal("MEDIA_EXPIRED"),
+    Type.Literal("NICKNAME_SHARED"),
 ]);
 export const NotificationSchema = Type.Object({
     notificationId: Type.String({ format: "uuid" }),

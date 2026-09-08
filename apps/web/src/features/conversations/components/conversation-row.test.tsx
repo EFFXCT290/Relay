@@ -74,3 +74,29 @@ describe("ConversationRow — typing indicator must always win over the Spotify 
     expect(screen.getByText(/typing…/i)).toBeInTheDocument();
   });
 });
+
+describe("ConversationRow — private nickname substitution", () => {
+  it("no nickname set: shows the real @username, unprefixed nickname text is absent", () => {
+    render(<ConversationRow conversation={baseConversation()} />);
+    expect(screen.getByText("@alice")).toBeInTheDocument();
+  });
+
+  it("nickname set: shows the plain nickname (no @ prefix, since it isn't a handle), not the real username", () => {
+    render(
+      <ConversationRow
+        conversation={baseConversation({ participant: { userId: "user-1", username: "alice", nickname: "Bug" } })}
+      />,
+    );
+    expect(screen.getByText("Bug")).toBeInTheDocument();
+    expect(screen.queryByText("@alice")).not.toBeInTheDocument();
+  });
+
+  it("nickname explicitly null (server always sends the field): falls back to the real @username, same as absent", () => {
+    render(
+      <ConversationRow
+        conversation={baseConversation({ participant: { userId: "user-1", username: "alice", nickname: null } })}
+      />,
+    );
+    expect(screen.getByText("@alice")).toBeInTheDocument();
+  });
+});

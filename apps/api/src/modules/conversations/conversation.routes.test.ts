@@ -105,10 +105,11 @@ describe("POST /api/conversations", () => {
     createdConversationIds.push(body.conversationId);
 
     assert.equal(Object.keys(body).sort().join(","), "conversationId,createdAt,participant");
-    assert.equal(Object.keys(body.participant).sort().join(","), "avatarUrl,userId,username");
+    assert.equal(Object.keys(body.participant).sort().join(","), "avatarUrl,nickname,userId,username");
     assert.equal(body.participant["userId"], b.id);
     assert.equal(body.participant["username"], b.username);
     assert.equal(body.participant["avatarUrl"], null);
+    assert.equal(body.participant["nickname"], null);
     // No password/internal fields leak through, whatever they'd be called.
     assert.equal(body.participant["passwordHash"], undefined);
     assert.equal(body.participant["passwordSalt"], undefined);
@@ -194,12 +195,14 @@ describe("GET /api/conversations/:conversationId", () => {
     });
     assert.equal(res.statusCode, 200);
 
-    const body = res.json() as { conversationId: string; participant: Record<string, unknown>; createdAt: string; myAcceptedAt: string | null };
-    assert.equal(Object.keys(body).sort().join(","), "conversationId,createdAt,myAcceptedAt,participant");
+    const body = res.json() as { conversationId: string; participant: Record<string, unknown>; createdAt: string; myAcceptedAt: string | null; sharedNicknameForMe: string | null };
+    assert.equal(Object.keys(body).sort().join(","), "conversationId,createdAt,myAcceptedAt,participant,sharedNicknameForMe");
     assert.equal(body.conversationId, conversationId);
-    assert.equal(Object.keys(body.participant).sort().join(","), "avatarUrl,isOnline,lastSeenAt,userId,username");
+    assert.equal(Object.keys(body.participant).sort().join(","), "avatarUrl,isOnline,lastSeenAt,nickname,userId,username");
     assert.equal(body.participant["userId"], b.id);
     assert.equal(body.participant["username"], b.username);
+    assert.equal(body.participant["nickname"], null);
+    assert.equal(body.sharedNicknameForMe, null);
     // `a` created the conversation, so `a`'s own row was accepted at creation.
     assert.notEqual(body.myAcceptedAt, null);
   });
@@ -527,5 +530,130 @@ describe("GET /api/conversations — spotify field", () => {
       assert.ok([b.id, c.id].includes(conv.participant.userId));
       assert.deepEqual(conv.spotify, { trackName: "Track", artistName: "Artist", isPlaying: true });
     }
+  });
+});
+
+describe("nickname fields — per-requesting-user isolation across list + detail", () => {
+  let app: Awaited<ReturnType<typeof buildTestApp>>;
+  const createdUserIds: string[] = [];
+  const createdConversationIds: string[] = [];
+
+  before(async () => {
+    app = await buildTestApp();
+  });
+
+  after(async () => {
+    const prisma = app.prisma;
+    await prisma.userNickname.deleteMany({ where: { ownerId: { in: createdUserIds } } });
+    await prisma.conversation.deleteMany({ where: { id: { in: createdConversationIds } } });
+    await prisma.user.deleteMany({ where: { id: { in: createdUserIds } } });
+    await app.close();
+  });
+
+  async function makeAcceptedConversation(userAId: string, userBId: string) {
+    const conversation = await app.prisma.conversation.create({ data: {} });
+    createdConversationIds.push(conversation.id);
+    await app.prisma.participant.createMany({
+      data: [
+        { userId: userAId, conversationId: conversation.id, acceptedAt: new Date() },
+        { userId: userBId, conversationId: conversation.id, acceptedAt: new Date() },
+      ],
+    });
+    return conversation.id;
+  }
+
+  function setNickname(ownerId: string, targetId: string, nickname: string, sharedWithTarget: boolean) {
+    return app.prisma.userNickname.create({ data: { ownerId, targetUserId: targetId, nickname, sharedWithTarget } });
+  }
+
+  function getConversations(callerId: string) {
+    return app.inject({ method: "GET", url: "/api/conversations", headers: { cookie: cookieFor(callerId) } });
+  }
+  function getConversation(callerId: string, conversationId: string) {
+    return app.inject({ method: "GET", url: `/api/conversations/${conversationId}`, headers: { cookie: cookieFor(callerId) } });
+  }
+
+  it("GET /conversations: participant.nickname is MY private nickname for them, not global", async () => {
+    const [a, b] = await Promise.all([createUser(app.prisma, "a"), createUser(app.prisma, "b")]);
+    createdUserIds.push(a.id, b.id);
+    await makeAcceptedConversation(a.id, b.id);
+    await setNickname(a.id, b.id, "Bug", false);
+
+    const res = await getConversations(a.id);
+    const body = res.json() as { conversations: ConversationListItem[] };
+    assert.equal((body.conversations[0]!.participant as { nickname?: string | null }).nickname, "Bug");
+  });
+
+  it("GET /conversations: a nickname I set for someone is INVISIBLE to that person viewing the same conversation — they see null", async () => {
+    const [a, b] = await Promise.all([createUser(app.prisma, "a"), createUser(app.prisma, "b")]);
+    createdUserIds.push(a.id, b.id);
+    await makeAcceptedConversation(a.id, b.id);
+    // a's PRIVATE nickname for b — even sharedWithTarget:true only affects the
+    // reverse-direction "calls you" badge (detail-only), never the list-row
+    // nickname substitution itself, which must stay strictly per-owner.
+    await setNickname(a.id, b.id, "Bug", true);
+
+    const bView = await getConversations(b.id);
+    const bBody = bView.json() as { conversations: ConversationListItem[] };
+    assert.equal(
+      (bBody.conversations[0]!.participant as { nickname?: string | null }).nickname,
+      null,
+      "b has no nickname of their own for a — a's nickname for b must never leak into b's list row",
+    );
+  });
+
+  it("GET /conversations/:id: participant.nickname mirrors the same per-caller value as the list", async () => {
+    const [a, b] = await Promise.all([createUser(app.prisma, "a"), createUser(app.prisma, "b")]);
+    createdUserIds.push(a.id, b.id);
+    const conversationId = await makeAcceptedConversation(a.id, b.id);
+    await setNickname(a.id, b.id, "Bug", false);
+
+    const res = await getConversation(a.id, conversationId);
+    const body = res.json() as { participant: { nickname?: string | null } };
+    assert.equal(body.participant.nickname, "Bug");
+  });
+
+  it("GET /conversations/:id: sharedNicknameForMe is null until the peer explicitly shares a nickname for me", async () => {
+    const [a, b] = await Promise.all([createUser(app.prisma, "a"), createUser(app.prisma, "b")]);
+    createdUserIds.push(a.id, b.id);
+    const conversationId = await makeAcceptedConversation(a.id, b.id);
+
+    const before = await getConversation(a.id, conversationId);
+    assert.equal((before.json() as { sharedNicknameForMe: string | null }).sharedNicknameForMe, null);
+
+    await setNickname(b.id, a.id, "Captain", true);
+
+    const after = await getConversation(a.id, conversationId);
+    assert.equal((after.json() as { sharedNicknameForMe: string | null }).sharedNicknameForMe, "Captain");
+  });
+
+  it("GET /conversations/:id: an UNSHARED nickname the peer set for me never appears in sharedNicknameForMe", async () => {
+    const [a, b] = await Promise.all([createUser(app.prisma, "a"), createUser(app.prisma, "b")]);
+    createdUserIds.push(a.id, b.id);
+    const conversationId = await makeAcceptedConversation(a.id, b.id);
+    await setNickname(b.id, a.id, "Captain", false); // private — b never turned sharing on
+
+    const res = await getConversation(a.id, conversationId);
+    assert.equal((res.json() as { sharedNicknameForMe: string | null }).sharedNicknameForMe, null);
+  });
+
+  it("GET /conversations/:id: sharedNicknameForMe surfaces ONLY for the actual target — the owner viewing their own conversation sees null", async () => {
+    const [a, b] = await Promise.all([createUser(app.prisma, "a"), createUser(app.prisma, "b")]);
+    createdUserIds.push(a.id, b.id);
+    const conversationId = await makeAcceptedConversation(a.id, b.id);
+    // b shared a nickname FOR a — only a (the target) should ever see it via
+    // sharedNicknameForMe. b viewing the same conversation is asking "what
+    // does a call me", which is a separate, unset relationship here.
+    await setNickname(b.id, a.id, "Captain", true);
+
+    const targetView = await getConversation(a.id, conversationId);
+    assert.equal((targetView.json() as { sharedNicknameForMe: string | null }).sharedNicknameForMe, "Captain");
+
+    const ownerView = await getConversation(b.id, conversationId);
+    assert.equal(
+      (ownerView.json() as { sharedNicknameForMe: string | null }).sharedNicknameForMe,
+      null,
+      "the owner of the shared nickname is not its target — must not see their own share reflected back as if a called them something",
+    );
   });
 });

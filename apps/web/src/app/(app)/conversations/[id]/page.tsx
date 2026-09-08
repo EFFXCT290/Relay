@@ -30,9 +30,10 @@ import {
 } from "@/frontend-core/upload-session";
 import { ImageLightbox, type LightboxState } from "@/features/messages/components/lightbox/image-lightbox";
 import { EphemeralViewer } from "@/features/messages/components/ephemeral-viewer";
-import { ACK_EVENT, MEDIA_EVENTS, VOICE_EVENTS, PRESENCE_EVENTS, SYNC_EVENTS, TYPING_EVENTS, USER_EVENTS, type MediaReadyEvent, type MediaProcessedEvent, type MediaViewedEvent, type VoiceTranscriptReadyEvent, type ImageAttachment, type VideoAttachment, type MediaViewResponse, type DeliveryMode, type EphemeralSend, type PinnedMessage, type PresenceSyncResponse, type ReplayResponse, type TypingSyncResponse, type UserProfileUpdatedEvent } from "@relay/contracts";
+import { ACK_EVENT, MEDIA_EVENTS, VOICE_EVENTS, PRESENCE_EVENTS, SYNC_EVENTS, TYPING_EVENTS, USER_EVENTS, USER_NICKNAME_EVENTS, type MediaReadyEvent, type MediaProcessedEvent, type MediaViewedEvent, type VoiceTranscriptReadyEvent, type ImageAttachment, type VideoAttachment, type MediaViewResponse, type DeliveryMode, type EphemeralSend, type PinnedMessage, type PresenceSyncResponse, type ReplayResponse, type TypingSyncResponse, type UserProfileUpdatedEvent, type UserNicknameSharedUpdatedEvent } from "@relay/contracts";
 import { formatLastSeen } from "@/frontend-core/format-presence";
 import { SpotifyBadge } from "@/features/spotify/spotify-badge";
+import { ContactInfoModal } from "@/features/conversations/components/contact-info-modal";
 import { useCall } from "@/features/calls/call-provider";
 import { useMe } from "@/providers/me-provider";
 
@@ -129,10 +130,32 @@ type ConversationDetail = {
     avatarUrl?: string | null;
     isOnline?: boolean;
     lastSeenAt?: string | null;
+    // MY private nickname for them — null/absent means show the real username.
+    nickname?: string | null;
   };
   createdAt: string;
   myAcceptedAt: string | null;
+  // THEIR nickname for ME, only present once they've shared it — drives the
+  // "X calls you: Y" badge. Reverse direction from participant.nickname.
+  sharedNicknameForMe?: string | null;
 };
+
+// participant.nickname isn't a handle, so it's shown plain — never with an
+// "@" prefix. Bare name: nickname if set, else the real username. Falls back
+// instantly the moment a nickname is cleared. For components that build
+// their OWN "@" prefix around the name they're given (Avatar's alt text,
+// TypingBubble's aria-label), pass this bare form — never displayNameHandle.
+function displayName(p: ConversationDetail["participant"]): string {
+  return p.nickname ?? p.username;
+}
+
+// For plain text spots that today read "@username": keeps the "@" ONLY when
+// falling back to the real username — a nickname is never shown with one
+// (it isn't a handle, and doubling up with a component that adds its own
+// "@" would produce "@@alice" or a fake-looking "@Bug").
+function displayNameHandle(p: ConversationDetail["participant"]): string {
+  return p.nickname ? p.nickname : `@${p.username}`;
+}
 
 export default function ChatThreadPage() {
   const params = useParams<{ id: string }>();
@@ -180,6 +203,7 @@ export default function ChatThreadPage() {
   const [pins, setPins] = useState<PinnedMessage[]>([]);
   const [headerMenuOpen, setHeaderMenuOpen] = useState(false);
   const [pinnedListOpen, setPinnedListOpen] = useState(false);
+  const [contactInfoOpen, setContactInfoOpen] = useState(false);
   const [flashMessageId, setFlashMessageId] = useState<string | null>(null);
 
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -692,6 +716,14 @@ export default function ChatThreadPage() {
       );
     };
 
+    // The peer shared/unshared/changed their nickname for ME. Must reflect
+    // immediately (not just on next load) — this is what makes "disappears
+    // immediately if the owner un-shares" actually true.
+    const onNicknameSharedUpdate = (payload: UserNicknameSharedUpdatedEvent) => {
+      if (payload.ownerId !== partnerIdRef.current) return;
+      setDetail((prev) => (prev ? { ...prev, sharedNicknameForMe: payload.nickname } : prev));
+    };
+
     const onMessageEmbedUpdate = (payload: { messageId: string; embed: Message["embed"] }) => {
       const m = messagesRef.current[payload.messageId];
       if (!m) return;
@@ -802,6 +834,7 @@ export default function ChatThreadPage() {
     socket.on("presence:online", onPresenceOnline);
     socket.on("presence:offline", onPresenceOffline);
     socket.on(USER_EVENTS.PROFILE_UPDATED, onProfileUpdated);
+    socket.on(USER_NICKNAME_EVENTS.SHARED_UPDATED, onNicknameSharedUpdate);
     socket.on(MEDIA_EVENTS.READY, onMediaReady);
     socket.on(MEDIA_EVENTS.PROCESSED, onMediaProcessed);
     socket.on(MEDIA_EVENTS.VIEWED, onMediaViewed);
@@ -837,6 +870,7 @@ export default function ChatThreadPage() {
       socket.off("presence:online", onPresenceOnline);
       socket.off("presence:offline", onPresenceOffline);
       socket.off(USER_EVENTS.PROFILE_UPDATED, onProfileUpdated);
+      socket.off(USER_NICKNAME_EVENTS.SHARED_UPDATED, onNicknameSharedUpdate);
       socket.off(MEDIA_EVENTS.READY, onMediaReady);
       socket.off(MEDIA_EVENTS.PROCESSED, onMediaProcessed);
       socket.off(MEDIA_EVENTS.VIEWED, onMediaViewed);
@@ -1391,7 +1425,7 @@ export default function ChatThreadPage() {
           {detail ? (
             <>
               <Avatar
-                username={detail.participant.username}
+                username={displayName(detail.participant)}
                 src={detail.participant.avatarUrl}
                 size={36}
                 isOnline={detail.participant.isOnline}
@@ -1401,7 +1435,7 @@ export default function ChatThreadPage() {
                   className="truncate text-[16px] font-bold tracking-[-0.01em] text-[var(--color-text)]"
                   style={{ fontFamily: display }}
                 >
-                  @{detail.participant.username}
+                  {displayNameHandle(detail.participant)}
                 </span>
                 <div className="flex min-w-0 items-center gap-1.5">
                   <span
@@ -1479,9 +1513,42 @@ export default function ChatThreadPage() {
             >
               Pinned Messages{pins.length > 0 ? ` (${pins.length})` : ""}
             </button>
+            <button
+              type="button"
+              onClick={() => { setHeaderMenuOpen(false); setContactInfoOpen(true); }}
+              className="flex w-full items-center px-4 py-2.5 text-left text-[13px] font-medium text-[var(--color-text)] hover:bg-white/[0.06]"
+            >
+              Contact info
+            </button>
           </div>
         </>,
         document.body,
+      )}
+
+      {contactInfoOpen && detail && (
+        <ContactInfoModal
+          participant={detail.participant}
+          onClose={() => setContactInfoOpen(false)}
+          onNicknameChange={(nickname) =>
+            setDetail((prev) => (prev ? { ...prev, participant: { ...prev.participant, nickname } } : prev))
+          }
+        />
+      )}
+
+      {/* "X calls you: Y" — separate from the peer's own identity above, never
+          merged into that line. Disappears the instant the owner un-shares or
+          clears it (sharedNicknameForMe going back to null re-renders this
+          away), whether from this tab's own action or the live socket event. */}
+      {detail?.sharedNicknameForMe && (
+        <div
+          className="flex items-center gap-1.5 border-b px-4 py-2 text-[12px]"
+          style={{ borderColor: "var(--color-hairline)", background: "rgba(59,130,246,0.06)" }}
+        >
+          <span className="text-[var(--color-text-secondary)]">
+            {displayName(detail.participant)} calls you:
+          </span>
+          <span className="font-semibold text-[var(--color-text)]">{detail.sharedNicknameForMe}</span>
+        </div>
       )}
 
       {pins.length > 0 && (
@@ -1506,7 +1573,7 @@ export default function ChatThreadPage() {
               empty thread
             </span>
             <p className="max-w-[260px] text-sm text-[var(--color-text-secondary)]">
-              Say hi to <span className="text-[var(--color-text)]">@{detail?.participant.username}</span>. Messages stay between the two of you.
+              Say hi to <span className="text-[var(--color-text)]">{detail ? displayNameHandle(detail.participant) : ""}</span>. Messages stay between the two of you.
             </p>
           </div>
         ) : (
@@ -1578,7 +1645,7 @@ export default function ChatThreadPage() {
                   )}
                   {row.kind === "typing" && (
                     <div className="flex justify-start">
-                      <TypingBubble username={detail?.participant.username} />
+                      <TypingBubble username={detail ? displayName(detail.participant) : undefined} />
                     </div>
                   )}
                 </div>
@@ -1599,6 +1666,9 @@ export default function ChatThreadPage() {
 
       {detail && detail.myAcceptedAt === null ? (
         <AcceptCard
+          // AcceptCard hardcodes its own "@" prefix around this — a nickname
+          // rendered there would look like a fake handle ("@Bug"), so this
+          // one spot intentionally stays the real username, not displayName().
           username={detail.participant.username}
           onAccept={async () => {
             try {

@@ -5,6 +5,7 @@ export declare const ConversationParticipantSchema: import("@sinclair/typebox").
     avatarUrl: import("@sinclair/typebox").TOptional<import("@sinclair/typebox").TUnion<[import("@sinclair/typebox").TString, import("@sinclair/typebox").TNull]>>;
     isOnline: import("@sinclair/typebox").TOptional<import("@sinclair/typebox").TBoolean>;
     lastSeenAt: import("@sinclair/typebox").TOptional<import("@sinclair/typebox").TUnion<[import("@sinclair/typebox").TString, import("@sinclair/typebox").TNull]>>;
+    nickname: import("@sinclair/typebox").TOptional<import("@sinclair/typebox").TUnion<[import("@sinclair/typebox").TString, import("@sinclair/typebox").TNull]>>;
 }>;
 export declare const ConversationLastMessageSchema: import("@sinclair/typebox").TUnion<[import("@sinclair/typebox").TNull, import("@sinclair/typebox").TObject<{
     messageId: import("@sinclair/typebox").TString;
@@ -20,6 +21,7 @@ export declare const ConversationListItemSchema: import("@sinclair/typebox").TOb
         avatarUrl: import("@sinclair/typebox").TOptional<import("@sinclair/typebox").TUnion<[import("@sinclair/typebox").TString, import("@sinclair/typebox").TNull]>>;
         isOnline: import("@sinclair/typebox").TOptional<import("@sinclair/typebox").TBoolean>;
         lastSeenAt: import("@sinclair/typebox").TOptional<import("@sinclair/typebox").TUnion<[import("@sinclair/typebox").TString, import("@sinclair/typebox").TNull]>>;
+        nickname: import("@sinclair/typebox").TOptional<import("@sinclair/typebox").TUnion<[import("@sinclair/typebox").TString, import("@sinclair/typebox").TNull]>>;
     }>;
     lastMessage: import("@sinclair/typebox").TUnion<[import("@sinclair/typebox").TNull, import("@sinclair/typebox").TObject<{
         messageId: import("@sinclair/typebox").TString;
@@ -46,6 +48,7 @@ export declare const ConversationSchema: import("@sinclair/typebox").TObject<{
         avatarUrl: import("@sinclair/typebox").TOptional<import("@sinclair/typebox").TUnion<[import("@sinclair/typebox").TString, import("@sinclair/typebox").TNull]>>;
         isOnline: import("@sinclair/typebox").TOptional<import("@sinclair/typebox").TBoolean>;
         lastSeenAt: import("@sinclair/typebox").TOptional<import("@sinclair/typebox").TUnion<[import("@sinclair/typebox").TString, import("@sinclair/typebox").TNull]>>;
+        nickname: import("@sinclair/typebox").TOptional<import("@sinclair/typebox").TUnion<[import("@sinclair/typebox").TString, import("@sinclair/typebox").TNull]>>;
     }>>;
     lastMessage: import("@sinclair/typebox").TOptional<import("@sinclair/typebox").TUnion<[import("@sinclair/typebox").TNull, import("@sinclair/typebox").TObject<{
         messageId: import("@sinclair/typebox").TString;
