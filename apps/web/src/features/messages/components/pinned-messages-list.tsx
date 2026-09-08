@@ -76,7 +76,19 @@ export function PinnedMessagesList({ pins, onJump, onUnpin, onClose }: Props) {
                   className="flex items-start gap-2 border-b px-4 py-3 last:border-b-0"
                   style={{ borderColor: "var(--color-hairline)" }}
                 >
-                  <button type="button" onClick={() => onJump(p.messageId)} className="flex min-w-0 flex-1 flex-col items-start text-left">
+                  {/* items-start on this flex-col button was the actual bug: it
+                      sets align-items to "start" instead of the default
+                      `stretch`, so children size to their own content width
+                      and just get left-positioned, rather than filling the
+                      button's already-bounded width. Without stretch,
+                      `truncate` on the span below has no bounded box to clip
+                      against — min-w-0 correctly shrinks the button itself,
+                      but that never reaches the span. Text stays left-aligned
+                      regardless (text-align, unaffected by box width), so
+                      dropping items-start has no visual effect beyond fixing
+                      the truncation. Same fix as pinned-banner.tsx's
+                      identical preview. */}
+                  <button type="button" onClick={() => onJump(p.messageId)} className="flex min-w-0 flex-1 flex-col text-left">
                     <span className="truncate text-[13px] text-[var(--color-text)]">{previewText(p)}</span>
                     <span className="text-[11px] text-[var(--color-text-muted)]">
                       @{p.message.senderUsername} · pinned by @{p.pinnedByUsername} · {formatPinnedAt(p.pinnedAt)}

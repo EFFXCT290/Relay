@@ -47,10 +47,23 @@ export function PinnedBanner({ pins, onJump, onOpenList }: Props) {
       style={{ borderColor: "var(--color-hairline)", background: "rgba(255,255,255,0.02)" }}
     >
       <Pin className="h-3.5 w-3.5 shrink-0" style={{ color: "var(--color-signal)" }} />
+      {/* items-start here was the actual bug: for a flex-col container,
+          align-items controls the CROSS axis (horizontal, in column
+          direction) — "start" makes children size to their OWN content
+          width and just left-align the resulting box, instead of the
+          default `stretch`, which fills the button's already-bounded
+          width. Without stretch, `truncate` on the span below has no
+          bounded box to actually clip against — min-w-0 on THIS button
+          correctly shrinks the button itself, but that constraint never
+          reaches the span, which just renders at its full, unclipped
+          content width. Text ends up left-aligned either way (that's
+          `text-align`, unaffected by the box's own width), so dropping
+          items-start has no visual effect beyond fixing the truncation.
+          Confirmed live (not just in the class list) — see the PR diff. */}
       <button
         type="button"
         onClick={() => onJump(current.messageId)}
-        className="flex min-w-0 flex-1 flex-col items-start text-left"
+        className="flex min-w-0 flex-1 flex-col text-left"
       >
         <span className="truncate text-[13px] text-[var(--color-text)]">
           {previewText(current)}

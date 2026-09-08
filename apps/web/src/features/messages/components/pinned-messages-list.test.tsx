@@ -91,8 +91,18 @@ describe("PinnedMessagesList — cap-reached UI state", () => {
     // Full text present (real CSS ellipsis, no server/client-side slicing).
     const preview = screen.getByText(longBody);
     expect(preview.className).toContain("truncate");
+    const button = preview.closest("button");
     // min-w-0 on the flex-1 ancestor is what lets `truncate` actually clip —
     // without it the row never shrinks below the text's intrinsic width.
-    expect(preview.closest("button")?.className).toContain("min-w-0");
+    expect(button?.className).toContain("min-w-0");
+    // The REAL bug that shipped here: this button is flex-col, so
+    // align-items governs its CROSS axis (width, in column direction).
+    // "items-start" (jsdom can't catch this — it never runs real layout)
+    // makes children size to their own content instead of stretching to
+    // the button's already-bounded width, so truncate has nothing to clip
+    // against even with min-w-0 present. Confirmed live via headless
+    // Chrome + getComputedStyle, not just this className check — see the
+    // PR diff for the actual before/after clientWidth/scrollWidth numbers.
+    expect(button?.className).not.toContain("items-start");
   });
 });
