@@ -20,6 +20,26 @@ export const ReadReceiptSchema = Type.Object({
     userId: Type.String({ format: "uuid" }),
     readAt: Type.String({ format: "date-time" }),
 });
+// ── Pinned messages (max MAX_PINNED_MESSAGES per conversation) ──────────────
+export const MAX_PINNED_MESSAGES = 3;
+export const PinnedMessageSchema = Type.Object({
+    id: Type.String({ format: "uuid" }),
+    conversationId: Type.String({ format: "uuid" }),
+    messageId: Type.String({ format: "uuid" }),
+    pinnedBy: Type.String({ format: "uuid" }),
+    pinnedByUsername: Type.String(),
+    pinnedAt: Type.String({ format: "date-time" }),
+    // Denormalized preview of the pinned message itself, so the banner/list view
+    // can render without needing that message to already be in the client's
+    // loaded window of the (virtualized, paginated) thread.
+    message: Type.Object({
+        senderId: Type.String({ format: "uuid" }),
+        senderUsername: Type.String(),
+        body: Type.Union([Type.String(), Type.Null()]),
+        type: Type.String(),
+        createdAt: Type.String({ format: "date-time" }),
+    }),
+});
 export const MessageEmbedSchema = Type.Object({
     url: Type.String(),
     title: Type.Union([Type.String(), Type.Null()]),
@@ -78,4 +98,6 @@ export const MESSAGE_EVENTS = {
     DELETED: "message:deleted",
     DELIVERED: "message:delivered",
     EMBED_UPDATE: "message:embed:update",
+    PINNED: "message:pinned",
+    UNPINNED: "message:unpinned",
 };

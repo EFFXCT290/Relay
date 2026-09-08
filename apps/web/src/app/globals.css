@@ -106,3 +106,9 @@ body {
   from { opacity: 0; transform: translateY(6px) scale(0.96); }
   to   { opacity: 0.9; transform: translateY(0) scale(1); }
 }
+
+/* Brief highlight when jumping to a message from the pinned banner/list */
+@keyframes relay-pin-flash {
+  0%   { background: color-mix(in srgb, var(--color-signal) 22%, transparent); }
+  100% { background: transparent; }
+}

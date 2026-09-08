@@ -9,11 +9,13 @@ import {
   type MessageEditedEvent,
   type MessageEmbedUpdateEvent,
   type MessageNewEvent,
+  type MessagePinnedEvent,
   type MessageReactionEvent,
   type MessageReactionInbound,
   type MessageReadEvent,
   type MessageReadInbound,
   type MessageSendInbound,
+  type MessageUnpinnedEvent,
 } from "@relay/contracts";
 import { withAck } from "../../sockets/ack.js";
 
@@ -111,4 +113,12 @@ export function emitMessageEmbedUpdate(io: IOServer, conversationId: string, eve
 
 export function emitMessageEmbedUpdateToUser(io: IOServer, userId: string, event: MessageEmbedUpdateEvent) {
   io.to(`user:${userId}`).emit(MESSAGE_EVENTS.EMBED_UPDATE, event);
+}
+
+export function emitMessagePinned(io: IOServer, conversationId: string, event: MessagePinnedEvent) {
+  io.to(`conversation:${conversationId}`).emit(MESSAGE_EVENTS.PINNED, event);
+}
+
+export function emitMessageUnpinned(io: IOServer, conversationId: string, event: MessageUnpinnedEvent) {
+  io.to(`conversation:${conversationId}`).emit(MESSAGE_EVENTS.UNPINNED, event);
 }

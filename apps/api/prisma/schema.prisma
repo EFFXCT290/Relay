@@ -46,6 +46,7 @@ model User {
   incomingCalls     Call[]             @relation("IncomingCalls")
   eventOutbox       EventOutbox[]
   spotifyConnection SpotifyConnection?
+  pinnedMessages    PinnedMessage[]
 
   @@index([username])
 }
@@ -73,10 +74,11 @@ model Conversation {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  participants Participant[]
-  messages     Message[]
-  calls        Call[]
-  eventOutbox  EventOutbox[]
+  participants   Participant[]
+  messages       Message[]
+  calls          Call[]
+  eventOutbox    EventOutbox[]
+  pinnedMessages PinnedMessage[]
 }
 
 model Participant {
@@ -116,10 +118,35 @@ model Message {
   reads        MessageRead[]
   reactions    Reaction[]
   embed        MessageEmbed?
+  pinned       PinnedMessage?
 
   @@unique([senderId, clientMessageId])
   @@index([conversationId, createdAt])
   @@index([senderId])
+}
+
+// One row per pinned message (max 3 per conversation, enforced in
+// message.routes.ts at pin time — not expressible as a DB constraint since it
+// requires a per-conversationId count, not a per-column uniqueness rule).
+// messageId is unique: a message can only be pinned once. Both participants
+// can pin/unpin any message, not just their own — pinnedBy just records who
+// did it, for the "pinned by @username" display. Cascade on both
+// conversationId and messageId: a soft-deleted message is unpinned explicitly
+// by the DELETE /messages/:messageId route (soft-delete never fires FK
+// cascades), but a hard-deleted conversation or message (e.g. via Prisma
+// cleanup in tests) still needs the row gone with it.
+model PinnedMessage {
+  id             String   @id @default(uuid())
+  conversationId String
+  messageId      String   @unique
+  pinnedBy       String
+  pinnedAt       DateTime @default(now())
+
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  message      Message      @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  pinnedByUser User         @relation(fields: [pinnedBy], references: [id], onDelete: Cascade)
+
+  @@index([conversationId, pinnedAt])
 }
 
 model MessageEmbed {

@@ -178,6 +178,7 @@ async function renderPage(initialMessages: Message[] = []) {
       return { messages: [...initialMessages].reverse(), nextCursor: null }; // API is newest-first
     }
     if (path === `/api/conversations/${CONV_ID}/read` && method === "POST") return undefined;
+    if (path === `/api/conversations/${CONV_ID}/pins` && method === "GET") return { pins: [] };
     throw new Error(`renderPage's default apiImpl doesn't handle: ${method} ${path}`);
   };
   const view = render(<ChatThreadPage />);

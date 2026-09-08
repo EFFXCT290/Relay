@@ -24,6 +24,7 @@ const isMacOS = typeof navigator !== "undefined" && /Mac/.test(navigator.userAge
 type Props = {
   message: Message;
   isMine: boolean;
+  isPinned?: boolean;
   showReadReceipt?: boolean;
   readAt?: string | null;
   deliveredAt?: string | null;
@@ -32,6 +33,8 @@ type Props = {
   onReply?: (message: Message) => void;
   onEdit?: (message: Message) => void;
   onDelete?: (message: Message) => void;
+  onPin?: (message: Message) => void;
+  onUnpin?: (message: Message) => void;
   onDismiss?: () => void;
   onOpenLightbox?: (attachments: ImageAttachment[], index: number) => void;
   onViewEphemeral?: (attachment: ImageAttachment | VideoAttachment) => void;
@@ -41,6 +44,7 @@ type Props = {
 export function MessageBubble({
   message,
   isMine,
+  isPinned,
   showReadReceipt,
   readAt,
   deliveredAt,
@@ -49,6 +53,8 @@ export function MessageBubble({
   onReply,
   onEdit,
   onDelete,
+  onPin,
+  onUnpin,
   onDismiss,
   onOpenLightbox,
   onViewEphemeral,
@@ -210,6 +216,7 @@ export function MessageBubble({
       {longMenuOpen && (
         <LongPressMenu
           isMine={isMine}
+          isPinned={isPinned}
           side={side}
           current={message.myReaction}
           onPick={(emoji) => {
@@ -227,6 +234,14 @@ export function MessageBubble({
           onDelete={() => {
             setLongMenuOpen(false);
             onDelete?.(message);
+          }}
+          onPin={() => {
+            setLongMenuOpen(false);
+            onPin?.(message);
+          }}
+          onUnpin={() => {
+            setLongMenuOpen(false);
+            onUnpin?.(message);
           }}
           onClose={() => setLongMenuOpen(false)}
         />
@@ -437,21 +452,27 @@ export function MessageBubble({
 
 function LongPressMenu({
   isMine,
+  isPinned,
   side,
   current,
   onPick,
   onReply,
   onEdit,
   onDelete,
+  onPin,
+  onUnpin,
   onClose,
 }: {
   isMine: boolean;
+  isPinned?: boolean;
   side: "left" | "right";
   current: string | null;
   onPick: (emoji: string) => void;
   onReply: () => void;
   onEdit: () => void;
   onDelete: () => void;
+  onPin: () => void;
+  onUnpin: () => void;
   onClose: () => void;
 }) {
   const [emojiMode, setEmojiMode] = useState<"quick" | "any">("quick");
@@ -569,6 +590,7 @@ function LongPressMenu({
       >
         <MenuItem label="Reply" onClick={onReply} />
         {isMine && <MenuItem label="Edit" onClick={onEdit} />}
+        <MenuItem label={isPinned ? "Unpin" : "Pin"} onClick={isPinned ? onUnpin : onPin} />
         {isMine && <MenuItem label="Delete" onClick={onDelete} variant="danger" />}
       </div>
     </>

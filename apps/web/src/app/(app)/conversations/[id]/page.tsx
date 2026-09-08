@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
@@ -17,6 +18,8 @@ import {
 } from "@/features/messages/components/message-bubble";
 import { ChatComposer, MAX_IMAGES_PER_SEND } from "@/features/messages/components/chat-composer";
 import { UploadPreview } from "@/features/messages/components/upload-preview";
+import { PinnedBanner } from "@/features/messages/components/pinned-banner";
+import { PinnedMessagesList } from "@/features/messages/components/pinned-messages-list";
 import { mediaApi } from "@/frontend-core/api-client/media";
 import { syncApi } from "@/frontend-core/api-client/sync";
 import {
@@ -27,7 +30,7 @@ import {
 } from "@/frontend-core/upload-session";
 import { ImageLightbox, type LightboxState } from "@/features/messages/components/lightbox/image-lightbox";
 import { EphemeralViewer } from "@/features/messages/components/ephemeral-viewer";
-import { ACK_EVENT, MEDIA_EVENTS, VOICE_EVENTS, PRESENCE_EVENTS, SYNC_EVENTS, TYPING_EVENTS, USER_EVENTS, type MediaReadyEvent, type MediaProcessedEvent, type MediaViewedEvent, type VoiceTranscriptReadyEvent, type ImageAttachment, type VideoAttachment, type MediaViewResponse, type DeliveryMode, type EphemeralSend, type PresenceSyncResponse, type ReplayResponse, type TypingSyncResponse, type UserProfileUpdatedEvent } from "@relay/contracts";
+import { ACK_EVENT, MEDIA_EVENTS, VOICE_EVENTS, PRESENCE_EVENTS, SYNC_EVENTS, TYPING_EVENTS, USER_EVENTS, type MediaReadyEvent, type MediaProcessedEvent, type MediaViewedEvent, type VoiceTranscriptReadyEvent, type ImageAttachment, type VideoAttachment, type MediaViewResponse, type DeliveryMode, type EphemeralSend, type PinnedMessage, type PresenceSyncResponse, type ReplayResponse, type TypingSyncResponse, type UserProfileUpdatedEvent } from "@relay/contracts";
 import { formatLastSeen } from "@/frontend-core/format-presence";
 import { SpotifyBadge } from "@/features/spotify/spotify-badge";
 import { useCall } from "@/features/calls/call-provider";
@@ -174,6 +177,10 @@ export default function ChatThreadPage() {
   const [ephemeralView, setEphemeralView] = useState<{ url: string; type: "image" | "video" } | null>(null);
   const [dragActive, setDragActive] = useState(false);
   const dragCounterRef = useRef(0);
+  const [pins, setPins] = useState<PinnedMessage[]>([]);
+  const [headerMenuOpen, setHeaderMenuOpen] = useState(false);
+  const [pinnedListOpen, setPinnedListOpen] = useState(false);
+  const [flashMessageId, setFlashMessageId] = useState<string | null>(null);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   // meId comes from MeContext (resolved by AppShell before this page mounts).
@@ -247,6 +254,19 @@ export default function ChatThreadPage() {
       cancelled = true;
     };
   }, [conversationId, router]);
+
+  // Pinned messages — loaded independently of the detail/history fetch above
+  // so a failure here (or just slower load) never blocks the core thread from
+  // rendering; the banner/list simply stay empty until it resolves.
+  useEffect(() => {
+    let cancelled = false;
+    void api<{ pins: PinnedMessage[] }>(`/api/conversations/${conversationId}/pins`)
+      .then((res) => { if (!cancelled) setPins(res.pins); })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [conversationId]);
 
   // Session recovery — fires once on mount. If the page was refreshed while
   // a batch was in the "sending" state (uploads done, POST not sent), auto-
@@ -679,6 +699,20 @@ export default function ChatThreadPage() {
       rerender();
     };
 
+    // Pin state updates are plain idempotent set operations (add-if-absent /
+    // remove-if-present) — no sync-barrier gating or actor check needed like
+    // message:reaction's aggregate payload requires; applying our own action's
+    // echo again here is harmless.
+    const onMessagePinned = (payload: { pin: PinnedMessage }) => {
+      if (payload.pin.conversationId !== conversationId) return;
+      setPins((prev) => (prev.some((p) => p.id === payload.pin.id) ? prev : [payload.pin, ...prev]));
+    };
+
+    const onMessageUnpinned = (payload: { messageId: string; conversationId?: string }) => {
+      if (payload.conversationId && payload.conversationId !== conversationId) return;
+      setPins((prev) => prev.filter((p) => p.messageId !== payload.messageId));
+    };
+
     const onMediaReady = (payload: MediaReadyEvent) => {
       for (const m of Object.values(messagesRef.current)) {
         if (!m.attachments?.some((a) => a.media.id === payload.mediaId)) continue;
@@ -760,6 +794,8 @@ export default function ChatThreadPage() {
     socket.on("message:read", onMessageRead);
     socket.on("message:delivered", onMessageDelivered);
     socket.on("message:embed:update", onMessageEmbedUpdate);
+    socket.on("message:pinned", onMessagePinned);
+    socket.on("message:unpinned", onMessageUnpinned);
     socket.on("typing:update", onTypingUpdate);
     socket.on(TYPING_EVENTS.SYNC_RESPONSE, onTypingSyncResponse);
     socket.on(PRESENCE_EVENTS.SYNC_RESPONSE, onPresenceSyncResponse);
@@ -793,6 +829,8 @@ export default function ChatThreadPage() {
       socket.off("message:read", onMessageRead);
       socket.off("message:delivered", onMessageDelivered);
       socket.off("message:embed:update", onMessageEmbedUpdate);
+      socket.off("message:pinned", onMessagePinned);
+      socket.off("message:unpinned", onMessageUnpinned);
       socket.off("typing:update", onTypingUpdate);
       socket.off(TYPING_EVENTS.SYNC_RESPONSE, onTypingSyncResponse);
       socket.off(PRESENCE_EVENTS.SYNC_RESPONSE, onPresenceSyncResponse);
@@ -993,6 +1031,24 @@ export default function ChatThreadPage() {
       setError(err instanceof Error ? err.message : "Failed to delete");
     }
   }, []);
+
+  const handlePin = useCallback(async (msg: Message) => {
+    try {
+      const pin = await api<PinnedMessage>(`/api/conversations/${conversationId}/messages/${msg.messageId}/pin`, { method: "POST" });
+      setPins((prev) => (prev.some((p) => p.id === pin.id) ? prev : [pin, ...prev]));
+    } catch (err) {
+      setError(err instanceof ApiError ? err.problem.detail : "Failed to pin message");
+    }
+  }, [conversationId]);
+
+  const handleUnpin = useCallback(async (messageId: string) => {
+    try {
+      await api(`/api/conversations/${conversationId}/messages/${messageId}/pin`, { method: "DELETE" });
+      setPins((prev) => prev.filter((p) => p.messageId !== messageId));
+    } catch (err) {
+      setError(err instanceof ApiError ? err.problem.detail : "Failed to unpin message");
+    }
+  }, [conversationId]);
 
   const handleDismissFailed = useCallback((messageId: string) => {
     delete messagesRef.current[messageId];
@@ -1278,6 +1334,19 @@ export default function ChatThreadPage() {
     }
   }, [flatRows.length]);
 
+  // "Jump to message" from the pinned banner/list — only works for a message
+  // already in the currently loaded window (flatRows). A pin older than the
+  // loaded page won't be found; scrolling further back to locate it isn't
+  // implemented here.
+  const scrollToMessage = useCallback((messageId: string) => {
+    const index = flatRows.findIndex((row) => row.kind === "message" && row.message.messageId === messageId);
+    if (index === -1) return;
+    virtualizer.scrollToIndex(index, { align: "center" });
+    setFlashMessageId(messageId);
+    window.setTimeout(() => setFlashMessageId((cur) => (cur === messageId ? null : cur)), 1500);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [flatRows]);
+
   return (
     <div
       className="relative flex h-dvh flex-col lg:h-[100dvh]"
@@ -1389,11 +1458,39 @@ export default function ChatThreadPage() {
         <button
           type="button"
           aria-label="More"
+          onClick={() => setHeaderMenuOpen((v) => !v)}
           className="flex h-10 w-10 items-center justify-center rounded-full hover:bg-white/5"
         >
           <MoreHorizontal className="h-5 w-5 text-[var(--color-text)]" />
         </button>
       </header>
+
+      {headerMenuOpen && createPortal(
+        <>
+          <div className="fixed inset-0 z-40" onClick={() => setHeaderMenuOpen(false)} />
+          <div
+            className="fixed right-4 top-14 z-50 w-52 overflow-hidden rounded-2xl border bg-[var(--color-raised)] shadow-[0_12px_32px_rgba(0,0,0,0.55)]"
+            style={{ borderColor: "var(--color-hairline-strong)" }}
+          >
+            <button
+              type="button"
+              onClick={() => { setHeaderMenuOpen(false); setPinnedListOpen(true); }}
+              className="flex w-full items-center px-4 py-2.5 text-left text-[13px] font-medium text-[var(--color-text)] hover:bg-white/[0.06]"
+            >
+              Pinned Messages{pins.length > 0 ? ` (${pins.length})` : ""}
+            </button>
+          </div>
+        </>,
+        document.body,
+      )}
+
+      {pins.length > 0 && (
+        <PinnedBanner
+          pins={pins}
+          onJump={scrollToMessage}
+          onOpenList={() => setPinnedListOpen(true)}
+        />
+      )}
 
       {/* Message scroll — virtualized */}
       <div ref={scrollRef} className="flex-1 overflow-y-auto" style={{ touchAction: "pan-y" }}>
@@ -1439,11 +1536,16 @@ export default function ChatThreadPage() {
                     const partnerRead = isMine && detail
                       ? m.readBy.find((r) => r.userId === detail.participant.userId)
                       : undefined;
+                    const isPinned = pins.some((p) => p.messageId === m.messageId);
                     return (
-                      <div className={isMine ? "flex justify-end" : "flex justify-start"}>
+                      <div
+                        className={isMine ? "flex justify-end" : "flex justify-start"}
+                        style={m.messageId === flashMessageId ? { animation: "relay-pin-flash 1.5s ease-out" } : undefined}
+                      >
                         <MessageBubble
                           message={m}
                           isMine={isMine}
+                          isPinned={isPinned}
                           showReadReceipt={isMine}
                           readAt={partnerRead?.readAt ?? null}
                           deliveredAt={isMine ? m.deliveredAt : null}
@@ -1452,6 +1554,8 @@ export default function ChatThreadPage() {
                           onReply={(msg) => { setEditing(null); setReplyTo(msg); }}
                           onEdit={m._failed ? undefined : (msg) => { setReplyTo(null); setEditing(msg); }}
                           onDelete={m._failed ? undefined : handleDelete}
+                          onPin={m._failed ? undefined : handlePin}
+                          onUnpin={m._failed ? undefined : (msg) => handleUnpin(msg.messageId)}
                           onDismiss={m._failed ? () => handleDismissFailed(m.messageId) : undefined}
                           onOpenLightbox={(atts: ImageAttachment[], idx: number) =>
                             setLightbox({ images: atts, index: idx })
@@ -1541,6 +1645,15 @@ export default function ChatThreadPage() {
           url={ephemeralView.url}
           type={ephemeralView.type}
           onClose={() => setEphemeralView(null)}
+        />
+      )}
+
+      {pinnedListOpen && (
+        <PinnedMessagesList
+          pins={pins}
+          onJump={(messageId) => { setPinnedListOpen(false); scrollToMessage(messageId); }}
+          onUnpin={handleUnpin}
+          onClose={() => setPinnedListOpen(false)}
         />
       )}
     </div>

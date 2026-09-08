@@ -8,6 +8,23 @@ export declare const ReadReceiptSchema: import("@sinclair/typebox").TObject<{
     userId: import("@sinclair/typebox").TString;
     readAt: import("@sinclair/typebox").TString;
 }>;
+export declare const MAX_PINNED_MESSAGES = 3;
+export declare const PinnedMessageSchema: import("@sinclair/typebox").TObject<{
+    id: import("@sinclair/typebox").TString;
+    conversationId: import("@sinclair/typebox").TString;
+    messageId: import("@sinclair/typebox").TString;
+    pinnedBy: import("@sinclair/typebox").TString;
+    pinnedByUsername: import("@sinclair/typebox").TString;
+    pinnedAt: import("@sinclair/typebox").TString;
+    message: import("@sinclair/typebox").TObject<{
+        senderId: import("@sinclair/typebox").TString;
+        senderUsername: import("@sinclair/typebox").TString;
+        body: import("@sinclair/typebox").TUnion<[import("@sinclair/typebox").TString, import("@sinclair/typebox").TNull]>;
+        type: import("@sinclair/typebox").TString;
+        createdAt: import("@sinclair/typebox").TString;
+    }>;
+}>;
+export type PinnedMessage = Static<typeof PinnedMessageSchema>;
 export declare const MessageEmbedSchema: import("@sinclair/typebox").TObject<{
     url: import("@sinclair/typebox").TString;
     title: import("@sinclair/typebox").TUnion<[import("@sinclair/typebox").TString, import("@sinclair/typebox").TNull]>;
@@ -145,6 +162,8 @@ export declare const MESSAGE_EVENTS: {
     readonly DELETED: "message:deleted";
     readonly DELIVERED: "message:delivered";
     readonly EMBED_UPDATE: "message:embed:update";
+    readonly PINNED: "message:pinned";
+    readonly UNPINNED: "message:unpinned";
 };
 export type MessageEventName = (typeof MESSAGE_EVENTS)[keyof typeof MESSAGE_EVENTS];
 export type MessageSendInbound = SendMessagePayload & {
@@ -197,4 +216,11 @@ export type MessageReadEvent = {
 export type MessageEmbedUpdateEvent = {
     messageId: string;
     embed: MessageEmbed;
+};
+export type MessagePinnedEvent = {
+    pin: PinnedMessage;
+};
+export type MessageUnpinnedEvent = {
+    messageId: string;
+    conversationId: string;
 };

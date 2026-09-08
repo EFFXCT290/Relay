@@ -8,6 +8,9 @@ import {
   MessageSchema,
   MessageAttachmentSchema,
   EphemeralSendSchema,
+  MAX_PINNED_MESSAGES,
+  PinnedMessageSchema,
+  type PinnedMessage,
 } from "@relay/contracts";
 import { serializeAttachment, mediaKindFromMime } from "../media/media.service.js";
 import { createMediaRepository } from "../media/media.repository.js";
@@ -21,7 +24,9 @@ import {
   emitMessageEmbedUpdateToUser,
   emitMessageNew,
   emitMessageNewToUser,
+  emitMessagePinned,
   emitMessageReaction,
+  emitMessageUnpinned,
 } from "./message.socket.js";
 import { extractUrls } from "./utils/extract-urls.js";
 import { fetchEmbed } from "./services/embed.service.js";
@@ -69,6 +74,49 @@ async function currentReactionState(
   ]);
   const reactions = Object.fromEntries(all.map((r) => [r.emoji, r._count.emoji]));
   return { messageId, reactions, myReaction: mine?.emoji ?? null };
+}
+
+// Shape shared by pin-create's include and the GET /pins list's include —
+// keeps the wire-serialization in one place.
+const pinnedMessageInclude = {
+  pinnedByUser: { select: { username: true } },
+  message: {
+    select: {
+      senderId:  true,
+      body:      true,
+      type:      true,
+      createdAt: true,
+      sender:    { select: { username: true } },
+    },
+  },
+} as const;
+
+type PinnedMessageRow = {
+  id: string;
+  conversationId: string;
+  messageId: string;
+  pinnedBy: string;
+  pinnedAt: Date;
+  pinnedByUser: { username: string };
+  message: { senderId: string; body: string | null; type: string; createdAt: Date; sender: { username: string } };
+};
+
+function serializePinnedMessage(row: PinnedMessageRow): PinnedMessage {
+  return {
+    id:               row.id,
+    conversationId:   row.conversationId,
+    messageId:        row.messageId,
+    pinnedBy:         row.pinnedBy,
+    pinnedByUsername: row.pinnedByUser.username,
+    pinnedAt:         row.pinnedAt.toISOString(),
+    message: {
+      senderId:       row.message.senderId,
+      senderUsername: row.message.sender.username,
+      body:           row.message.body,
+      type:           row.message.type,
+      createdAt:      row.message.createdAt.toISOString(),
+    },
+  };
 }
 
 const messageRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
@@ -833,17 +881,157 @@ const messageRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
       if (!msg) throw new ProblemError("not_found", "Message not found.");
       if (msg.senderId !== callerId) throw new ProblemError("forbidden", "Not your message.");
 
-      await fastify.prisma.message.update({
-        where: { id: msg.id },
-        data: { isDeleted: true, deletedAt: new Date() },
+      // A pinned message that gets soft-deleted must not leave a PinnedMessage
+      // row dangling — soft-delete only flips isDeleted, it never triggers the
+      // FK's onDelete:Cascade (that only fires on an actual row delete), so
+      // the unpin has to happen explicitly, in the same transaction as the
+      // delete, exactly like the reply-to-preview / lastMessage / read-receipt
+      // soft-delete gaps fixed elsewhere in this module.
+      const { wasPinned } = await fastify.prisma.$transaction(async (tx) => {
+        await tx.message.update({
+          where: { id: msg.id },
+          data: { isDeleted: true, deletedAt: new Date() },
+        });
+        const removed = await tx.pinnedMessage.deleteMany({ where: { messageId: msg.id } });
+        return { wasPinned: removed.count > 0 };
       });
 
       emitMessageDeleted(fastify.io, msg.conversationId, {
         messageId:      msg.id,
         conversationId: msg.conversationId,
       });
+      if (wasPinned) {
+        emitMessageUnpinned(fastify.io, msg.conversationId, {
+          messageId:      msg.id,
+          conversationId: msg.conversationId,
+        });
+      }
 
       return reply.code(204).send();
+    },
+  );
+
+  // ── POST /api/conversations/:id/messages/:messageId/pin ───────────────────
+  // Either participant can pin any message (not just their own). Capped at
+  // MAX_PINNED_MESSAGES per conversation — enforced inside a Serializable
+  // transaction so two concurrent pin requests in the same conversation can't
+  // both read "2 pinned" and both land, pushing the count to 4; Postgres
+  // aborts the loser with a serialization failure (P2034) instead.
+  fastify.post(
+    "/conversations/:conversationId/messages/:messageId/pin",
+    {
+      preHandler: [fastify.authenticate],
+      schema: {
+        params: Type.Object({
+          conversationId: Type.String({ format: "uuid" }),
+          messageId:      Type.String({ format: "uuid" }),
+        }),
+        response: { 201: PinnedMessageSchema },
+      },
+    },
+    async (request, reply) => {
+      const callerId = request.userId!;
+      const { conversationId, messageId } = request.params;
+      await assertParticipant(fastify, callerId, conversationId);
+
+      const msg = await fastify.prisma.message.findUnique({
+        where: { id: messageId },
+        select: { id: true, conversationId: true, isDeleted: true },
+      });
+      if (!msg || msg.conversationId !== conversationId) {
+        throw new ProblemError("not_found", "Message not found in this conversation.");
+      }
+      if (msg.isDeleted) {
+        throw new ProblemError("validation_error", "Cannot pin a deleted message.");
+      }
+
+      let created: PinnedMessageRow;
+      try {
+        created = await fastify.prisma.$transaction(
+          async (tx) => {
+            const count = await tx.pinnedMessage.count({ where: { conversationId } });
+            if (count >= MAX_PINNED_MESSAGES) {
+              throw new ProblemError(
+                "conflict",
+                `Already ${MAX_PINNED_MESSAGES} messages pinned in this conversation — unpin one first.`,
+              );
+            }
+            return tx.pinnedMessage.create({
+              data: { conversationId, messageId, pinnedBy: callerId },
+              include: pinnedMessageInclude,
+            });
+          },
+          { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+        );
+      } catch (err) {
+        if (err instanceof ProblemError) throw err;
+        if (err instanceof Prisma.PrismaClientKnownRequestError) {
+          if (err.code === "P2002") throw new ProblemError("conflict", "This message is already pinned.");
+          // Serializable write-write conflict — another pin in the same
+          // conversation committed first; the client's own retry (or a
+          // manual re-tap) is the recovery path, same as any 409.
+          if (err.code === "P2034") throw new ProblemError("conflict", "Another pin just landed — try again.");
+        }
+        throw err;
+      }
+
+      const payload = serializePinnedMessage(created);
+      emitMessagePinned(fastify.io, conversationId, { pin: payload });
+      return reply.code(201).send(payload);
+    },
+  );
+
+  // ── DELETE /api/conversations/:id/messages/:messageId/pin ─────────────────
+  fastify.delete(
+    "/conversations/:conversationId/messages/:messageId/pin",
+    {
+      preHandler: [fastify.authenticate],
+      schema: {
+        params: Type.Object({
+          conversationId: Type.String({ format: "uuid" }),
+          messageId:      Type.String({ format: "uuid" }),
+        }),
+      },
+    },
+    async (request, reply) => {
+      const callerId = request.userId!;
+      const { conversationId, messageId } = request.params;
+      await assertParticipant(fastify, callerId, conversationId);
+
+      const pin = await fastify.prisma.pinnedMessage.findUnique({ where: { messageId } });
+      if (!pin || pin.conversationId !== conversationId) {
+        throw new ProblemError("not_found", "This message isn't pinned.");
+      }
+
+      await fastify.prisma.pinnedMessage.delete({ where: { messageId } });
+
+      emitMessageUnpinned(fastify.io, conversationId, { messageId, conversationId });
+      return reply.code(204).send();
+    },
+  );
+
+  // ── GET /api/conversations/:id/pins ────────────────────────────────────────
+  fastify.get(
+    "/conversations/:conversationId/pins",
+    {
+      preHandler: [fastify.authenticate],
+      schema: {
+        params: Type.Object({ conversationId: Type.String({ format: "uuid" }) }),
+        response: { 200: Type.Object({ pins: Type.Array(PinnedMessageSchema) }) },
+      },
+    },
+    async (request) => {
+      const callerId = request.userId!;
+      const { conversationId } = request.params;
+      await assertParticipant(fastify, callerId, conversationId);
+
+      const rows = await fastify.prisma.pinnedMessage.findMany({
+        where: { conversationId },
+        orderBy: { pinnedAt: "desc" }, // most-recently-pinned first — matches the banner's default
+        include: pinnedMessageInclude,
+      });
+
+      return { pins: rows.map(serializePinnedMessage) };
     },
   );
 };
