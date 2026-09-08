@@ -56,17 +56,17 @@ async function buildTestApp() {
   return { app, emitted };
 }
 
-// message.routes.ts imports voiceQueue from media.queue.ts (which evaluates
-// mediaQueue/videoQueue/voiceQueue together) and pushQueue transitively via
-// services/push-notify.ts. Each opens an ioredis connection at module-load
-// time regardless of whether .add() is ever called — left open, `node --test`
-// never exits (mirrors message-softdelete.routes.test.ts's identical workaround).
+// This file transitively opens several queue connections at import time
+// (message.routes.ts pulls in media/video/voice/push; this file's own
+// sweepDisappearingMessages import pulls in cleanup) regardless of whether
+// .add() is ever called — left open, `node --test` never exits.
+// closeAllQueueConnections() closes every queue this app can open, so this
+// file never has to track which subset it happens to pull in — the previous
+// hand-rolled close list here forgot cleanupQueue and hung CI for 10+
+// minutes (see close-all-for-tests.ts for the full story).
 after(async () => {
-  const [{ mediaQueue, videoQueue, voiceQueue }, { pushQueue }] = await Promise.all([
-    import("../../queues/media.queue.js"),
-    import("../../queues/push.queue.js"),
-  ]);
-  await Promise.all([mediaQueue.close(), videoQueue.close(), voiceQueue.close(), pushQueue.close()]);
+  const { closeAllQueueConnections } = await import("../../queues/close-all-for-tests.js");
+  await closeAllQueueConnections();
 });
 
 function cookieFor(userId: string): string {

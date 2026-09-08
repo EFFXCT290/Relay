@@ -47,8 +47,8 @@ async function buildTestApp() {
 }
 
 after(async () => {
-  const { mediaQueue, videoQueue, voiceQueue } = await import("../../queues/media.queue.js");
-  await Promise.all([mediaQueue.close(), videoQueue.close(), voiceQueue.close()]);
+  const { closeAllQueueConnections } = await import("../../queues/close-all-for-tests.js");
+  await closeAllQueueConnections();
 });
 
 function cookieFor(userId: string): string {

@@ -61,11 +61,8 @@ async function buildTestApp(messageRoutes: Awaited<ReturnType<typeof freshMessag
 }
 
 after(async () => {
-  const [{ mediaQueue, videoQueue, voiceQueue }, { pushQueue }] = await Promise.all([
-    import("../../queues/media.queue.js"),
-    import("../../queues/push.queue.js"),
-  ]);
-  await Promise.all([mediaQueue.close(), videoQueue.close(), voiceQueue.close(), pushQueue.close()]);
+  const { closeAllQueueConnections } = await import("../../queues/close-all-for-tests.js");
+  await closeAllQueueConnections();
 });
 
 function cookieFor(userId: string): string {
