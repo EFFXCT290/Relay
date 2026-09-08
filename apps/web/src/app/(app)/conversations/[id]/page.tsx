@@ -30,7 +30,8 @@ import {
 } from "@/frontend-core/upload-session";
 import { ImageLightbox, type LightboxState } from "@/features/messages/components/lightbox/image-lightbox";
 import { EphemeralViewer } from "@/features/messages/components/ephemeral-viewer";
-import { ACK_EVENT, MEDIA_EVENTS, VOICE_EVENTS, PRESENCE_EVENTS, SYNC_EVENTS, TYPING_EVENTS, USER_EVENTS, USER_NICKNAME_EVENTS, MESSAGE_EVENTS, type MediaReadyEvent, type MediaProcessedEvent, type MediaViewedEvent, type VoiceTranscriptReadyEvent, type ImageAttachment, type VideoAttachment, type MediaViewResponse, type DeliveryMode, type EphemeralSend, type DisappearSend, type MessageViewResponse, type MessageDisappearProgressEvent, type PinnedMessage, type PresenceSyncResponse, type ReplayResponse, type TypingSyncResponse, type UserProfileUpdatedEvent, type UserNicknameSharedUpdatedEvent } from "@relay/contracts";
+import { DisappearModal } from "@/features/messages/components/disappear-modal";
+import { ACK_EVENT, MEDIA_EVENTS, VOICE_EVENTS, PRESENCE_EVENTS, SYNC_EVENTS, TYPING_EVENTS, USER_EVENTS, USER_NICKNAME_EVENTS, MESSAGE_EVENTS, type MediaReadyEvent, type MediaProcessedEvent, type MediaViewedEvent, type VoiceTranscriptReadyEvent, type ImageAttachment, type VideoAttachment, type MediaViewResponse, type DeliveryMode, type EphemeralSend, type DisappearSend, type MessageOpenResponse, type MessageDisappearProgressEvent, type MessageDisappearStartedEvent, type PinnedMessage, type PresenceSyncResponse, type ReplayResponse, type TypingSyncResponse, type UserProfileUpdatedEvent, type UserNicknameSharedUpdatedEvent } from "@relay/contracts";
 import { formatLastSeen } from "@/frontend-core/format-presence";
 import { SpotifyBadge } from "@/features/spotify/spotify-badge";
 import { ContactInfoModal } from "@/features/conversations/components/contact-info-modal";
@@ -198,6 +199,15 @@ export default function ChatThreadPage() {
   const batchControllersRef = useRef(new Map<string, AbortController>());
   const [lightbox, setLightbox] = useState<LightboxState | null>(null);
   const [ephemeralView, setEphemeralView] = useState<{ url: string; type: "image" | "video" } | null>(null);
+  // Disappearing-message modal state — a SNAPSHOT from the POST /view
+  // response, deliberately never re-derived from messagesRef afterward. If
+  // this instead re-read messagesRef[messageId].body on every render, a
+  // live message:deleted broadcast racing in right after the response (the
+  // last look on views mode, or just general timing on time mode) could flip
+  // isDeleted before the reveal ever painted, silently hiding content the
+  // recipient's own open response already delivered. Decoupling avoids that
+  // race entirely — see handleViewDisappear below.
+  const [openDisappear, setOpenDisappear] = useState<{ messageId: string; mode: "views" | "time"; body: string; expiresAt: string | null } | null>(null);
   const [dragActive, setDragActive] = useState(false);
   const dragCounterRef = useRef(0);
   const [pins, setPins] = useState<PinnedMessage[]>([]);
@@ -823,6 +833,22 @@ export default function ChatThreadPage() {
       rerender();
     };
 
+    // A "time"-mode message's clock started — fires once, only on the
+    // recipient's FIRST explicit open (never on a reopen). Lets the card
+    // start ticking live on the sender's screen and the recipient's other
+    // devices without a refetch. Purely a list-level update (the card's own
+    // countdown badge); it never touches openDisappear — a modal already
+    // open elsewhere keeps showing whatever snapshot it opened with.
+    const onMessageDisappearStarted = (payload: MessageDisappearStartedEvent) => {
+      const m = messagesRef.current[payload.messageId];
+      if (!m?.disappear) return;
+      messagesRef.current[payload.messageId] = {
+        ...m,
+        disappear: { ...m.disappear, expiresAt: payload.expiresAt },
+      };
+      rerender();
+    };
+
     const onVoiceTranscript = (payload: VoiceTranscriptReadyEvent) => {
       const m = messagesRef.current[payload.messageId];
       if (!m?.attachments) return;
@@ -857,6 +883,7 @@ export default function ChatThreadPage() {
     socket.on(MEDIA_EVENTS.PROCESSED, onMediaProcessed);
     socket.on(MEDIA_EVENTS.VIEWED, onMediaViewed);
     socket.on(MESSAGE_EVENTS.DISAPPEAR_PROGRESS, onMessageDisappearProgress);
+    socket.on(MESSAGE_EVENTS.DISAPPEAR_STARTED, onMessageDisappearStarted);
     socket.on(VOICE_EVENTS.TRANSCRIPT_READY, onVoiceTranscript);
 
     return () => {
@@ -894,6 +921,7 @@ export default function ChatThreadPage() {
       socket.off(MEDIA_EVENTS.PROCESSED, onMediaProcessed);
       socket.off(MEDIA_EVENTS.VIEWED, onMediaViewed);
       socket.off(MESSAGE_EVENTS.DISAPPEAR_PROGRESS, onMessageDisappearProgress);
+      socket.off(MESSAGE_EVENTS.DISAPPEAR_STARTED, onMessageDisappearStarted);
       socket.off(VOICE_EVENTS.TRANSCRIPT_READY, onVoiceTranscript);
     };
   }, [conversationId]);
@@ -1262,27 +1290,51 @@ export default function ChatThreadPage() {
     [],
   );
 
-  // Recipient taps a locked "views"-mode disappearing message. POST /view
-  // spends a look and returns the text; applied directly here (mirrors
-  // handleReact's "apply the response, don't wait on a socket echo" pattern)
-  // so the reveal feels instant. The eventual consumed→soft-deleted removal
-  // is left to the existing message:deleted handler — that broadcast reaches
-  // this same socket too, since the tapper is a member of the conversation
-  // room, so no separate local "mark deleted" step is needed here.
+  // Recipient taps a locked disappearing message's card (either mode).
+  // POST /view is the single explicit-open action for both. The response's
+  // body/expiresAt become a SNAPSHOT handed straight to openDisappear — the
+  // modal displays exactly that snapshot and never re-reads messagesRef
+  // afterward. This is deliberate, not incidental: for a views-mode message
+  // spending its LAST look, the server emits message:deleted essentially
+  // concurrently with returning this same HTTP response. If the modal
+  // instead re-read messagesRef[messageId].body on every render, a socket
+  // event winning that race would flip isDeleted before the reveal ever
+  // painted, and the recipient's own successful open would silently show
+  // nothing — the message would be gone without ever having been seen. The
+  // snapshot sidesteps the race entirely: whatever the server handed back
+  // for THIS call is what displays, independent of whatever the list state
+  // does next.
+  //
+  // messagesRef is still patched separately, for the CARD's own live state
+  // (views: ticking viewCount; time: the countdown once it can show one) —
+  // that update is allowed to race freely, since it only affects the
+  // locked/reopenable card, never content already open in the modal.
   const handleViewDisappear = useCallback(async (messageId: string) => {
     try {
-      const res = await api<MessageViewResponse>(`/api/messages/${messageId}/view`, { method: "POST" });
+      const res = await api<MessageOpenResponse>(`/api/messages/${messageId}/view`, { method: "POST" });
       const m = messagesRef.current[messageId];
-      if (m?.disappear && res.body != null) {
-        messagesRef.current[messageId] = {
-          ...m,
-          body:      res.body,
-          disappear: { ...m.disappear, viewCount: res.viewCount },
-        };
-        setRenderTick((x) => x + 1);
-      } else if (res.body == null) {
-        setError("This message has already been viewed.");
+
+      if (res.mode === "views") {
+        if (res.body == null) {
+          setError("This message has already been viewed.");
+          return;
+        }
+        if (m?.disappear) {
+          messagesRef.current[messageId] = { ...m, disappear: { ...m.disappear, viewCount: res.viewCount } };
+          setRenderTick((x) => x + 1);
+        }
+        setOpenDisappear({ messageId, mode: "views", body: res.body, expiresAt: null });
+        return;
       }
+
+      // "time" mode — always returns a body; may or may not be the first
+      // open (the response doesn't distinguish, and the client doesn't need
+      // to: reopening is free either way).
+      if (m?.disappear) {
+        messagesRef.current[messageId] = { ...m, disappear: { ...m.disappear, expiresAt: res.expiresAt } };
+        setRenderTick((x) => x + 1);
+      }
+      setOpenDisappear({ messageId, mode: "time", body: res.body, expiresAt: res.expiresAt });
     } catch {
       setError("Couldn't open this message. Try again.");
     }
@@ -1776,6 +1828,15 @@ export default function ChatThreadPage() {
           url={ephemeralView.url}
           type={ephemeralView.type}
           onClose={() => setEphemeralView(null)}
+        />
+      )}
+
+      {openDisappear && (
+        <DisappearModal
+          mode={openDisappear.mode}
+          body={openDisappear.body}
+          expiresAt={openDisappear.expiresAt}
+          onClose={() => setOpenDisappear(null)}
         />
       )}
 

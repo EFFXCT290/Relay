@@ -61,9 +61,8 @@ async function buildTestApp() {
 // sweepDisappearingMessages import pulls in cleanup) regardless of whether
 // .add() is ever called — left open, `node --test` never exits.
 // closeAllQueueConnections() closes every queue this app can open, so this
-// file never has to track which subset it happens to pull in — the previous
-// hand-rolled close list here forgot cleanupQueue and hung CI for 10+
-// minutes (see close-all-for-tests.ts for the full story).
+// file never has to track which subset it happens to pull in (see
+// close-all-for-tests.ts for the full story).
 after(async () => {
   const { closeAllQueueConnections } = await import("../../queues/close-all-for-tests.js");
   await closeAllQueueConnections();
@@ -189,7 +188,7 @@ describe("POST /api/conversations/:id/messages — disappear:views send", () => 
   });
 });
 
-describe("POST /api/messages/:messageId/view", () => {
+describe("POST /api/messages/:messageId/view — views mode", () => {
   let ctx: Awaited<ReturnType<typeof buildTestApp>>;
   const createdUserIds: string[] = [];
   const createdConversationIds: string[] = [];
@@ -232,11 +231,12 @@ describe("POST /api/messages/:messageId/view", () => {
     assert.equal(res.statusCode, 403);
   });
 
-  it("a recipient's view returns the real body and, at viewLimit 1, immediately soft-deletes the message", async () => {
+  it("a recipient's open returns the real body and, at viewLimit 1, immediately soft-deletes the message", async () => {
     const { b, conversationId, messageId } = await setup(1);
     const res = await viewMessage(ctx.app, b.id, messageId);
     assert.equal(res.statusCode, 200);
-    const payload = res.json() as { consumed: boolean; viewCount: number; viewLimit: number; body?: string };
+    const payload = res.json() as { mode: string; consumed: boolean; viewCount: number; viewLimit: number; body?: string };
+    assert.equal(payload.mode, "views");
     assert.equal(payload.consumed, true);
     assert.equal(payload.viewCount, 1);
     assert.equal(payload.body, "peekaboo");
@@ -266,7 +266,8 @@ describe("POST /api/messages/:messageId/view", () => {
 
     const first = await viewMessage(ctx.app, b.id, messageId);
     assert.equal(first.statusCode, 200);
-    const firstBody = first.json() as { consumed: boolean; viewCount: number; body?: string };
+    const firstBody = first.json() as { mode: string; consumed: boolean; viewCount: number; body?: string };
+    assert.equal(firstBody.mode, "views");
     assert.equal(firstBody.consumed, false);
     assert.equal(firstBody.viewCount, 1);
     assert.equal(firstBody.body, "peekaboo");
@@ -276,7 +277,7 @@ describe("POST /api/messages/:messageId/view", () => {
 
     const second = await viewMessage(ctx.app, b.id, messageId);
     assert.equal(second.statusCode, 200);
-    const secondBody = second.json() as { consumed: boolean; viewCount: number; body?: string };
+    const secondBody = second.json() as { mode: string; consumed: boolean; viewCount: number; body?: string };
     assert.equal(secondBody.consumed, true);
     assert.equal(secondBody.viewCount, 2);
     assert.equal(secondBody.body, "peekaboo");
@@ -293,7 +294,7 @@ describe("POST /api/messages/:messageId/view", () => {
     assert.equal(again.statusCode, 404, "the message is soft-deleted, so it's gone from this route's perspective");
   });
 
-  it("400s a view attempt on a message that isn't view-once", async () => {
+  it("400s an open attempt on a message that isn't disappearing at all", async () => {
     const { a, b, conversationId } = await setup(1);
     void a;
     const normalRes = await sendText(ctx.app, a.id, conversationId, "just a normal message");
@@ -315,6 +316,198 @@ describe("POST /api/messages/:messageId/view", () => {
 
     const pinRow = await ctx.app.prisma.pinnedMessage.findUnique({ where: { messageId } });
     assert.equal(pinRow, null, "consuming the last view must unpin, mirroring the manual DELETE route's discipline");
+  });
+});
+
+describe("POST /api/conversations/:id/messages — disappear:time send (clock does NOT start at send)", () => {
+  let ctx: Awaited<ReturnType<typeof buildTestApp>>;
+  const createdUserIds: string[] = [];
+  const createdConversationIds: string[] = [];
+
+  before(async () => {
+    ctx = await buildTestApp();
+  });
+
+  after(async () => {
+    const prisma = ctx.app.prisma;
+    await prisma.conversation.deleteMany({ where: { id: { in: createdConversationIds } } });
+    await prisma.user.deleteMany({ where: { id: { in: createdUserIds } } });
+    await ctx.app.close();
+  });
+
+  async function setup() {
+    const [a, b] = await Promise.all([createUser(ctx.app.prisma, "a"), createUser(ctx.app.prisma, "b")]);
+    createdUserIds.push(a.id, b.id);
+    const conversationId = await makeAcceptedConversation(ctx.app, a.id, b.id);
+    createdConversationIds.push(conversationId);
+    return { a, b, conversationId };
+  }
+
+  it("persists ttlSeconds but leaves expiresAt/firstOpenedAt null — the clock has not started", async () => {
+    const { a, conversationId } = await setup();
+    const res = await sendText(ctx.app, a.id, conversationId, "waiting to be opened", {
+      disappear: { mode: "time", ttlSeconds: 3600 },
+    });
+    assert.equal(res.statusCode, 201);
+    const created = res.json() as { messageId: string; body: string | null; disappear: { mode: string; expiresAt: string | null } };
+    assert.equal(created.disappear.mode, "time");
+    assert.equal(created.disappear.expiresAt, null, "expiresAt must not be set at send time");
+
+    const row = await ctx.app.prisma.messageDisappearState.findUnique({ where: { messageId: created.messageId } });
+    assert.equal(row!.ttlSeconds, 3600, "the chosen duration is persisted even though the clock hasn't started");
+    assert.equal(row!.expiresAt, null);
+    assert.equal(row!.firstOpenedAt, null);
+  });
+
+  it("body is hidden at send — not even the sender sees it, matching views mode's rule", async () => {
+    const { a, conversationId } = await setup();
+    const res = await sendText(ctx.app, a.id, conversationId, "hidden until opened", {
+      disappear: { mode: "time", ttlSeconds: 60 },
+    });
+    const created = res.json() as { body: string | null };
+    assert.equal(created.body, null);
+  });
+
+  it("body stays hidden via GET list for both participants before it's ever been opened", async () => {
+    const { a, b, conversationId } = await setup();
+    const sendRes = await sendText(ctx.app, a.id, conversationId, "hidden until opened", {
+      disappear: { mode: "time", ttlSeconds: 60 },
+    });
+    const messageId = (sendRes.json() as { messageId: string }).messageId;
+
+    for (const viewer of [a, b]) {
+      const listRes = await getMessages(ctx.app, viewer.id, conversationId);
+      const { messages } = listRes.json() as { messages: Array<{ messageId: string; body: string | null; disappear: { expiresAt: string | null } }> };
+      const entry = messages.find((m) => m.messageId === messageId);
+      assert.equal(entry!.body, null);
+      assert.equal(entry!.disappear.expiresAt, null, "no countdown before it's been opened");
+    }
+  });
+});
+
+describe("POST /api/messages/:messageId/view — time mode (first explicit open starts the clock)", () => {
+  let ctx: Awaited<ReturnType<typeof buildTestApp>>;
+  const createdUserIds: string[] = [];
+  const createdConversationIds: string[] = [];
+
+  before(async () => {
+    ctx = await buildTestApp();
+  });
+
+  after(async () => {
+    const prisma = ctx.app.prisma;
+    await prisma.conversation.deleteMany({ where: { id: { in: createdConversationIds } } });
+    await prisma.user.deleteMany({ where: { id: { in: createdUserIds } } });
+    await ctx.app.close();
+  });
+
+  async function setup(ttlSeconds: number) {
+    const [a, b] = await Promise.all([createUser(ctx.app.prisma, "a"), createUser(ctx.app.prisma, "b")]);
+    createdUserIds.push(a.id, b.id);
+    const conversationId = await makeAcceptedConversation(ctx.app, a.id, b.id);
+    createdConversationIds.push(conversationId);
+    const sendRes = await sendText(ctx.app, a.id, conversationId, "the timed secret", {
+      disappear: { mode: "time", ttlSeconds },
+    });
+    assert.equal(sendRes.statusCode, 201);
+    const messageId = (sendRes.json() as { messageId: string }).messageId;
+    return { a, b, conversationId, messageId };
+  }
+
+  it("403s the sender opening their own time-mode message — same exclusion as views mode", async () => {
+    const { a, messageId } = await setup(3600);
+    const res = await viewMessage(ctx.app, a.id, messageId);
+    assert.equal(res.statusCode, 403);
+
+    const row = await ctx.app.prisma.messageDisappearState.findUnique({ where: { messageId } });
+    assert.equal(row!.firstOpenedAt, null, "a forbidden attempt must never start the clock");
+  });
+
+  it("403s a non-participant", async () => {
+    const { messageId } = await setup(3600);
+    const stranger = await createUser(ctx.app.prisma, "stranger");
+    createdUserIds.push(stranger.id);
+    const res = await viewMessage(ctx.app, stranger.id, messageId);
+    assert.equal(res.statusCode, 403);
+  });
+
+  it("the recipient's first open sets firstOpenedAt, computes expiresAt = open time + ttlSeconds, and returns the body", async () => {
+    const { b, messageId } = await setup(3600);
+    const before = Date.now();
+    const res = await viewMessage(ctx.app, b.id, messageId);
+    const after = Date.now();
+
+    assert.equal(res.statusCode, 200);
+    const payload = res.json() as { mode: string; body: string; expiresAt: string };
+    assert.equal(payload.mode, "time");
+    assert.equal(payload.body, "the timed secret");
+
+    const expiresAtMs = new Date(payload.expiresAt).getTime();
+    // Computed from ttlSeconds relative to whenever the open actually landed
+    // server-side — allow the request's own real wall-clock window.
+    assert.ok(expiresAtMs >= before + 3600_000 && expiresAtMs <= after + 3600_000 + 1000, "expiresAt must be ~3600s from the open, not from send");
+
+    const row = await ctx.app.prisma.messageDisappearState.findUnique({ where: { messageId } });
+    assert.notEqual(row!.firstOpenedAt, null);
+    assert.equal(row!.expiresAt!.toISOString(), payload.expiresAt);
+
+    // Opening never itself soft-deletes a time-mode message — only the sweep does.
+    const msgRow = await ctx.app.prisma.message.findUnique({ where: { id: messageId } });
+    assert.equal(msgRow!.isDeleted, false);
+  });
+
+  it("reopening does NOT restart or extend the clock — same expiresAt both times, firstOpenedAt unchanged", async () => {
+    const { b, messageId } = await setup(3600);
+    const first = await viewMessage(ctx.app, b.id, messageId);
+    const firstPayload = first.json() as { expiresAt: string };
+    const firstOpenedAt = (await ctx.app.prisma.messageDisappearState.findUnique({ where: { messageId } }))!.firstOpenedAt;
+
+    // A brief real delay so a bug that DID recompute would produce a visibly
+    // different (later) expiresAt — not relying on both calls landing in the
+    // exact same millisecond to prove nothing moved.
+    await new Promise((r) => setTimeout(r, 50));
+
+    const second = await viewMessage(ctx.app, b.id, messageId);
+    assert.equal(second.statusCode, 200);
+    const secondPayload = second.json() as { mode: string; body: string; expiresAt: string };
+    assert.equal(secondPayload.expiresAt, firstPayload.expiresAt, "reopening must return the exact same deadline, not a fresh one");
+    assert.equal(secondPayload.body, "the timed secret", "reopening keeps returning the body — it's not a one-time reveal like views mode");
+
+    const row = await ctx.app.prisma.messageDisappearState.findUnique({ where: { messageId } });
+    assert.equal(row!.firstOpenedAt!.getTime(), firstOpenedAt!.getTime(), "firstOpenedAt must not be re-stamped on a reopen");
+  });
+
+  it("message:disappear:started fires once on the first open, and is not re-fired on a reopen", async () => {
+    const { b, conversationId, messageId } = await setup(3600);
+    await viewMessage(ctx.app, b.id, messageId);
+    const afterFirst = ctx.emitted.filter((e) => e.room === `conversation:${conversationId}` && e.event === "message:disappear:started").length;
+    assert.equal(afterFirst, 1);
+
+    await viewMessage(ctx.app, b.id, messageId);
+    const afterSecond = ctx.emitted.filter((e) => e.room === `conversation:${conversationId}` && e.event === "message:disappear:started").length;
+    assert.equal(afterSecond, 1, "a reopen must not emit a second disappear:started event");
+  });
+
+  it("after the first open, GET list also returns the body and expiresAt normally — no budget left to protect", async () => {
+    const { a, b, conversationId, messageId } = await setup(3600);
+    await viewMessage(ctx.app, b.id, messageId);
+
+    for (const viewer of [a, b]) {
+      const listRes = await getMessages(ctx.app, viewer.id, conversationId);
+      const { messages } = listRes.json() as { messages: Array<{ messageId: string; body: string | null; disappear: { expiresAt: string | null } }> };
+      const entry = messages.find((m) => m.messageId === messageId);
+      assert.equal(entry!.body, "the timed secret");
+      assert.notEqual(entry!.disappear.expiresAt, null);
+    }
+  });
+
+  it("400s an open attempt if the disappear row is somehow missing ttlSeconds (data-integrity guard)", async () => {
+    const { b, messageId } = await setup(3600);
+    // Simulate a corrupt/legacy row rather than relying on being able to
+    // construct one through the API (the send route always sets it).
+    await ctx.app.prisma.messageDisappearState.update({ where: { messageId }, data: { ttlSeconds: null } });
+    const res = await viewMessage(ctx.app, b.id, messageId);
+    assert.equal(res.statusCode, 400);
   });
 });
 
@@ -357,7 +550,7 @@ describe("DELETE /api/messages/:messageId — manual delete closes out a live di
   });
 });
 
-describe("sweepDisappearingMessages (cleanup.worker.ts) — time-mode expiry", () => {
+describe("sweepDisappearingMessages (cleanup.worker.ts) — time-mode expiry is gated on having been opened", () => {
   let ctx: Awaited<ReturnType<typeof buildTestApp>>;
   const createdUserIds: string[] = [];
   const createdConversationIds: string[] = [];
@@ -373,34 +566,58 @@ describe("sweepDisappearingMessages (cleanup.worker.ts) — time-mode expiry", (
     await ctx.app.close();
   });
 
-  it("soft-deletes a time-mode message once expiresAt has passed, and marks the row consumed", async () => {
+  async function setup(ttlSeconds: number) {
     const [a, b] = await Promise.all([createUser(ctx.app.prisma, "a"), createUser(ctx.app.prisma, "b")]);
     createdUserIds.push(a.id, b.id);
     const conversationId = await makeAcceptedConversation(ctx.app, a.id, b.id);
     createdConversationIds.push(conversationId);
-
-    // Minimum ttlSeconds is 5 — send it, then backdate expiresAt directly so
-    // the test doesn't have to sleep for real time to pass.
     const sendRes = await sendText(ctx.app, a.id, conversationId, "ticking clock", {
-      disappear: { mode: "time", ttlSeconds: 5 },
+      disappear: { mode: "time", ttlSeconds },
     });
     const messageId = (sendRes.json() as { messageId: string }).messageId;
+    return { a, b, conversationId, messageId };
+  }
+
+  function fakeIoDeps() {
+    const emitted: { room: string; event: string; payload: unknown }[] = [];
+    const io = {
+      to: (room: string) => ({ emit: (event: string, payload: unknown) => emitted.push({ room, event, payload }) }),
+    } as unknown as import("socket.io").Server;
+    return { io, emitted };
+  }
+
+  it("a NEVER-opened time-mode message survives indefinitely — the sweep never touches it, no matter how much time has passed", async () => {
+    // ttlSeconds=5 (the minimum) — if the sweep incorrectly used createdAt or
+    // a send-time deadline, this would already be well overdue.
+    const { messageId } = await setup(5);
+    // Simulate real elapsed time without ever opening it — createdAt is old,
+    // but expiresAt/firstOpenedAt are still null (the send-time state).
+    await ctx.app.prisma.message.update({ where: { id: messageId }, data: { createdAt: new Date(Date.now() - 60_000) } });
+
+    const { io } = fakeIoDeps();
+    await sweepDisappearingMessages({ prisma: ctx.app.prisma, s3: {} as never, io, log: ctx.app.log as unknown as FastifyBaseLogger });
+
+    const msgRow = await ctx.app.prisma.message.findUnique({ where: { id: messageId } });
+    assert.equal(msgRow!.isDeleted, false, "a never-opened message must wait indefinitely — the sweep must never touch it");
+
+    const stateRow = await ctx.app.prisma.messageDisappearState.findUnique({ where: { messageId } });
+    assert.equal(stateRow!.consumedAt, null);
+    assert.equal(stateRow!.expiresAt, null);
+  });
+
+  it("an opened-and-overdue time-mode message is swept: soft-deleted and marked consumed", async () => {
+    const { b, conversationId, messageId } = await setup(5);
+    // Drive the real open flow first, then backdate the resulting expiresAt
+    // to simulate wall-clock time actually passing.
+    const openRes = await viewMessage(ctx.app, b.id, messageId);
+    assert.equal(openRes.statusCode, 200);
     await ctx.app.prisma.messageDisappearState.update({
       where: { messageId },
       data: { expiresAt: new Date(Date.now() - 1000) },
     });
 
-    const emitted: { room: string; event: string; payload: unknown }[] = [];
-    const fakeIo = {
-      to: (room: string) => ({ emit: (event: string, payload: unknown) => emitted.push({ room, event, payload }) }),
-    } as unknown as import("socket.io").Server;
-
-    await sweepDisappearingMessages({
-      prisma: ctx.app.prisma,
-      s3: {} as never,
-      io: fakeIo,
-      log: ctx.app.log as unknown as FastifyBaseLogger,
-    });
+    const { io, emitted } = fakeIoDeps();
+    await sweepDisappearingMessages({ prisma: ctx.app.prisma, s3: {} as never, io, log: ctx.app.log as unknown as FastifyBaseLogger });
 
     const msgRow = await ctx.app.prisma.message.findUnique({ where: { id: messageId } });
     assert.equal(msgRow!.isDeleted, true);
@@ -413,26 +630,15 @@ describe("sweepDisappearingMessages (cleanup.worker.ts) — time-mode expiry", (
   });
 
   it("a re-run of the same tick never reprocesses an already-consumed row", async () => {
-    const [a, b] = await Promise.all([createUser(ctx.app.prisma, "a"), createUser(ctx.app.prisma, "b")]);
-    createdUserIds.push(a.id, b.id);
-    const conversationId = await makeAcceptedConversation(ctx.app, a.id, b.id);
-    createdConversationIds.push(conversationId);
-
-    const sendRes = await sendText(ctx.app, a.id, conversationId, "expires soon", {
-      disappear: { mode: "time", ttlSeconds: 5 },
-    });
-    const messageId = (sendRes.json() as { messageId: string }).messageId;
+    const { b, messageId } = await setup(5);
+    await viewMessage(ctx.app, b.id, messageId);
     await ctx.app.prisma.messageDisappearState.update({
       where: { messageId },
       data: { expiresAt: new Date(Date.now() - 1000) },
     });
 
-    const deps = {
-      prisma: ctx.app.prisma,
-      s3: {} as never,
-      io: { to: () => ({ emit: () => {} }) } as unknown as import("socket.io").Server,
-      log: ctx.app.log as unknown as FastifyBaseLogger,
-    };
+    const { io } = fakeIoDeps();
+    const deps = { prisma: ctx.app.prisma, s3: {} as never, io, log: ctx.app.log as unknown as FastifyBaseLogger };
     await sweepDisappearingMessages(deps);
     const firstDeletedAt = (await ctx.app.prisma.message.findUnique({ where: { id: messageId } }))!.deletedAt;
 

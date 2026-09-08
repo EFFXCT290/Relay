@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { render, screen, fireEvent, act } from "@testing-library/react";
 import type { Message } from "@relay/contracts";
-import { DisappearCard, DisappearTimer } from "./disappear-card";
+import { DisappearCard } from "./disappear-card";
 
 function makeMessage(overrides: Partial<Message> = {}): Message {
   return {
@@ -30,108 +30,103 @@ describe("DisappearCard — views mode", () => {
     expect(container).toBeEmptyDOMElement();
   });
 
-  it("renders nothing for time-mode messages (handled by the normal bubble instead)", () => {
-    const msg = makeMessage({ disappear: { mode: "time", viewLimit: null, viewCount: 0, expiresAt: new Date(Date.now() + 60_000).toISOString() } });
-    const { container } = render(<DisappearCard message={msg} isMine={false} />);
-    expect(container).toBeEmptyDOMElement();
-  });
-
-  it("recipient, not yet revealed: shows a locked 'tap to view' card, never the real text", () => {
+  it("recipient: shows a locked 'tap to view' card, regardless of whether body happens to be populated", () => {
+    // body is deliberately irrelevant to this card now — content only ever
+    // shows in the explicit-open modal, never inline (see disappear-card.tsx's
+    // header comment on why the card must not key off message.body).
     const msg = makeMessage({
-      body: null,
+      body: "leaked text would be a bug",
       disappear: { mode: "views", viewLimit: 3, viewCount: 0, expiresAt: null },
     });
     render(<DisappearCard message={msg} isMine={false} />);
     expect(screen.getByText(/Tap to view/)).toBeInTheDocument();
     expect(screen.getByText(/3 left/)).toBeInTheDocument();
-    expect(screen.queryByText("secret text")).not.toBeInTheDocument();
+    expect(screen.queryByText("leaked text would be a bug")).not.toBeInTheDocument();
   });
 
-  it("tapping the locked card calls onView with the messageId", () => {
-    const onView = vi.fn();
-    const msg = makeMessage({
-      body: null,
-      disappear: { mode: "views", viewLimit: 1, viewCount: 0, expiresAt: null },
-    });
-    render(<DisappearCard message={msg} isMine={false} onView={onView} />);
+  it("tapping the locked card calls onOpen with the messageId", () => {
+    const onOpen = vi.fn();
+    const msg = makeMessage({ disappear: { mode: "views", viewLimit: 1, viewCount: 0, expiresAt: null } });
+    render(<DisappearCard message={msg} isMine={false} onOpen={onOpen} />);
     fireEvent.click(screen.getByRole("button", { name: /Tap to view/ }));
-    expect(onView).toHaveBeenCalledWith("msg-1");
+    expect(onOpen).toHaveBeenCalledWith("msg-1");
   });
 
-  it("recipient, revealed (body present): shows the real text, not the locked card", () => {
-    const msg = makeMessage({
-      body: "secret text",
-      disappear: { mode: "views", viewLimit: 3, viewCount: 1, expiresAt: null },
-    });
-    render(<DisappearCard message={msg} isMine={false} />);
-    expect(screen.getByText("secret text")).toBeInTheDocument();
-    expect(screen.queryByText(/Tap to view/)).not.toBeInTheDocument();
-  });
-
-  it("sender, not revealed: shows a non-interactive status line, never a tappable card", () => {
-    const onView = vi.fn();
-    const msg = makeMessage({
-      body: null,
-      disappear: { mode: "views", viewLimit: 2, viewCount: 1, expiresAt: null },
-    });
-    render(<DisappearCard message={msg} isMine={true} onView={onView} />);
+  it("sender: non-interactive status line, never a tappable card", () => {
+    const onOpen = vi.fn();
+    const msg = makeMessage({ disappear: { mode: "views", viewLimit: 2, viewCount: 1, expiresAt: null } });
+    render(<DisappearCard message={msg} isMine={true} onOpen={onOpen} />);
     expect(screen.getByText(/2 views/)).toBeInTheDocument();
     expect(screen.getByText(/Opened 1\/2/)).toBeInTheDocument();
     expect(screen.queryByRole("button")).not.toBeInTheDocument();
-    expect(onView).not.toHaveBeenCalled();
+    expect(onOpen).not.toHaveBeenCalled();
   });
 
-  it("sender, revealed (optimistic send): shows the real text they just typed", () => {
-    const msg = makeMessage({
-      senderId: "me",
-      body: "just sent this",
-      disappear: { mode: "views", viewLimit: 1, viewCount: 0, expiresAt: null },
-    });
-    render(<DisappearCard message={msg} isMine={true} />);
-    expect(screen.getByText("just sent this")).toBeInTheDocument();
-  });
-
-  it("single view-once (viewLimit 1) labels itself as 'View once', not '1 view'", () => {
-    const msg = makeMessage({
-      body: null,
-      disappear: { mode: "views", viewLimit: 1, viewCount: 0, expiresAt: null },
-    });
+  it("single view-once (viewLimit 1) labels itself 'View once', not '1 view'", () => {
+    const msg = makeMessage({ disappear: { mode: "views", viewLimit: 1, viewCount: 0, expiresAt: null } });
     render(<DisappearCard message={msg} isMine={true} />);
     expect(screen.getByText("View once")).toBeInTheDocument();
   });
 });
 
-describe("DisappearTimer — time mode countdown", () => {
+describe("DisappearCard — time mode", () => {
   afterEach(() => {
     vi.useRealTimers();
   });
 
-  it("renders a coarse remaining-time label for an expiry a few minutes out", () => {
-    const expiresAt = new Date(Date.now() + 5 * 60_000).toISOString();
-    render(<DisappearTimer expiresAt={expiresAt} />);
-    expect(screen.getByText("5m")).toBeInTheDocument();
+  it("recipient, before the clock has started (expiresAt null): 'Tap to open', no countdown", () => {
+    const msg = makeMessage({ disappear: { mode: "time", viewLimit: null, viewCount: 0, expiresAt: null } });
+    render(<DisappearCard message={msg} isMine={false} />);
+    expect(screen.getByText("Tap to open")).toBeInTheDocument();
   });
 
-  it("renders hours for an expiry beyond 60 minutes", () => {
-    const expiresAt = new Date(Date.now() + 90 * 60_000).toISOString();
-    render(<DisappearTimer expiresAt={expiresAt} />);
-    expect(screen.getByText("2h")).toBeInTheDocument();
+  it("sender, before the clock has started: 'Waiting to be opened', non-interactive", () => {
+    const onOpen = vi.fn();
+    const msg = makeMessage({ disappear: { mode: "time", viewLimit: null, viewCount: 0, expiresAt: null } });
+    render(<DisappearCard message={msg} isMine={true} onOpen={onOpen} />);
+    expect(screen.getByText("Waiting to be opened")).toBeInTheDocument();
+    expect(screen.queryByRole("button")).not.toBeInTheDocument();
   });
 
-  it("renders nothing once expiresAt is in the past (avoids flashing 0s/negative)", () => {
-    const expiresAt = new Date(Date.now() - 1000).toISOString();
-    const { container } = render(<DisappearTimer expiresAt={expiresAt} />);
-    expect(container).toBeEmptyDOMElement();
+  it("recipient, clock running: card shows a ticking 'Tap to view · Xleft' with the remaining time, still tappable (reopening is free)", () => {
+    const onOpen = vi.fn();
+    const msg = makeMessage({
+      disappear: { mode: "time", viewLimit: null, viewCount: 0, expiresAt: new Date(Date.now() + 5 * 60_000).toISOString() },
+    });
+    render(<DisappearCard message={msg} isMine={false} onOpen={onOpen} />);
+    expect(screen.getByText(/Tap to view · 5m left/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button"));
+    expect(onOpen).toHaveBeenCalledWith("msg-1");
   });
 
-  it("updates on its own coarse interval without a re-render from the parent", () => {
+  it("sender, clock running: non-interactive status line shows 'Disappearing in Xh'", () => {
+    const onOpen = vi.fn();
+    const msg = makeMessage({
+      disappear: { mode: "time", viewLimit: null, viewCount: 0, expiresAt: new Date(Date.now() + 90 * 60_000).toISOString() },
+    });
+    render(<DisappearCard message={msg} isMine={true} onOpen={onOpen} />);
+    expect(screen.getByText("Disappearing in 2h")).toBeInTheDocument();
+    expect(screen.queryByRole("button")).not.toBeInTheDocument();
+  });
+
+  it("the card's countdown ticks down on its own coarse interval", () => {
     vi.useFakeTimers();
-    const expiresAt = new Date(Date.now() + 45_000).toISOString(); // 45s out
-    render(<DisappearTimer expiresAt={expiresAt} />);
-    expect(screen.getByText("45s")).toBeInTheDocument();
+    const msg = makeMessage({
+      disappear: { mode: "time", viewLimit: null, viewCount: 0, expiresAt: new Date(Date.now() + 45_000).toISOString() },
+    });
+    render(<DisappearCard message={msg} isMine={false} />);
+    expect(screen.getByText(/45s left/)).toBeInTheDocument();
 
-    // Advance past the 30s tick — remaining drops to ~15s.
     act(() => { vi.advanceTimersByTime(30_000); });
-    expect(screen.getByText("15s")).toBeInTheDocument();
+    expect(screen.getByText(/15s left/)).toBeInTheDocument();
+  });
+
+  it("body content is never rendered by the card in either not-mine state, even if populated", () => {
+    const msg = makeMessage({
+      body: "would leak if the card read it",
+      disappear: { mode: "time", viewLimit: null, viewCount: 0, expiresAt: new Date(Date.now() + 60_000).toISOString() },
+    });
+    render(<DisappearCard message={msg} isMine={false} />);
+    expect(screen.queryByText("would leak if the card read it")).not.toBeInTheDocument();
   });
 });

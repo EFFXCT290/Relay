@@ -50,13 +50,18 @@ export declare const DisappearStateSchema: import("@sinclair/typebox").TObject<{
     expiresAt: import("@sinclair/typebox").TUnion<[import("@sinclair/typebox").TString, import("@sinclair/typebox").TNull]>;
 }>;
 export type DisappearState = Static<typeof DisappearStateSchema>;
-export declare const MessageViewResponseSchema: import("@sinclair/typebox").TObject<{
+export declare const MessageOpenResponseSchema: import("@sinclair/typebox").TUnion<[import("@sinclair/typebox").TObject<{
+    mode: import("@sinclair/typebox").TLiteral<"views">;
     consumed: import("@sinclair/typebox").TBoolean;
     viewCount: import("@sinclair/typebox").TInteger;
     viewLimit: import("@sinclair/typebox").TInteger;
     body: import("@sinclair/typebox").TOptional<import("@sinclair/typebox").TString>;
-}>;
-export type MessageViewResponse = Static<typeof MessageViewResponseSchema>;
+}>, import("@sinclair/typebox").TObject<{
+    mode: import("@sinclair/typebox").TLiteral<"time">;
+    body: import("@sinclair/typebox").TString;
+    expiresAt: import("@sinclair/typebox").TString;
+}>]>;
+export type MessageOpenResponse = Static<typeof MessageOpenResponseSchema>;
 export declare const MessageSchema: import("@sinclair/typebox").TObject<{
     messageId: import("@sinclair/typebox").TString;
     conversationId: import("@sinclair/typebox").TString;
@@ -193,6 +198,7 @@ export declare const MESSAGE_EVENTS: {
     readonly PINNED: "message:pinned";
     readonly UNPINNED: "message:unpinned";
     readonly DISAPPEAR_PROGRESS: "message:disappear:progress";
+    readonly DISAPPEAR_STARTED: "message:disappear:started";
 };
 export type MessageEventName = (typeof MESSAGE_EVENTS)[keyof typeof MESSAGE_EVENTS];
 export type MessageSendInbound = SendMessagePayload & {
@@ -260,4 +266,9 @@ export type MessageDisappearProgressEvent = {
     viewLimit: number;
     consumed: boolean;
     viewedAt: string;
+};
+export type MessageDisappearStartedEvent = {
+    messageId: string;
+    conversationId: string;
+    expiresAt: string;
 };

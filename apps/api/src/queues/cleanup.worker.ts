@@ -82,9 +82,13 @@ async function sweep(deps: WorkerDeps): Promise<void> {
 // been met but hasn't been handled yet — mirrors `sweep()` above, querying
 // MessageDisappearState directly (cheap and targeted) rather than scanning
 // all messages. Two candidate sets:
-//   - TIME mode: expiresAt has passed. This is the primary path — nothing
-//     else in the app ever closes out a TIME-mode row, so the sweep is the
-//     only thing that ever will.
+//   - TIME mode: expiresAt has passed. expiresAt is null until the
+//     recipient's first explicit open (POST /messages/:messageId/view) sets
+//     it — the `expiresAt: { not: null }` guard is what makes a never-opened
+//     message wait indefinitely; without it the message would need a
+//     separate "not yet opened" branch to avoid ever matching. This is the
+//     primary path once opened — nothing else in the app ever closes out a
+//     TIME-mode row, so the sweep is the only thing that ever will.
 //   - VIEWS mode: viewCount already reached viewLimit. This is a backstop
 //     only — POST /messages/:messageId/view (message.routes.ts) already
 //     soft-deletes synchronously the instant the last look is spent; this
@@ -100,7 +104,7 @@ export async function sweepDisappearingMessages(deps: WorkerDeps): Promise<void>
 
   const [timeExpired, viewsSpent] = await Promise.all([
     prisma.messageDisappearState.findMany({
-      where: { mode: "TIME", consumedAt: null, expiresAt: { lte: now } },
+      where: { mode: "TIME", consumedAt: null, expiresAt: { not: null, lte: now } },
       take: 500,
     }),
     prisma.messageDisappearState.findMany({

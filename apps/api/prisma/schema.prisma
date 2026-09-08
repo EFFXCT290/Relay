@@ -142,19 +142,30 @@ model Message {
 //  purge phase like TemporaryMedia's MinIO purge — soft-deleting a row has no
 //  bytes to clean up), stamped once the Message has been soft-deleted so the
 //  sweep never reprocesses an already-handled message.
+// TIME mode's clock does not start at send — it starts the first time the
+// recipient explicitly opens the message (POST /messages/:id/view). Before
+// that, ttlSeconds holds the sender's chosen duration but expiresAt and
+// firstOpenedAt both stay null, and the sweep's `expiresAt IS NOT NULL`
+// filter means a never-opened message is never a sweep candidate — it waits
+// indefinitely. Reopening after the first open is a no-op on the clock: the
+// route only ever sets firstOpenedAt/expiresAt when firstOpenedAt is still
+// null, so a second (or third...) explicit open just re-reads the same
+// already-computed expiresAt rather than recomputing it.
 model MessageDisappearState {
-  id         String        @id @default(uuid())
-  messageId  String        @unique
-  mode       DisappearMode
-  viewLimit  Int? // 1..5, required for mode VIEWS; null for TIME
-  viewCount  Int           @default(0)
-  expiresAt  DateTime? // required for mode TIME; null for VIEWS
-  consumedAt DateTime? // stamped once the condition is met AND the Message has been soft-deleted
-  createdAt  DateTime      @default(now())
+  id            String        @id @default(uuid())
+  messageId     String        @unique
+  mode          DisappearMode
+  viewLimit     Int? // 1..5, required for mode VIEWS; null for TIME
+  viewCount     Int           @default(0)
+  ttlSeconds    Int? // TIME mode's chosen duration, persisted at send; null for VIEWS
+  firstOpenedAt DateTime? // TIME mode: stamped on the recipient's first explicit open — starts the clock; null for VIEWS
+  expiresAt     DateTime? // TIME mode: firstOpenedAt + ttlSeconds, computed once on first open; null until then, and always null for VIEWS
+  consumedAt    DateTime? // stamped once the condition is met AND the Message has been soft-deleted
+  createdAt     DateTime      @default(now())
 
   message Message @relation(fields: [messageId], references: [id], onDelete: Cascade)
 
-  @@index([mode, consumedAt, expiresAt]) // sweep: TIME-mode candidates not yet consumed; VIEWS backstop
+  @@index([mode, consumedAt, expiresAt]) // sweep: TIME-mode candidates not yet consumed, already opened; VIEWS backstop
 }
 
 enum DisappearMode {

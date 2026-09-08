@@ -172,7 +172,7 @@ export function DisappearPicker({
                 ? value?.mode === "views" && value.viewLimit === 1
                   ? "View once — disappears after it's opened."
                   : `Hidden until opened; disappears after ${value?.mode === "views" ? value.viewLimit : 1} views.`
-                : "Visible normally, then disappears after the timer runs out."}
+                : "Hidden until opened; the timer starts the moment it's opened, not now."}
           </p>
         </div>
       )}

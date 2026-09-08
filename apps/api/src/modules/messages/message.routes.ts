@@ -12,7 +12,7 @@ import {
   PinnedMessageSchema,
   DisappearSendSchema,
   DisappearStateSchema,
-  MessageViewResponseSchema,
+  MessageOpenResponseSchema,
   type PinnedMessage,
   type DisappearState,
   type MessageDisappearProgressEvent,
@@ -33,6 +33,7 @@ import {
   emitMessageReaction,
   emitMessageUnpinned,
   emitMessageDisappearProgress,
+  emitMessageDisappearStarted,
 } from "./message.socket.js";
 import { extractUrls } from "./utils/extract-urls.js";
 import { fetchEmbed } from "./services/embed.service.js";
@@ -60,7 +61,7 @@ async function assertParticipant(
 
 // Shape shared by every include that joins a message's disappear sidecar —
 // GET list, POST create, and the idempotent-replay re-fetch below.
-type DisappearRow = { mode: "VIEWS" | "TIME"; viewLimit: number | null; viewCount: number; expiresAt: Date | null } | null;
+type DisappearRow = { mode: "VIEWS" | "TIME"; viewLimit: number | null; viewCount: number; expiresAt: Date | null; firstOpenedAt: Date | null } | null;
 
 function serializeDisappear(d: DisappearRow): DisappearState | null {
   if (!d) return null;
@@ -72,13 +73,25 @@ function serializeDisappear(d: DisappearRow): DisappearState | null {
   };
 }
 
-// VIEWS-mode messages never serialize `body` through a normal read path —
-// mirrors GET /media/:mediaId/url refusing ephemeral media entirely (see
-// media.routes.ts). The only path to the text is POST
-// /messages/:messageId/view, which reads the Message row's body directly.
-function visibleBody(body: string | null, isDeleted: boolean, disappearMode: "VIEWS" | "TIME" | undefined): string | null {
-  if (isDeleted || disappearMode === "VIEWS") return null;
-  return body;
+// Neither mode ever serializes `body` through a normal read path (GET list,
+// POST create response, idempotent replay) — mirrors GET /media/:mediaId/url
+// refusing ephemeral media entirely (see media.routes.ts). The only path to
+// the text is POST /messages/:messageId/view, which reads the Message row's
+// body directly:
+//   - VIEWS: permanently withheld here — every read spends a look, so
+//     serving it any other way would give it away for free.
+//   - TIME: withheld only until the recipient's first explicit open
+//     (firstOpenedAt null); once opened there's no budget left to protect,
+//     so normal reads serve it like any other message from then on.
+function visibleBody(
+  body: string | null,
+  isDeleted: boolean,
+  disappear: { mode: "VIEWS" | "TIME"; firstOpenedAt: Date | null } | null | undefined,
+): string | null {
+  if (isDeleted) return null;
+  if (!disappear) return body;
+  if (disappear.mode === "VIEWS") return null;
+  return disappear.firstOpenedAt ? body : null;
 }
 
 // Recomputes the true post-write reaction state for a message from the DB —
@@ -214,7 +227,7 @@ const messageRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
           senderId:       m.senderId,
           senderUsername: m.sender.username,
           type:           m.type,
-          body:           visibleBody(m.body, m.isDeleted, m.disappear?.mode),
+          body:           visibleBody(m.body, m.isDeleted, m.disappear),
           disappear:      serializeDisappear(m.disappear),
           replyTo: m.replyTo
             ? {
@@ -310,7 +323,7 @@ const messageRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
         senderId:       existing.senderId,
         senderUsername: existing.sender.username,
         type:           "TEXT" as const,
-        body:           visibleBody(existing.body, existing.isDeleted, existing.disappear?.mode),
+        body:           visibleBody(existing.body, existing.isDeleted, existing.disappear),
         disappear:      serializeDisappear(existing.disappear),
         // See the GET list route's identical re-check — soft-delete never
         // clears `body`, so a deleted parent's text must not leak here either.
@@ -378,9 +391,13 @@ const messageRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
               data: {
                 messageId: msg.id,
                 mode:      disappear.mode === "views" ? "VIEWS" : "TIME",
+                // TIME mode: persist the chosen duration now, but leave
+                // expiresAt/firstOpenedAt null — the clock starts on the
+                // recipient's first explicit open, not at send (see
+                // POST /messages/:messageId/view below).
                 ...(disappear.mode === "views"
                   ? { viewLimit: disappear.viewLimit }
-                  : { expiresAt: new Date(Date.now() + disappear.ttlSeconds * 1000) }),
+                  : { ttlSeconds: disappear.ttlSeconds }),
               },
             });
           }
@@ -401,10 +418,11 @@ const messageRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
 
       // Wire disappear state directly from the request rather than re-fetching
       // the just-created row — the values are already known and unchanged.
+      // expiresAt stays null for TIME mode here too: the clock hasn't started.
       const disappearState: DisappearState | null = disappear
         ? disappear.mode === "views"
           ? { mode: "views", viewLimit: disappear.viewLimit, viewCount: 0, expiresAt: null }
-          : { mode: "time", viewLimit: null, viewCount: 0, expiresAt: new Date(Date.now() + disappear.ttlSeconds * 1000).toISOString() }
+          : { mode: "time", viewLimit: null, viewCount: 0, expiresAt: null }
         : null;
 
       const httpPayload = {
@@ -413,7 +431,9 @@ const messageRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
         senderId:       created.senderId,
         senderUsername: created.sender.username,
         type:           "TEXT" as const,
-        body:           visibleBody(created.body, false, disappearState ? (disappearState.mode === "views" ? "VIEWS" : "TIME") : undefined),
+        // A brand-new message has never been opened — firstOpenedAt is
+        // always null here, so this correctly hides body for both modes.
+        body:           visibleBody(created.body, false, disappear ? { mode: disappear.mode === "views" ? "VIEWS" as const : "TIME" as const, firstOpenedAt: null } : null),
         disappear:      disappearState,
         replyTo: created.replyTo
           ? { messageId: created.replyTo.id, preview: created.replyTo.isDeleted ? null : (created.replyTo.body ? created.replyTo.body.slice(0, 80) : null), type: created.replyTo.type }
@@ -433,10 +453,12 @@ const messageRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
 
       const onlineIds = otherIds.filter((uid) => (fastify.io.sockets.adapter.rooms.get(`user:${uid}`)?.size ?? 0) > 0);
 
-      // A "views"-mode disappearing message's text must never leak through a
-      // side channel — Discord webhook or push notification preview would
-      // otherwise defeat the entire point of hiding `body` from the API.
-      const notifyBody = disappearState?.mode === "views" ? null : body;
+      // A disappearing message's text must never leak through a side channel
+      // before it's been explicitly opened — a Discord webhook or push
+      // notification preview would defeat the entire point of hiding `body`
+      // from the API. Both modes start hidden (views: permanently, via the
+      // API; time: until first open) so both are redacted here.
+      const notifyBody = disappearState ? null : body;
 
       if (isNotificationProviderEnabled("discord")) {
         void maybeNotifyDiscord({
@@ -479,11 +501,12 @@ const messageRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
         ),
       );
 
-      // Async embed fetch — does not block the HTTP response. Skipped entirely
-      // for a "views"-mode disappearing message: a fetched embed's title/
-      // description/image would leak a preview of the hidden text through a
-      // broadcast event, defeating the whole point of hiding `body`.
-      if (disappearState?.mode !== "views") void (async () => {
+      // Async embed fetch — does not block the HTTP response. Skipped
+      // entirely for a disappearing message (either mode): a fetched embed's
+      // title/description/image would leak a preview of the hidden text
+      // through a broadcast event, defeating the whole point of hiding
+      // `body`. Not deferred to open-time either — out of scope.
+      if (!disappearState) void (async () => {
         try {
           const urls = extractUrls(body);
           const firstUrl = urls[0];
@@ -981,23 +1004,31 @@ const messageRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
     },
   );
 
-  // ── POST /api/messages/:messageId/view (disappearing "views" mode) ────────
-  // Mirrors POST /api/media/:mediaId/view (media.routes.ts) closely: a guarded
-  // atomic increment so a double-tap can never over-count the view budget,
-  // refuses once spent, and the sender can never spend their own message's
-  // views (they already know what they typed — same exclusion as the
-  // uploader being forbidden from opening their own ephemeral media). Unlike
-  // media there are no bytes to purge, so the final look soft-deletes the
-  // Message immediately in this same request (mirroring the DELETE route's
-  // unpin-in-the-same-transaction discipline above) instead of waiting on the
-  // sweep — the sweep is only a crash-recovery backstop for this mode.
+  // ── POST /api/messages/:messageId/view (disappearing messages — both modes) ─
+  // The single explicit-open action, mirroring EphemeralViewer's interaction
+  // model (media.routes.ts's POST /media/:mediaId/view): the sender can never
+  // call this for their own message (they already know what they typed — same
+  // exclusion as the uploader being forbidden from opening their own
+  // ephemeral media), checked before any mode-specific logic.
+  //   - VIEWS: guarded atomic increment so a double-tap can never over-count
+  //     the view budget; refuses once spent. Unlike media there are no bytes
+  //     to purge, so the final look soft-deletes the Message immediately in
+  //     this same request (mirroring the DELETE route's unpin-in-the-same-
+  //     transaction discipline above) instead of waiting on the sweep — the
+  //     sweep is only a crash-recovery backstop for this mode.
+  //   - TIME: the FIRST open starts the clock — guarded the same way (a
+  //     double-tap racing the first open must not compute two different
+  //     expiresAt values); any later reopen is a pure no-op on the clock, just
+  //     re-reading the already-computed expiresAt. Opening never itself
+  //     soft-deletes anything — only the sweep does, once wall-clock
+  //     expiresAt passes.
   fastify.post(
     "/messages/:messageId/view",
     {
       preHandler: [fastify.authenticate],
       schema: {
         params:   Type.Object({ messageId: Type.String({ format: "uuid" }) }),
-        response: { 200: MessageViewResponseSchema },
+        response: { 200: MessageOpenResponseSchema },
       },
       config: { rateLimit: { max: 60, timeWindow: "1 minute" } },
     },
@@ -1020,16 +1051,49 @@ const messageRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
         throw new ProblemError("forbidden", "You can't open your own disappearing message.");
       }
       const state = msg.disappear;
-      if (!state || state.mode !== "VIEWS" || state.viewLimit == null) {
-        throw new ProblemError("bad_request", "This message is not view-once.");
-      }
+      if (!state) throw new ProblemError("bad_request", "This message is not disappearing.");
       if (msg.isDeleted) {
         throw new ProblemError("not_found", "This message is no longer available.");
       }
 
+      if (state.mode === "TIME") {
+        if (state.ttlSeconds == null) throw new ProblemError("bad_request", "This message is not disappearing.");
+
+        let expiresAt = state.expiresAt;
+        if (!expiresAt) {
+          // First open — guarded so a double-tap racing this same first open
+          // can't compute two different deadlines; only the winner's `now`
+          // becomes canonical.
+          const now = new Date();
+          const computed = new Date(now.getTime() + state.ttlSeconds * 1000);
+          const bumped = await fastify.prisma.messageDisappearState.updateMany({
+            where: { messageId, firstOpenedAt: null },
+            data:  { firstOpenedAt: now, expiresAt: computed },
+          });
+          if (bumped.count > 0) {
+            expiresAt = computed;
+            emitMessageDisappearStarted(fastify.io, msg.conversationId, {
+              messageId,
+              conversationId: msg.conversationId,
+              expiresAt: computed.toISOString(),
+            });
+          } else {
+            // Lost the race — someone else's concurrent first open already
+            // won; use whatever they actually set, not our own computation.
+            const fresh = await fastify.prisma.messageDisappearState.findUnique({ where: { messageId } });
+            expiresAt = fresh?.expiresAt ?? computed;
+          }
+        }
+
+        return { mode: "time" as const, body: msg.body!, expiresAt: expiresAt.toISOString() };
+      }
+
+      // VIEWS mode.
+      if (state.viewLimit == null) throw new ProblemError("bad_request", "This message is not disappearing.");
+
       // Already spent before this request → no body, no further mint.
       if (state.consumedAt || state.viewCount >= state.viewLimit) {
-        return { consumed: true, viewCount: state.viewCount, viewLimit: state.viewLimit };
+        return { mode: "views" as const, consumed: true, viewCount: state.viewCount, viewLimit: state.viewLimit };
       }
 
       // Guarded atomic increment: bumps only while strictly under the cap, so
@@ -1046,7 +1110,7 @@ const messageRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
 
       if (bumped.count === 0) {
         // Lost the race for the last view — refuse, no body.
-        return { consumed: true, viewCount, viewLimit: state.viewLimit };
+        return { mode: "views" as const, consumed: true, viewCount, viewLimit: state.viewLimit };
       }
 
       let wasPinned = false;
@@ -1085,7 +1149,7 @@ const messageRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
       // Whoever spends the last look still gets to read it this once — body
       // is included whenever this call successfully processed a fresh look,
       // regardless of whether that same look also just consumed the budget.
-      return { consumed, viewCount, viewLimit: state.viewLimit, body: msg.body! };
+      return { mode: "views" as const, consumed, viewCount, viewLimit: state.viewLimit, body: msg.body! };
     },
   );
 

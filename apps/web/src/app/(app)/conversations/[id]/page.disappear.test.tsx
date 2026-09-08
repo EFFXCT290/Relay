@@ -7,10 +7,12 @@ import { MESSAGE_EVENTS } from "@relay/contracts";
 // Disappearing-messages live-update coverage for ChatThreadPage — same real
 // component + fake socket + fake api() transport harness as page.test.tsx
 // (duplicated per this codebase's convention of not sharing test scaffolding
-// across files). Covers: views-mode reveal via POST /view, the sender's
-// progress tick via message:disappear:progress, and live removal for BOTH
-// modes via the existing message:deleted broadcast — the same event every
-// other soft-delete path already uses.
+// across files). Covers: the explicit-open modal for both modes, the
+// sender's live progress/started ticks, live removal via the existing
+// message:deleted broadcast, and — the actual regression this file exists to
+// guard — that a message:deleted broadcast racing in right after a
+// last-look open can no longer hide the content that open already
+// delivered (see page.tsx's openDisappear / handleViewDisappear).
 
 const CONV_ID = "11111111-1111-1111-1111-111111111111";
 const ME_ID = "22222222-2222-2222-2222-222222222222";
@@ -72,6 +74,9 @@ class FakeSocket {
   }): void {
     this.dispatch(MESSAGE_EVENTS.DISAPPEAR_PROGRESS, payload);
   }
+  simulateDisappearStarted(payload: { messageId: string; conversationId: string; expiresAt: string }): void {
+    this.dispatch(MESSAGE_EVENTS.DISAPPEAR_STARTED, payload);
+  }
 }
 
 let fakeSocket: FakeSocket;
@@ -116,6 +121,12 @@ function makeMessage(overrides: Partial<Message>): Message {
   };
 }
 
+function deferred<T>() {
+  let resolve!: (v: T) => void;
+  const promise = new Promise<T>((res) => { resolve = res; });
+  return { promise, resolve };
+}
+
 class ResizeObserverStub {
   observe() {}
   unobserve() {}
@@ -156,8 +167,8 @@ async function renderPage(initialMessages: Message[] = []) {
   return view;
 }
 
-describe("ChatThreadPage — disappearing messages: views mode", () => {
-  it("tapping a locked card spends a look, reveals the body, and ticks the local view count", async () => {
+describe("ChatThreadPage — disappearing messages: views mode modal", () => {
+  it("tapping a locked card opens the modal with the revealed body", async () => {
     const locked = makeMessage({
       messageId: "msg-locked",
       body: null,
@@ -170,7 +181,7 @@ describe("ChatThreadPage — disappearing messages: views mode", () => {
 
     apiImpl = async (path, opts) => {
       if (path === "/api/messages/msg-locked/view" && opts?.method === "POST") {
-        return { consumed: false, viewCount: 1, viewLimit: 3, body: "peekaboo" };
+        return { mode: "views", consumed: false, viewCount: 1, viewLimit: 3, body: "peekaboo" };
       }
       throw new Error(`unexpected call: ${path}`);
     };
@@ -178,11 +189,134 @@ describe("ChatThreadPage — disappearing messages: views mode", () => {
     await user.click(screen.getByRole("button", { name: /Tap to view/ }));
 
     await waitFor(() => expect(screen.getByText("peekaboo")).toBeInTheDocument());
-    expect(screen.queryByRole("button", { name: /Tap to view/ })).not.toBeInTheDocument();
-    // 3 - 1 = 2 left, reflected in the small badge next to the revealed text.
-    expect(screen.getByText(/1\/3 opened/)).toBeInTheDocument();
+    // The card itself is still locked (this is the modal, not an inline reveal).
+    expect(screen.getByRole("button", { name: /Tap to view/ })).toBeInTheDocument();
+
+    // Closing the modal doesn't affect the card's own live viewCount tick.
+    await user.click(screen.getByLabelText("Close"));
+    await waitFor(() => expect(screen.queryByText("peekaboo")).not.toBeInTheDocument());
   });
 
+  it("REGRESSION: a message:deleted broadcast racing in right after the last-look open does not hide the content that open already delivered", async () => {
+    // This is exactly the mechanism behind the bug report: on the LAST look,
+    // the server emits message:deleted essentially concurrently with
+    // returning the HTTP response containing the revealed body. If the
+    // socket event were processed before the HTTP response resolved (or, as
+    // modeled here, arrives immediately after), a naive implementation that
+    // re-reads messagesRef[messageId].body for the modal would show nothing
+    // — the recipient's own successful last look would go unseen. The fix is
+    // that the modal displays a SNAPSHOT from the response, independent of
+    // messagesRef entirely.
+    const locked = makeMessage({
+      messageId: "msg-lastlook",
+      body: null,
+      disappear: { mode: "views", viewLimit: 1, viewCount: 0, expiresAt: null },
+    });
+    await renderPage([locked]);
+    const user = userEvent.setup();
+
+    const openGate = deferred<{ mode: string; consumed: boolean; viewCount: number; viewLimit: number; body: string }>();
+    apiImpl = async (path, opts) => {
+      if (path === "/api/messages/msg-lastlook/view" && opts?.method === "POST") return openGate.promise;
+      throw new Error(`unexpected call: ${path}`);
+    };
+
+    await user.click(screen.getByRole("button", { name: /Tap to view/ }));
+
+    // The live delete broadcast arrives BEFORE the HTTP response resolves —
+    // the exact ordering that would break a messagesRef-derived modal.
+    act(() => {
+      fakeSocket.simulateMessageDeleted({ messageId: "msg-lastlook", conversationId: CONV_ID });
+    });
+    // The card is gone / tombstoned now — confirms the race really did land
+    // ahead of the response, not just theoretically.
+    await waitFor(() => expect(screen.getByText("Message deleted")).toBeInTheDocument());
+
+    // NOW the HTTP response finally resolves with the content that was, in
+    // fact, successfully spent.
+    await act(async () => {
+      openGate.resolve({ mode: "views", consumed: true, viewCount: 1, viewLimit: 1, body: "the last look" });
+      await openGate.promise;
+    });
+
+    // The recipient must still see what they opened, despite the tombstone
+    // already having landed in the list.
+    await waitFor(() => expect(screen.getByText("the last look")).toBeInTheDocument());
+  });
+});
+
+describe("ChatThreadPage — disappearing messages: time mode modal", () => {
+  it("tapping a not-yet-started card opens the modal with the body and starts the clock", async () => {
+    const notStarted = makeMessage({
+      messageId: "msg-timed",
+      body: null,
+      disappear: { mode: "time", viewLimit: null, viewCount: 0, expiresAt: null },
+    });
+    await renderPage([notStarted]);
+    const user = userEvent.setup();
+
+    expect(await screen.findByText("Tap to open")).toBeInTheDocument();
+
+    const expiresAt = new Date(Date.now() + 5 * 60_000).toISOString();
+    apiImpl = async (path, opts) => {
+      if (path === "/api/messages/msg-timed/view" && opts?.method === "POST") {
+        return { mode: "time", body: "a timed secret", expiresAt };
+      }
+      throw new Error(`unexpected call: ${path}`);
+    };
+
+    await user.click(screen.getByText("Tap to open"));
+    await waitFor(() => expect(screen.getByText("a timed secret")).toBeInTheDocument());
+    expect(screen.getByText(/Disappears in 5m/)).toBeInTheDocument();
+
+    // Closing then reopening the card now shows "Tap to view · Xleft"
+    // instead of "Tap to open" — the clock visibly started.
+    await user.click(screen.getByLabelText("Close"));
+    await waitFor(() => expect(screen.getByText(/Tap to view · 5m left/)).toBeInTheDocument());
+  });
+
+  it("message:disappear:started ticks the sender's card live, without opening anything", async () => {
+    const mine = makeMessage({
+      messageId: "msg-mine-timed",
+      senderId: ME_ID,
+      body: null,
+      disappear: { mode: "time", viewLimit: null, viewCount: 0, expiresAt: null },
+    });
+    await renderPage([mine]);
+
+    expect(await screen.findByText("Waiting to be opened")).toBeInTheDocument();
+
+    act(() => {
+      fakeSocket.simulateDisappearStarted({
+        messageId: "msg-mine-timed",
+        conversationId: CONV_ID,
+        expiresAt: new Date(Date.now() + 60 * 60_000).toISOString(),
+      });
+    });
+
+    await waitFor(() => expect(screen.getByText(/Disappearing in 1h/)).toBeInTheDocument());
+  });
+
+  it("the existing message:deleted broadcast removes a swept time-mode message live, for either participant", async () => {
+    const timed = makeMessage({
+      messageId: "msg-swept",
+      senderId: ME_ID,
+      body: null,
+      disappear: { mode: "time", viewLimit: null, viewCount: 0, expiresAt: new Date(Date.now() + 60_000).toISOString() },
+    });
+    await renderPage([timed]);
+    expect(await screen.findByText(/Disappearing in/)).toBeInTheDocument();
+
+    act(() => {
+      fakeSocket.simulateMessageDeleted({ messageId: "msg-swept", conversationId: CONV_ID });
+    });
+
+    await waitFor(() => expect(screen.queryByText(/Disappearing in/)).not.toBeInTheDocument());
+    expect(await screen.findByText("Message deleted")).toBeInTheDocument();
+  });
+});
+
+describe("ChatThreadPage — disappearing messages: views-mode progress ticks the sender's card", () => {
   it("message:disappear:progress ticks the sender's status line live, without revealing any text", async () => {
     const mine = makeMessage({
       messageId: "msg-mine",
@@ -207,46 +341,5 @@ describe("ChatThreadPage — disappearing messages: views mode", () => {
     });
 
     await waitFor(() => expect(screen.getByText(/Opened 1\/2/)).toBeInTheDocument());
-  });
-
-  it("the existing message:deleted broadcast removes a consumed views-mode message from BOTH participants' views", async () => {
-    const locked = makeMessage({
-      messageId: "msg-consume",
-      senderId: ME_ID,
-      body: null,
-      disappear: { mode: "views", viewLimit: 1, viewCount: 0, expiresAt: null },
-    });
-    await renderPage([locked]);
-    expect(await screen.findByText("View once")).toBeInTheDocument();
-
-    act(() => {
-      fakeSocket.simulateMessageDeleted({ messageId: "msg-consume", conversationId: CONV_ID });
-    });
-
-    await waitFor(() => expect(screen.queryByText("View once")).not.toBeInTheDocument());
-    expect(await screen.findByText("Message deleted")).toBeInTheDocument();
-  });
-});
-
-describe("ChatThreadPage — disappearing messages: time mode", () => {
-  it("shows the body normally, plus a countdown indicator, and the sweep's message:deleted removes it live", async () => {
-    const timed = makeMessage({
-      messageId: "msg-timed",
-      body: "visible now",
-      disappear: { mode: "time", viewLimit: null, viewCount: 0, expiresAt: new Date(Date.now() + 5 * 60_000).toISOString() },
-    });
-    await renderPage([timed]);
-
-    expect(await screen.findByText("visible now", { selector: "div" })).toBeInTheDocument();
-    expect(screen.getByText("5m")).toBeInTheDocument();
-
-    // No manual refresh — the same broadcast every other soft-delete path
-    // uses removes it live for whoever's looking, sender or recipient.
-    act(() => {
-      fakeSocket.simulateMessageDeleted({ messageId: "msg-timed", conversationId: CONV_ID });
-    });
-
-    await waitFor(() => expect(screen.queryByText("visible now", { selector: "div" })).not.toBeInTheDocument());
-    expect(await screen.findByText("Message deleted")).toBeInTheDocument();
   });
 });

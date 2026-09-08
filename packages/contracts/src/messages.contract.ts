@@ -59,17 +59,25 @@ export const MessageEmbedSchema = Type.Object({
 export type MessageEmbed = Static<typeof MessageEmbedSchema>;
 
 // ── Disappearing messages ────────────────────────────────────────────────────
-// Two modes, mirroring the ephemeral-media pattern (media.contract.ts's
-// EphemeralSendSchema/EphemeralStateSchema) but for a TEXT message's body
-// instead of a media attachment:
+// Two modes, both gated behind the SAME explicit "tap the locked card, open a
+// modal" interaction as the ephemeral-media pattern (media.contract.ts's
+// EphemeralSendSchema/EphemeralStateSchema, mirrored by ephemeral-viewer.tsx)
+// — never an inline auto-reveal:
 //   - "views": Snapchat-style. `body` is withheld from every normal read path
 //     (GET list, message:new, idempotent replay) exactly like an ephemeral
 //     attachment's URL is withheld — the only way to read it is spending a
-//     look via POST /messages/:messageId/view. The message soft-deletes once
-//     viewCount reaches viewLimit.
-//   - "time": Signal-style. `body` is visible immediately like a normal
-//     message; the message soft-deletes itself once expiresAt passes, swept
-//     by the same worker tick as ephemeral media's cleanup.worker.ts.
+//     look via POST /messages/:messageId/view, which opens the modal. The
+//     message soft-deletes once viewCount reaches viewLimit.
+//   - "time": Signal-style, but the clock does NOT start at send. `body` is
+//     ALSO withheld until the recipient's first explicit open — that same
+//     open is what starts the clock: ttlSeconds (the sender's chosen
+//     duration) is persisted at send, but expiresAt stays null — and the
+//     message waits indefinitely — until POST /messages/:messageId/view sets
+//     firstOpenedAt and computes expiresAt = firstOpenedAt + ttlSeconds.
+//     Reopening afterward is a no-op on the clock: it just re-reads the
+//     already-computed expiresAt. Swept once wall-clock expiresAt passes, by
+//     the same worker tick as ephemeral media's cleanup.worker.ts — a
+//     never-opened message (expiresAt still null) is never a sweep candidate.
 export const DisappearSendSchema = Type.Union([
   Type.Object({ mode: Type.Literal("views"), viewLimit: Type.Integer({ minimum: 1, maximum: 5 }) }),
   Type.Object({ mode: Type.Literal("time"), ttlSeconds: Type.Integer({ minimum: 5, maximum: 604800 }) }), // 5s..7d
@@ -78,6 +86,9 @@ export type DisappearSend = Static<typeof DisappearSendSchema>;
 
 // Wire state embedded in MessageSchema.disappear. viewLimit/expiresAt are
 // mutually exclusive with the mode, mirroring EphemeralState's shape.
+// expiresAt is null for "views" mode always, and for "time" mode until the
+// recipient's first explicit open — a null expiresAt in "time" mode is what
+// tells the client to render no countdown at all (see DisappearTimer).
 export const DisappearStateSchema = Type.Object({
   mode:      Type.Union([Type.Literal("views"), Type.Literal("time")]),
   viewLimit: Type.Union([Type.Integer(), Type.Null()]),
@@ -86,15 +97,29 @@ export const DisappearStateSchema = Type.Object({
 });
 export type DisappearState = Static<typeof DisappearStateSchema>;
 
-// Response of POST /api/messages/:messageId/view. `body` is the freshly-spent
-// look's text, omitted once the message is consumed (mirrors MediaViewResponse).
-export const MessageViewResponseSchema = Type.Object({
-  consumed:  Type.Boolean(),
-  viewCount: Type.Integer(),
-  viewLimit: Type.Integer(),
-  body:      Type.Optional(Type.String()),
-});
-export type MessageViewResponse = Static<typeof MessageViewResponseSchema>;
+// Response of POST /api/messages/:messageId/view — the single explicit-open
+// endpoint for BOTH modes (the sender is forbidden from calling it in either
+// case). A discriminated union since the two modes' semantics don't overlap:
+// "views" spends a look and may consume the budget; "time" starts (or, on a
+// reopen, just re-reads) the clock and never consumes anything on its own.
+export const MessageOpenResponseSchema = Type.Union([
+  Type.Object({
+    mode:      Type.Literal("views"),
+    consumed:  Type.Boolean(),
+    viewCount: Type.Integer(),
+    viewLimit: Type.Integer(),
+    // Omitted once already consumed before this call — no further mint.
+    body:      Type.Optional(Type.String()),
+  }),
+  Type.Object({
+    mode:      Type.Literal("time"),
+    body:      Type.String(),
+    // The effective deadline — freshly computed on a first open, or the same
+    // one re-read on any subsequent reopen.
+    expiresAt: Type.String({ format: "date-time" }),
+  }),
+]);
+export type MessageOpenResponse = Static<typeof MessageOpenResponseSchema>;
 
 export const MessageSchema = Type.Object({
   messageId:      Type.String({ format: "uuid" }),
@@ -159,6 +184,7 @@ export const MESSAGE_EVENTS = {
   PINNED:       "message:pinned",
   UNPINNED:     "message:unpinned",
   DISAPPEAR_PROGRESS: "message:disappear:progress",
+  DISAPPEAR_STARTED:  "message:disappear:started",
 } as const;
 export type MessageEventName = (typeof MESSAGE_EVENTS)[keyof typeof MESSAGE_EVENTS];
 
@@ -206,4 +232,16 @@ export type MessageDisappearProgressEvent = {
   viewLimit:      number;
   consumed:       boolean;
   viewedAt:       string;
+};
+
+// Emitted once, to every participant, the moment a "time"-mode message's
+// clock actually starts — i.e. only on the recipient's FIRST explicit open,
+// never on a reopen (the route only sets firstOpenedAt/expiresAt once; a
+// reopen re-reads the same values and re-emits nothing). Lets any other live
+// listener — the sender's screen, the recipient's other devices — start
+// ticking the countdown immediately instead of waiting for a refetch.
+export type MessageDisappearStartedEvent = {
+  messageId:      string;
+  conversationId: string;
+  expiresAt:      string;
 };
