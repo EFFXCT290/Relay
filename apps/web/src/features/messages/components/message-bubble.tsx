@@ -9,6 +9,7 @@ import { ImageGrid } from "./image-grid";
 import { VoiceBubble } from "./voice-bubble";
 import { VideoBubble } from "./video-bubble";
 import { EphemeralMediaCard } from "./ephemeral-media-card";
+import { DisappearCard, DisappearTimer } from "./disappear-card";
 import type { Message, ImageAttachment, VoiceAttachment, VideoAttachment } from "@relay/contracts";
 
 export type { Message };  // re-export so existing consumers still resolve through this module
@@ -38,6 +39,7 @@ type Props = {
   onDismiss?: () => void;
   onOpenLightbox?: (attachments: ImageAttachment[], index: number) => void;
   onViewEphemeral?: (attachment: ImageAttachment | VideoAttachment) => void;
+  onViewDisappear?: (messageId: string) => void;
   onRequestTranscript?: (messageId: string, attachmentId: string) => Promise<void> | void;
 };
 
@@ -58,6 +60,7 @@ export function MessageBubble({
   onDismiss,
   onOpenLightbox,
   onViewEphemeral,
+  onViewDisappear,
   onRequestTranscript,
 }: Props) {
   const [pickerOpen, setPickerOpen] = useState(false);
@@ -340,23 +343,31 @@ export function MessageBubble({
               );
             })()}
             {message.embed && <EmbedCard embed={message.embed} isMine={isMine} />}
-            {/* Hide the bubble when the entire body is just the URL — show only the embed card */}
-            {message.body && !(message.embed && message.body.trim() === message.embed.url) && (
-              <div
-                className={cn(
-                  "rounded-[22px] px-3.5 py-2.5 text-[15px] leading-[21px]",
-                  isMine ? "rounded-br-[6px]" : "rounded-bl-[6px]",
-                )}
-                style={{
-                  background: isMine ? "var(--color-bubble-sent)" : "var(--color-bubble-received)",
-                  color: isMine ? "var(--color-bubble-sent-text)" : "var(--color-text)",
-                  border: isMine ? undefined : "1px solid rgba(255,255,255,0.04)",
-                  whiteSpace: "pre-wrap",
-                  wordBreak: "break-word",
-                }}
-              >
-                {message.body}
-              </div>
+            {/* Disappearing "views" mode replaces the plain text bubble entirely with
+                a locked/revealed card — reuses the ephemeral-media reveal pattern.
+                "time" mode falls through to the normal bubble below (visible now,
+                expires later — see DisappearTimer near the meta row). */}
+            {message.disappear?.mode === "views" ? (
+              <DisappearCard message={message} isMine={isMine} onView={onViewDisappear} />
+            ) : (
+              /* Hide the bubble when the entire body is just the URL — show only the embed card */
+              message.body && !(message.embed && message.body.trim() === message.embed.url) && (
+                <div
+                  className={cn(
+                    "rounded-[22px] px-3.5 py-2.5 text-[15px] leading-[21px]",
+                    isMine ? "rounded-br-[6px]" : "rounded-bl-[6px]",
+                  )}
+                  style={{
+                    background: isMine ? "var(--color-bubble-sent)" : "var(--color-bubble-received)",
+                    color: isMine ? "var(--color-bubble-sent-text)" : "var(--color-text)",
+                    border: isMine ? undefined : "1px solid rgba(255,255,255,0.04)",
+                    whiteSpace: "pre-wrap",
+                    wordBreak: "break-word",
+                  }}
+                >
+                  {message.body}
+                </div>
+              )
             )}
           </div>
           {!isMine && (
@@ -389,6 +400,9 @@ export function MessageBubble({
         />
 
         <div className="flex items-center gap-1.5 px-1">
+          {message.disappear?.mode === "time" && message.disappear.expiresAt && (
+            <DisappearTimer expiresAt={message.disappear.expiresAt} />
+          )}
           {message.isEdited && (
             <span
               className="text-[10px] text-[var(--color-text-muted)]"

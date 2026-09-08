@@ -30,7 +30,7 @@ import {
 } from "@/frontend-core/upload-session";
 import { ImageLightbox, type LightboxState } from "@/features/messages/components/lightbox/image-lightbox";
 import { EphemeralViewer } from "@/features/messages/components/ephemeral-viewer";
-import { ACK_EVENT, MEDIA_EVENTS, VOICE_EVENTS, PRESENCE_EVENTS, SYNC_EVENTS, TYPING_EVENTS, USER_EVENTS, USER_NICKNAME_EVENTS, type MediaReadyEvent, type MediaProcessedEvent, type MediaViewedEvent, type VoiceTranscriptReadyEvent, type ImageAttachment, type VideoAttachment, type MediaViewResponse, type DeliveryMode, type EphemeralSend, type PinnedMessage, type PresenceSyncResponse, type ReplayResponse, type TypingSyncResponse, type UserProfileUpdatedEvent, type UserNicknameSharedUpdatedEvent } from "@relay/contracts";
+import { ACK_EVENT, MEDIA_EVENTS, VOICE_EVENTS, PRESENCE_EVENTS, SYNC_EVENTS, TYPING_EVENTS, USER_EVENTS, USER_NICKNAME_EVENTS, MESSAGE_EVENTS, type MediaReadyEvent, type MediaProcessedEvent, type MediaViewedEvent, type VoiceTranscriptReadyEvent, type ImageAttachment, type VideoAttachment, type MediaViewResponse, type DeliveryMode, type EphemeralSend, type DisappearSend, type MessageViewResponse, type MessageDisappearProgressEvent, type PinnedMessage, type PresenceSyncResponse, type ReplayResponse, type TypingSyncResponse, type UserProfileUpdatedEvent, type UserNicknameSharedUpdatedEvent } from "@relay/contracts";
 import { formatLastSeen } from "@/frontend-core/format-presence";
 import { SpotifyBadge } from "@/features/spotify/spotify-badge";
 import { ContactInfoModal } from "@/features/conversations/components/contact-info-modal";
@@ -354,6 +354,9 @@ export default function ChatThreadPage() {
         messagesRef.current[message.messageId] = {
           ...messagesRef.current[ourTempId],
           ...message,
+          // A "views"-mode disappear echo also nulls body — same reasoning
+          // as handleSend's HTTP swap: keep what the sender actually typed.
+          body:       message.body ?? messagesRef.current[ourTempId]?.body ?? null,
           reactions:  message.reactions  ?? {},
           myReaction: message.myReaction ?? null,
           readBy:     message.readBy     ?? [],
@@ -805,6 +808,21 @@ export default function ChatThreadPage() {
       }
     };
 
+    // A look was spent on a "views"-mode disappearing message — ticks the
+    // sender's (and other devices') viewCount live so a locked/status card
+    // reflects "Opened X/N" without a refetch. The eventual soft-delete, once
+    // the budget is spent, arrives separately via the existing message:deleted
+    // handler above — this event never itself removes the message.
+    const onMessageDisappearProgress = (payload: MessageDisappearProgressEvent) => {
+      const m = messagesRef.current[payload.messageId];
+      if (!m?.disappear) return;
+      messagesRef.current[payload.messageId] = {
+        ...m,
+        disappear: { ...m.disappear, viewCount: payload.viewCount },
+      };
+      rerender();
+    };
+
     const onVoiceTranscript = (payload: VoiceTranscriptReadyEvent) => {
       const m = messagesRef.current[payload.messageId];
       if (!m?.attachments) return;
@@ -838,6 +856,7 @@ export default function ChatThreadPage() {
     socket.on(MEDIA_EVENTS.READY, onMediaReady);
     socket.on(MEDIA_EVENTS.PROCESSED, onMediaProcessed);
     socket.on(MEDIA_EVENTS.VIEWED, onMediaViewed);
+    socket.on(MESSAGE_EVENTS.DISAPPEAR_PROGRESS, onMessageDisappearProgress);
     socket.on(VOICE_EVENTS.TRANSCRIPT_READY, onVoiceTranscript);
 
     return () => {
@@ -874,6 +893,7 @@ export default function ChatThreadPage() {
       socket.off(MEDIA_EVENTS.READY, onMediaReady);
       socket.off(MEDIA_EVENTS.PROCESSED, onMediaProcessed);
       socket.off(MEDIA_EVENTS.VIEWED, onMediaViewed);
+      socket.off(MESSAGE_EVENTS.DISAPPEAR_PROGRESS, onMessageDisappearProgress);
       socket.off(VOICE_EVENTS.TRANSCRIPT_READY, onVoiceTranscript);
     };
   }, [conversationId]);
@@ -946,13 +966,22 @@ export default function ChatThreadPage() {
   }, [loadOlder]);
 
   const handleSend = useCallback(
-    async (body: string, replyToId?: string | null) => {
+    async (body: string, replyToId?: string | null, disappear?: DisappearSend) => {
       const tempId          = crypto.randomUUID();
       const clientMessageId = crypto.randomUUID();
 
       // Optimistic: show the message instantly so there's no gap between
       // Enter and the message appearing. Swapped out for the real row once
-      // the server responds.
+      // the server responds. For a "views"-mode disappear, the sender's own
+      // optimistic body is what DisappearCard renders as "revealed" — the
+      // server intentionally nulls body even in the sender's own create
+      // response (see message.routes.ts), so the swap below must not let
+      // that null clobber what the user just typed.
+      const optimisticDisappear = disappear
+        ? disappear.mode === "views"
+          ? { mode: "views" as const, viewLimit: disappear.viewLimit, viewCount: 0, expiresAt: null }
+          : { mode: "time" as const, viewLimit: null, viewCount: 0, expiresAt: new Date(Date.now() + disappear.ttlSeconds * 1000).toISOString() }
+        : null;
       const optimistic: Message = {
         messageId:      tempId,
         conversationId,
@@ -971,6 +1000,7 @@ export default function ChatThreadPage() {
         readBy:     [],
         deliveredAt: null,
         createdAt:  new Date().toISOString(),
+        disappear:  optimisticDisappear,
       };
       stickToBottomRef.current = true;
       // Register the clientMessageId → tempId mapping BEFORE inserting the
@@ -984,7 +1014,7 @@ export default function ChatThreadPage() {
       try {
         const sent = await api<Message>(
           `/api/conversations/${conversationId}/messages`,
-          { method: "POST", body: { body, ...(replyToId ? { replyToId } : {}), clientMessageId } },
+          { method: "POST", body: { body, ...(replyToId ? { replyToId } : {}), clientMessageId, ...(disappear ? { disappear } : {}) } },
         );
         // Swap optimistic placeholder → real message.
         // Case A (common): HTTP response beat the WS echo — tempId is still in
@@ -996,6 +1026,10 @@ export default function ChatThreadPage() {
           messagesRef.current[sent.messageId] = {
             ...messagesRef.current[tempId],
             ...sent,
+            // See the comment above: the server nulls body for a "views"-mode
+            // send even in the sender's own response — keep the optimistic
+            // plaintext rather than let that null hide what was just typed.
+            body:       sent.body ?? messagesRef.current[tempId]?.body ?? null,
             reactions:  sent.reactions  ?? {},
             myReaction: sent.myReaction ?? null,
           };
@@ -1227,6 +1261,32 @@ export default function ChatThreadPage() {
     },
     [],
   );
+
+  // Recipient taps a locked "views"-mode disappearing message. POST /view
+  // spends a look and returns the text; applied directly here (mirrors
+  // handleReact's "apply the response, don't wait on a socket echo" pattern)
+  // so the reveal feels instant. The eventual consumed→soft-deleted removal
+  // is left to the existing message:deleted handler — that broadcast reaches
+  // this same socket too, since the tapper is a member of the conversation
+  // room, so no separate local "mark deleted" step is needed here.
+  const handleViewDisappear = useCallback(async (messageId: string) => {
+    try {
+      const res = await api<MessageViewResponse>(`/api/messages/${messageId}/view`, { method: "POST" });
+      const m = messagesRef.current[messageId];
+      if (m?.disappear && res.body != null) {
+        messagesRef.current[messageId] = {
+          ...m,
+          body:      res.body,
+          disappear: { ...m.disappear, viewCount: res.viewCount },
+        };
+        setRenderTick((x) => x + 1);
+      } else if (res.body == null) {
+        setError("This message has already been viewed.");
+      }
+    } catch {
+      setError("Couldn't open this message. Try again.");
+    }
+  }, []);
 
   const handleRequestTranscript = useCallback(
     (messageId: string, attachmentId: string): Promise<void> =>
@@ -1628,6 +1688,7 @@ export default function ChatThreadPage() {
                             setLightbox({ images: atts, index: idx })
                           }
                           onViewEphemeral={handleViewEphemeral}
+                          onViewDisappear={handleViewDisappear}
                           onRequestTranscript={handleRequestTranscript}
                         />
                       </div>

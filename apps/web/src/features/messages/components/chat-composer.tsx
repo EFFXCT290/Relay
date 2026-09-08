@@ -2,10 +2,11 @@
 
 import { useEffect, useRef, useState } from "react";
 import { Camera, Check, Mic, Plus, Send, Trash2, X } from "lucide-react";
-import { TYPING_DEBOUNCE_MS, type DeliveryMode, type EphemeralSend } from "@relay/contracts";
+import { TYPING_DEBOUNCE_MS, type DeliveryMode, type EphemeralSend, type DisappearSend } from "@relay/contracts";
 import type { Message } from "./message-bubble";
 import { useVoiceRecorder } from "../hooks/use-voice-recorder";
 import { MediaComposerModal } from "./media-composer-modal";
+import { DisappearPicker } from "./disappear-picker";
 
 // Discard takes below this — a stray tap rather than a deliberate recording.
 const MIN_VOICE_MS = 700;
@@ -21,7 +22,7 @@ function fmtElapsed(ms: number): string {
 }
 
 type Props = {
-  onSend: (body: string, replyToId?: string | null) => Promise<void> | void;
+  onSend: (body: string, replyToId?: string | null, disappear?: DisappearSend) => Promise<void> | void;
   onUpdate?: (messageId: string, body: string) => Promise<void> | void;
   onTypingChange?: (isTyping: boolean) => void;
   onSendImages?: (files: File[], deliveryMode: DeliveryMode, ephemeral?: EphemeralSend) => void;
@@ -56,6 +57,9 @@ export function ChatComposer({
   const [staged, setStaged] = useState<File[] | null>(null);
   // How many picks were dropped by the MAX_IMAGES_PER_SEND cap — shown in the modal.
   const [overflow, setOverflow] = useState(0);
+  // Disappear-on-send choice — a ONE-SHOT per-message pick, reset to null
+  // (off) after every send. Never persisted as a per-conversation setting.
+  const [disappear, setDisappear] = useState<DisappearSend | null>(null);
   const recorder = useVoiceRecorder();
   const taRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -120,7 +124,10 @@ export function ChatComposer({
       if (editing) {
         await onUpdate?.(editing.messageId, body);
       } else {
-        await onSend(body, replyTo?.messageId ?? null);
+        await onSend(body, replyTo?.messageId ?? null, disappear ?? undefined);
+        // One-shot: back to "off" for the next message regardless of what
+        // was armed for this one.
+        setDisappear(null);
       }
       setValue("");
     } finally {
@@ -216,6 +223,8 @@ export function ChatComposer({
         >
           <Plus className="h-[18px] w-[18px]" />
         </button>
+
+        {!editing && <DisappearPicker value={disappear} onChange={setDisappear} />}
 
         <div
           className="flex flex-1 items-end gap-2 rounded-[20px] border bg-[var(--color-panel)] px-3 py-1.5"
