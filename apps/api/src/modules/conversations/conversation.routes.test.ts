@@ -657,3 +657,160 @@ describe("nickname fields — per-requesting-user isolation across list + detail
     );
   });
 });
+
+describe("lastMessage.preview — disappearing messages must never leak through the passive list read", () => {
+  let app: Awaited<ReturnType<typeof buildTestApp>>;
+  const createdUserIds: string[] = [];
+  const createdConversationIds: string[] = [];
+  const createdMessageIds: string[] = [];
+
+  before(async () => {
+    app = await buildTestApp();
+  });
+
+  after(async () => {
+    const prisma = app.prisma;
+    await prisma.messageDisappearState.deleteMany({ where: { messageId: { in: createdMessageIds } } });
+    await prisma.message.deleteMany({ where: { id: { in: createdMessageIds } } });
+    await prisma.userNickname.deleteMany({ where: { ownerId: { in: createdUserIds } } });
+    await prisma.conversation.deleteMany({ where: { id: { in: createdConversationIds } } });
+    await prisma.user.deleteMany({ where: { id: { in: createdUserIds } } });
+    await app.close();
+  });
+
+  async function makeAcceptedConversation(userAId: string, userBId: string) {
+    const conversation = await app.prisma.conversation.create({ data: {} });
+    createdConversationIds.push(conversation.id);
+    await app.prisma.participant.createMany({
+      data: [
+        { userId: userAId, conversationId: conversation.id, acceptedAt: new Date() },
+        { userId: userBId, conversationId: conversation.id, acceptedAt: new Date() },
+      ],
+    });
+    return conversation.id;
+  }
+
+  // Sets up a message directly via Prisma (not the send route) for full
+  // control over disappear state — viewCount/firstOpenedAt combinations the
+  // route's normal create flow can't produce on demand.
+  async function makeDisappearingMessage(
+    conversationId: string,
+    senderId: string,
+    body: string,
+    disappear: { mode: "VIEWS" | "TIME"; viewLimit?: number; viewCount?: number; ttlSeconds?: number; firstOpenedAt?: Date },
+  ) {
+    const message = await app.prisma.message.create({
+      data: { conversationId, senderId, type: "TEXT", body },
+    });
+    createdMessageIds.push(message.id);
+    await app.prisma.messageDisappearState.create({
+      data: {
+        messageId: message.id,
+        mode: disappear.mode,
+        viewLimit: disappear.viewLimit ?? null,
+        viewCount: disappear.viewCount ?? 0,
+        ttlSeconds: disappear.ttlSeconds ?? null,
+        firstOpenedAt: disappear.firstOpenedAt ?? null,
+      },
+    });
+    return message.id;
+  }
+
+  function getConversations(callerId: string) {
+    return app.inject({ method: "GET", url: "/api/conversations", headers: { cookie: cookieFor(callerId) } });
+  }
+  function getRequests(callerId: string) {
+    return app.inject({ method: "GET", url: "/api/conversations/requests", headers: { cookie: cookieFor(callerId) } });
+  }
+
+  it("a never-opened VIEWS-mode message shows the redacted placeholder, not the real body", async () => {
+    const [a, b] = await Promise.all([createUser(app.prisma, "a"), createUser(app.prisma, "b")]);
+    createdUserIds.push(a.id, b.id);
+    const conversationId = await makeAcceptedConversation(a.id, b.id);
+    await makeDisappearingMessage(conversationId, a.id, "the real secret text", { mode: "VIEWS", viewLimit: 3, viewCount: 0 });
+
+    const res = await getConversations(b.id);
+    const body = res.json() as { conversations: ConversationListItem[] };
+    assert.equal(body.conversations[0]!.lastMessage!.preview, `${a.username} sent a disappearing message`);
+    assert.doesNotMatch(body.conversations[0]!.lastMessage!.preview ?? "", /secret/, "the real body must never appear in the preview");
+  });
+
+  it("a PARTIALLY-consumed VIEWS-mode message (opened once, budget remaining) STAYS redacted — no partial reveal for VIEWS", async () => {
+    const [a, b] = await Promise.all([createUser(app.prisma, "a"), createUser(app.prisma, "b")]);
+    createdUserIds.push(a.id, b.id);
+    const conversationId = await makeAcceptedConversation(a.id, b.id);
+    await makeDisappearingMessage(conversationId, a.id, "still secret after one look", { mode: "VIEWS", viewLimit: 3, viewCount: 1 });
+
+    const res = await getConversations(b.id);
+    const body = res.json() as { conversations: ConversationListItem[] };
+    assert.equal(body.conversations[0]!.lastMessage!.preview, `${a.username} sent a disappearing message`);
+  });
+
+  it("a never-opened TIME-mode message (firstOpenedAt null) shows the redacted placeholder", async () => {
+    const [a, b] = await Promise.all([createUser(app.prisma, "a"), createUser(app.prisma, "b")]);
+    createdUserIds.push(a.id, b.id);
+    const conversationId = await makeAcceptedConversation(a.id, b.id);
+    await makeDisappearingMessage(conversationId, a.id, "not opened yet", { mode: "TIME", ttlSeconds: 3600 });
+
+    const res = await getConversations(b.id);
+    const body = res.json() as { conversations: ConversationListItem[] };
+    assert.equal(body.conversations[0]!.lastMessage!.preview, `${a.username} sent a disappearing message`);
+  });
+
+  it("a TIME-mode message that HAS been opened (firstOpenedAt set) shows the real preview again", async () => {
+    const [a, b] = await Promise.all([createUser(app.prisma, "a"), createUser(app.prisma, "b")]);
+    createdUserIds.push(a.id, b.id);
+    const conversationId = await makeAcceptedConversation(a.id, b.id);
+    await makeDisappearingMessage(conversationId, a.id, "now visible after opening", {
+      mode: "TIME",
+      ttlSeconds: 3600,
+      firstOpenedAt: new Date(),
+    });
+
+    const res = await getConversations(b.id);
+    const body = res.json() as { conversations: ConversationListItem[] };
+    assert.equal(body.conversations[0]!.lastMessage!.preview, "now visible after opening");
+  });
+
+  it("uses the VIEWER's own nickname for the sender in the placeholder, when one is set", async () => {
+    const [a, b] = await Promise.all([createUser(app.prisma, "a"), createUser(app.prisma, "b")]);
+    createdUserIds.push(a.id, b.id);
+    const conversationId = await makeAcceptedConversation(a.id, b.id);
+    await app.prisma.userNickname.create({ data: { ownerId: b.id, targetUserId: a.id, nickname: "Boss", sharedWithTarget: false } });
+    await makeDisappearingMessage(conversationId, a.id, "secret", { mode: "VIEWS", viewLimit: 1, viewCount: 0 });
+
+    const res = await getConversations(b.id);
+    const body = res.json() as { conversations: ConversationListItem[] };
+    assert.equal(body.conversations[0]!.lastMessage!.preview, "Boss sent a disappearing message");
+  });
+
+  it("a normal (non-disappearing) message is unaffected — real preview as always", async () => {
+    const [a, b] = await Promise.all([createUser(app.prisma, "a"), createUser(app.prisma, "b")]);
+    createdUserIds.push(a.id, b.id);
+    const conversationId = await makeAcceptedConversation(a.id, b.id);
+    const message = await app.prisma.message.create({ data: { conversationId, senderId: a.id, type: "TEXT", body: "ordinary message" } });
+    createdMessageIds.push(message.id);
+
+    const res = await getConversations(b.id);
+    const body = res.json() as { conversations: ConversationListItem[] };
+    assert.equal(body.conversations[0]!.lastMessage!.preview, "ordinary message");
+  });
+
+  it("GET /conversations/requests redacts identically (shares the same preview logic)", async () => {
+    const [a, b] = await Promise.all([createUser(app.prisma, "a"), createUser(app.prisma, "b")]);
+    createdUserIds.push(a.id, b.id);
+    const conversation = await app.prisma.conversation.create({ data: {} });
+    createdConversationIds.push(conversation.id);
+    await app.prisma.participant.createMany({
+      data: [
+        { userId: a.id, conversationId: conversation.id, acceptedAt: new Date() }, // a: implicit creator/accepted
+        { userId: b.id, conversationId: conversation.id, acceptedAt: null },       // b: pending request
+      ],
+    });
+    await makeDisappearingMessage(conversation.id, a.id, "secret request preview", { mode: "VIEWS", viewLimit: 1, viewCount: 0 });
+
+    const res = await getRequests(b.id);
+    const body = res.json() as { requests: ConversationListItem[] };
+    assert.equal(body.requests[0]!.lastMessage!.preview, `${a.username} sent a disappearing message`);
+  });
+});

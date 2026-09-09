@@ -203,4 +203,49 @@ describe("POST .../messages fans out to both notification channels", () => {
     assert.equal(discordCalls.length, 0, "discord must be skipped when NOTIFICATION_PROVIDER excludes it");
     assert.equal(pushCalls.length, 1, "push must still fire when only discord is excluded");
   });
+
+  it("a disappearing message passes isDisappearing:true and the recipient's own nickname override to both channels — body still redacted to null", async (t) => {
+    const discordCalls: unknown[] = [];
+    const pushCalls: unknown[] = [];
+    t.mock.module(new URL("./services/discord-notify.ts", import.meta.url).href, {
+      namedExports: { maybeNotifyDiscord: async (opts: unknown) => { discordCalls.push(opts); } },
+    });
+    t.mock.module(new URL("./services/push-notify.ts", import.meta.url).href, {
+      namedExports: { maybeNotifyPush: async (_fastify: unknown, opts: unknown) => { pushCalls.push(opts); } },
+    });
+
+    const messageRoutes = await freshMessageRoutes();
+    const app = await buildTestApp(messageRoutes);
+    apps.push(app);
+
+    const [a, b] = await Promise.all([createUser(app.prisma, "a"), createUser(app.prisma, "b")]);
+    createdUserIds.push(a.id, b.id);
+    const conversationId = await makeAcceptedConversation(app, a.id, b.id);
+    createdConversationIds.push(conversationId);
+    // b's own private nickname for a — should surface in senderDisplayNames
+    // keyed by b's userId, per the per-recipient/per-viewer nickname rule.
+    await app.prisma.userNickname.create({ data: { ownerId: b.id, targetUserId: a.id, nickname: "Boss", sharedWithTarget: false } });
+
+    const res = await app.inject({
+      method: "POST",
+      url: `/api/conversations/${conversationId}/messages`,
+      headers: { cookie: cookieFor(a.id), "content-type": "application/json" },
+      payload: { body: "this text must never leak", disappear: { mode: "views", viewLimit: 1 } },
+    });
+    assert.equal(res.statusCode, 201);
+
+    await sleep(200);
+
+    assert.equal(discordCalls.length, 1);
+    const discordOpts = discordCalls[0] as Record<string, unknown>;
+    assert.equal(discordOpts.body, null, "body must be redacted before it ever reaches the notify layer");
+    assert.equal(discordOpts.isDisappearing, true);
+    assert.equal((discordOpts.senderDisplayNames as Map<string, string>).get(b.id), "Boss");
+
+    assert.equal(pushCalls.length, 1);
+    const pushOpts = pushCalls[0] as Record<string, unknown>;
+    assert.equal(pushOpts.body, null, "body must be redacted before it ever reaches the notify layer");
+    assert.equal(pushOpts.isDisappearing, true);
+    assert.equal((pushOpts.senderDisplayNames as Map<string, string>).get(b.id), "Boss");
+  });
 });

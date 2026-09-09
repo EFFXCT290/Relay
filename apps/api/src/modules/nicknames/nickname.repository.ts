@@ -45,4 +45,17 @@ export class NicknameRepository {
       where: { targetUserId, ownerId: { in: ownerIds }, sharedWithTarget: true },
     });
   }
+
+  // Batched "each of these owners' own private nickname for ONE fixed
+  // target" — the mirror of findManyByOwner (one owner, many targets). Used
+  // to resolve a sender's per-recipient display name for disappearing-
+  // message notification placeholders: no sharedWithTarget filter, same as
+  // findManyByOwner — a private, unshared nickname still governs what its
+  // OWNER sees.
+  findManyByTarget(ownerIds: string[], targetUserId: string): Promise<UserNickname[]> {
+    if (ownerIds.length === 0) return Promise.resolve([]);
+    return this.prisma.userNickname.findMany({
+      where: { targetUserId, ownerId: { in: ownerIds } },
+    });
+  }
 }

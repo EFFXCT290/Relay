@@ -194,4 +194,83 @@ describe("maybeNotifyPush() — real Postgres", () => {
     const payload = (pushCalls[0]!.data as { payload: { body: string } }).payload;
     assert.equal(payload.body, "📷 Image");
   });
+
+  // Regression: the caller (message.routes.ts) already redacted `body` to
+  // null for a disappearing message before this ever ran, but previewFor()'s
+  // own fallback for a null TEXT body is the generic "(message)" label —
+  // wrong wording for this specific case, not a content leak. isDisappearing
+  // picks the sender-aware wording instead.
+  it("a disappearing message (body already redacted to null by the caller) uses the sender-aware placeholder, not the generic '(message)' label", async () => {
+    const offline = await createUser(app.prisma, "offline", true);
+    createdUserIds.push(offline.id);
+
+    const { pushCalls } = await withPushCapture(async (pushCalls) => {
+      await maybeNotifyPush(app as never, {
+        senderUsername: "alice",
+        body: null,
+        messageType: "TEXT",
+        conversationId: "conv-1",
+        recipientIds: [offline.id],
+        onlineIds: [],
+        isDisappearing: true,
+        log,
+      });
+      await waitForPushCount(pushCalls, 1);
+    });
+
+    const payload = (pushCalls[0]!.data as { payload: { body: string } }).payload;
+    assert.equal(payload.body, "alice sent a disappearing message");
+  });
+
+  it("falls back to senderUsername for a recipient with no nickname override in senderDisplayNames", async () => {
+    const offline = await createUser(app.prisma, "offline", true);
+    createdUserIds.push(offline.id);
+
+    const { pushCalls } = await withPushCapture(async (pushCalls) => {
+      await maybeNotifyPush(app as never, {
+        senderUsername: "alice",
+        body: null,
+        messageType: "TEXT",
+        conversationId: "conv-1",
+        recipientIds: [offline.id],
+        onlineIds: [],
+        isDisappearing: true,
+        senderDisplayNames: new Map(), // no entry for this recipient
+        log,
+      });
+      await waitForPushCount(pushCalls, 1);
+    });
+
+    const payload = (pushCalls[0]!.data as { payload: { body: string } }).payload;
+    assert.equal(payload.body, "alice sent a disappearing message");
+  });
+
+  it("two offline recipients with DIFFERENT nicknames for the same sender each get their own personalized placeholder — nicknames are per-viewer", async () => {
+    const [r1, r2] = await Promise.all([
+      createUser(app.prisma, "r1", true),
+      createUser(app.prisma, "r2", true),
+    ]);
+    createdUserIds.push(r1.id, r2.id);
+
+    const { pushCalls } = await withPushCapture(async (pushCalls) => {
+      await maybeNotifyPush(app as never, {
+        senderUsername: "alice",
+        body: null,
+        messageType: "TEXT",
+        conversationId: "conv-1",
+        recipientIds: [r1.id, r2.id],
+        onlineIds: [],
+        isDisappearing: true,
+        senderDisplayNames: new Map([[r1.id, "Boss"], [r2.id, "Ali"]]),
+        log,
+      });
+      await waitForPushCount(pushCalls, 2);
+    });
+
+    const byRecipient = new Map(
+      pushCalls.map((c) => [(c.data as { userId: string }).userId, (c.data as { payload: { body: string } }).payload.body]),
+    );
+    assert.equal(byRecipient.get(r1.id), "Boss sent a disappearing message");
+    assert.equal(byRecipient.get(r2.id), "Ali sent a disappearing message");
+  });
 });

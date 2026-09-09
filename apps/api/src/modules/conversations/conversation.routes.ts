@@ -22,6 +22,35 @@ const ParticipantSchema = Type.Object({
   nickname:   Type.Optional(Type.Union([Type.String(), Type.Null()])),
 });
 
+// A disappearing message's text must never leak through the conversation
+// list's passive preview — a list row isn't an explicit "open" and
+// shouldn't get to reveal content for free (mirrors message.routes.ts's
+// notifyBody redaction for push/Discord, and visibleBody()'s own-read
+// gating for the message list itself). Mode-specific:
+//   - VIEWS: redacted for the message's entire life. There's no partial
+//     reveal — visibleBody() already treats VIEWS as permanently withheld
+//     from every normal read ("every read spends a look"), and a list
+//     preview is exactly the kind of read that must never spend one.
+//   - TIME: redacted only until the recipient's first explicit open
+//     (firstOpenedAt null) — once opened, normal preview rules resume,
+//     mirroring visibleBody()'s identical rule for the message list.
+function isRedactedDisappearing(disappear: { mode: "VIEWS" | "TIME"; firstOpenedAt: Date | null } | null): boolean {
+  if (!disappear) return false;
+  if (disappear.mode === "VIEWS") return true;
+  return disappear.firstOpenedAt === null;
+}
+
+function lastMessagePreview(
+  last: { body: string | null; senderId: string; sender: { username: string }; disappear: { mode: "VIEWS" | "TIME"; firstOpenedAt: Date | null } | null },
+  myNicknames: Map<string, string>,
+): string | null {
+  if (isRedactedDisappearing(last.disappear)) {
+    const displayName = myNicknames.get(last.senderId) ?? last.sender.username;
+    return `${displayName} sent a disappearing message`;
+  }
+  return last.body ? last.body.slice(0, 80) : null;
+}
+
 // Batch-fetch presence for a set of userIds. Returns a Map so callers
 // can attach isOnline/lastSeenAt to each participant in O(1).
 async function presencesFor(
@@ -258,7 +287,11 @@ const conversationRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
             where: { isDeleted: false },
             orderBy: { createdAt: "desc" },
             take: 1,
-            select: { id: true, type: true, body: true, createdAt: true },
+            select: {
+              id: true, type: true, body: true, createdAt: true, senderId: true,
+              sender:    { select: { username: true } },
+              disappear: { select: { mode: true, firstOpenedAt: true } },
+            },
           },
         },
         orderBy: { updatedAt: "desc" },
@@ -304,7 +337,7 @@ const conversationRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
               ? {
                   messageId: last.id,
                   type: last.type,
-                  preview: last.body ? last.body.slice(0, 80) : null,
+                  preview: lastMessagePreview(last, nicknames),
                   sentAt: last.createdAt.toISOString(),
                 }
               : null,
@@ -344,7 +377,11 @@ const conversationRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
             where: { isDeleted: false },
             orderBy: { createdAt: "desc" },
             take: 1,
-            select: { id: true, type: true, body: true, createdAt: true },
+            select: {
+              id: true, type: true, body: true, createdAt: true, senderId: true,
+              sender:    { select: { username: true } },
+              disappear: { select: { mode: true, firstOpenedAt: true } },
+            },
           },
         },
         orderBy: { updatedAt: "desc" },
@@ -383,7 +420,7 @@ const conversationRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
               ? {
                   messageId: last.id,
                   type: last.type,
-                  preview: last.body ? last.body.slice(0, 80) : null,
+                  preview: lastMessagePreview(last, nicknames),
                   sentAt: last.createdAt.toISOString(),
                 }
               : null,

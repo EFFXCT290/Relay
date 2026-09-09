@@ -4,7 +4,13 @@ interface NotifyOptions {
   messageType:    "TEXT" | "IMAGE" | "VIDEO" | "AUDIO";
   recipientIds:   string[];
   onlineIds:      string[];
-  log:            { info: (obj: object, msg: string) => void };
+  // See push-notify.ts's identical fields — `body` is already redacted by
+  // the caller; these two only pick the WORDING for that redacted case and
+  // the alert user's own nickname override for the sender, if any. Optional
+  // so pre-existing call sites keep compiling unchanged.
+  isDisappearing?:     boolean;
+  senderDisplayNames?: Map<string, string>;
+  log: { info: (obj: object, msg: string) => void };
 }
 
 // Duplicated (not shared) with push-notify.ts's own previewFor() — same
@@ -38,7 +44,9 @@ export async function maybeNotifyDiscord(opts: NotifyOptions): Promise<void> {
     return;
   }
 
-  const preview = previewFor(opts.messageType, opts.body);
+  const preview = opts.isDisappearing
+    ? `${opts.senderDisplayNames?.get(alertUid) ?? opts.senderUsername} sent a disappearing message`
+    : previewFor(opts.messageType, opts.body);
 
   try {
     const res = await fetch(webhookUrl, {

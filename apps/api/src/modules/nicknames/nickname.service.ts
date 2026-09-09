@@ -96,4 +96,14 @@ export class NicknameService {
     const rows = await this.repo.findManySharedWithTarget(targetUserId, [...new Set(ownerIds)]);
     return new Map(rows.map((r) => [r.ownerId, r.nickname]));
   }
+
+  // "Each of these recipients' own private nickname for ONE fixed sender" —
+  // used to build a per-recipient sender display name for the disappearing-
+  // message notification placeholder (push/Discord), mirroring myNicknamesFor's
+  // shape but for the reverse fan-out: one sender, many potential viewers.
+  async nicknamesForTarget(ownerIds: string[], targetUserId: string): Promise<Map<string, string>> {
+    if (ownerIds.length === 0) return new Map();
+    const rows = await this.repo.findManyByTarget([...new Set(ownerIds)], targetUserId);
+    return new Map(rows.map((r) => [r.ownerId, r.nickname]));
+  }
 }

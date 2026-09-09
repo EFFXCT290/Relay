@@ -40,6 +40,7 @@ import { fetchEmbed } from "./services/embed.service.js";
 import { maybeNotifyDiscord } from "./services/discord-notify.js";
 import { maybeNotifyPush } from "./services/push-notify.js";
 import { isNotificationProviderEnabled } from "../../backend-core/runtime/env.js";
+import { NicknameService } from "../nicknames/nickname.service.js";
 
 // Guards that the caller is a participant of conversationId. Returns the
 // conversation row when authorized; throws ProblemError otherwise.
@@ -468,6 +469,14 @@ const messageRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
       // API; time: until first open) so both are redacted here.
       const notifyBody = disappearState ? null : body;
 
+      // Redacted notifications say "{sender's display name} sent a
+      // disappearing message" instead of the real text — resolved per
+      // RECIPIENT since a nickname is private per viewer (see
+      // nicknamesForTarget). Only queried when actually needed.
+      const senderDisplayNames = disappearState
+        ? await new NicknameService(fastify).nicknamesForTarget(otherIds, callerId)
+        : undefined;
+
       if (isNotificationProviderEnabled("discord")) {
         void maybeNotifyDiscord({
           senderUsername: created.sender.username,
@@ -475,6 +484,8 @@ const messageRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
           messageType:    "TEXT",
           recipientIds:   otherIds,
           onlineIds,
+          isDisappearing: !!disappearState,
+          senderDisplayNames,
           log:            fastify.log,
         });
       }
@@ -486,6 +497,8 @@ const messageRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
           conversationId,
           recipientIds:   otherIds,
           onlineIds,
+          isDisappearing: !!disappearState,
+          senderDisplayNames,
           log:            fastify.log,
         });
       }
