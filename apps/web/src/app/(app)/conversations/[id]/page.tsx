@@ -158,10 +158,32 @@ function displayNameHandle(p: ConversationDetail["participant"]): string {
   return p.nickname ? p.nickname : `@${p.username}`;
 }
 
+// Conversation/Message ids are always Prisma @default(uuid()) — the backend
+// enforces `format: "uuid"` on every route keyed by this param and 422s
+// otherwise. A malformed segment here (e.g. the inbox header's not-yet-built
+// "Search" link, which routes to /conversations/search with nothing at that
+// path — Next's [id] route catches it) would otherwise still fire the
+// detail/messages/pins fetches and fail visibly on every one of them.
+// Intentionally version-agnostic (any hex in every group, not just v4) —
+// this is a client-side pre-check to avoid doomed requests, not the
+// authoritative validator; the backend's TypeBox format stays that.
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+function isValidUuid(id: string): boolean {
+  return UUID_PATTERN.test(id);
+}
+
 export default function ChatThreadPage() {
   const params = useParams<{ id: string }>();
   const router = useRouter();
   const conversationId = params.id;
+  const validId = isValidUuid(conversationId);
+
+  // Redirect to the inbox on a malformed id instead of letting every
+  // dependent fetch below fire and 422 — see isValidUuid's comment for why
+  // this can happen (e.g. the not-yet-built Search link).
+  useEffect(() => {
+    if (!validId) router.replace("/conversations");
+  }, [validId, router]);
   const { startCall } = useCall();
   const { userId: meId } = useMe();
 
@@ -251,6 +273,7 @@ export default function ChatThreadPage() {
 
   // Initial loads — detail and history — fired in parallel. meId comes from MeContext.
   useEffect(() => {
+    if (!validId) return; // malformed id — the redirect effect above handles navigation
     let cancelled = false;
     (async () => {
       try {
@@ -287,12 +310,13 @@ export default function ChatThreadPage() {
     return () => {
       cancelled = true;
     };
-  }, [conversationId, router]);
+  }, [conversationId, router, validId]);
 
   // Pinned messages — loaded independently of the detail/history fetch above
   // so a failure here (or just slower load) never blocks the core thread from
   // rendering; the banner/list simply stay empty until it resolves.
   useEffect(() => {
+    if (!validId) return; // malformed id — the redirect effect above handles navigation
     let cancelled = false;
     void api<{ pins: PinnedMessage[] }>(`/api/conversations/${conversationId}/pins`)
       .then((res) => { if (!cancelled) setPins(res.pins); })
@@ -300,7 +324,7 @@ export default function ChatThreadPage() {
     return () => {
       cancelled = true;
     };
-  }, [conversationId]);
+  }, [conversationId, validId]);
 
   // Session recovery — fires once on mount. If the page was refreshed while
   // a batch was in the "sending" state (uploads done, POST not sent), auto-
@@ -1492,6 +1516,11 @@ export default function ChatThreadPage() {
     window.setTimeout(() => setFlashMessageId((cur) => (cur === messageId ? null : cur)), 1500);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [flatRows]);
+
+  // Malformed id — the redirect effect above is already navigating away.
+  // Render nothing rather than the "loading conversation" skeleton below,
+  // which would misleadingly imply a real conversation is about to appear.
+  if (!validId) return null;
 
   return (
     <div
