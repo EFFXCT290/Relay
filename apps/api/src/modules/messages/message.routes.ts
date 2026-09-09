@@ -1195,39 +1195,41 @@ const messageRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
     },
   );
 
-  // ── POST /api/conversations/:id/messages/:messageId/pin ───────────────────
+  // ── POST /api/messages/:messageId/pin ──────────────────────────────────────
   // Either participant can pin any message (not just their own). Capped at
   // MAX_PINNED_MESSAGES per conversation — enforced inside a Serializable
   // transaction so two concurrent pin requests in the same conversation can't
   // both read "2 pinned" and both land, pushing the count to 4; Postgres
   // aborts the loser with a serialization failure (P2034) instead.
+  //
+  // Flat (no conversationId in the path) — messageId is a globally-unique
+  // UUID, matching every other single-message action in this file (PATCH
+  // /messages/:messageId, DELETE /messages/:messageId, .../react, .../view).
+  // conversationId is derived from the message lookup itself, the same
+  // lookup-then-authorize order .../transcribe already uses above.
   fastify.post(
-    "/conversations/:conversationId/messages/:messageId/pin",
+    "/messages/:messageId/pin",
     {
       preHandler: [fastify.authenticate],
       schema: {
-        params: Type.Object({
-          conversationId: Type.String({ format: "uuid" }),
-          messageId:      Type.String({ format: "uuid" }),
-        }),
+        params: Type.Object({ messageId: Type.String({ format: "uuid" }) }),
         response: { 201: PinnedMessageSchema },
       },
     },
     async (request, reply) => {
       const callerId = request.userId!;
-      const { conversationId, messageId } = request.params;
-      await assertParticipant(fastify, callerId, conversationId);
+      const { messageId } = request.params;
 
       const msg = await fastify.prisma.message.findUnique({
         where: { id: messageId },
         select: { id: true, conversationId: true, isDeleted: true },
       });
-      if (!msg || msg.conversationId !== conversationId) {
-        throw new ProblemError("not_found", "Message not found in this conversation.");
-      }
+      if (!msg) throw new ProblemError("not_found", "Message not found.");
       if (msg.isDeleted) {
         throw new ProblemError("validation_error", "Cannot pin a deleted message.");
       }
+      const conversationId = msg.conversationId;
+      await assertParticipant(fastify, callerId, conversationId);
 
       let created: PinnedMessageRow;
       try {
@@ -1265,27 +1267,26 @@ const messageRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
     },
   );
 
-  // ── DELETE /api/conversations/:id/messages/:messageId/pin ─────────────────
+  // ── DELETE /api/messages/:messageId/pin ────────────────────────────────────
+  // Flat, same reasoning as the POST above — conversationId comes from the
+  // PinnedMessage row itself (it's a stored column there, not re-derived from
+  // Message), not a separate path param.
   fastify.delete(
-    "/conversations/:conversationId/messages/:messageId/pin",
+    "/messages/:messageId/pin",
     {
       preHandler: [fastify.authenticate],
       schema: {
-        params: Type.Object({
-          conversationId: Type.String({ format: "uuid" }),
-          messageId:      Type.String({ format: "uuid" }),
-        }),
+        params: Type.Object({ messageId: Type.String({ format: "uuid" }) }),
       },
     },
     async (request, reply) => {
       const callerId = request.userId!;
-      const { conversationId, messageId } = request.params;
-      await assertParticipant(fastify, callerId, conversationId);
+      const { messageId } = request.params;
 
       const pin = await fastify.prisma.pinnedMessage.findUnique({ where: { messageId } });
-      if (!pin || pin.conversationId !== conversationId) {
-        throw new ProblemError("not_found", "This message isn't pinned.");
-      }
+      if (!pin) throw new ProblemError("not_found", "This message isn't pinned.");
+      const { conversationId } = pin;
+      await assertParticipant(fastify, callerId, conversationId);
 
       await fastify.prisma.pinnedMessage.delete({ where: { messageId } });
 

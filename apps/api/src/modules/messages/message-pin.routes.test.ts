@@ -110,28 +110,18 @@ function deleteMessage(app: Awaited<ReturnType<typeof buildTestApp>>, callerId: 
   });
 }
 
-function pinMessage(
-  app: Awaited<ReturnType<typeof buildTestApp>>,
-  callerId: string,
-  conversationId: string,
-  messageId: string,
-) {
+function pinMessage(app: Awaited<ReturnType<typeof buildTestApp>>, callerId: string, messageId: string) {
   return app.inject({
     method: "POST",
-    url: `/api/conversations/${conversationId}/messages/${messageId}/pin`,
+    url: `/api/messages/${messageId}/pin`,
     headers: { cookie: cookieFor(callerId) },
   });
 }
 
-function unpinMessage(
-  app: Awaited<ReturnType<typeof buildTestApp>>,
-  callerId: string,
-  conversationId: string,
-  messageId: string,
-) {
+function unpinMessage(app: Awaited<ReturnType<typeof buildTestApp>>, callerId: string, messageId: string) {
   return app.inject({
     method: "DELETE",
-    url: `/api/conversations/${conversationId}/messages/${messageId}/pin`,
+    url: `/api/messages/${messageId}/pin`,
     headers: { cookie: cookieFor(callerId) },
   });
 }
@@ -144,7 +134,7 @@ function listPins(app: Awaited<ReturnType<typeof buildTestApp>>, callerId: strin
   });
 }
 
-describe("POST /api/conversations/:id/messages/:messageId/pin", () => {
+describe("POST /api/messages/:messageId/pin", () => {
   let app: Awaited<ReturnType<typeof buildTestApp>>;
   const createdUserIds: string[] = [];
   const createdConversationIds: string[] = [];
@@ -172,11 +162,11 @@ describe("POST /api/conversations/:id/messages/:messageId/pin", () => {
   }
 
   it("403s a non-participant", async () => {
-    const { conversationId, messageId } = await setup();
+    const { messageId } = await setup();
     const outsider = await createUser(app.prisma, "outsider");
     createdUserIds.push(outsider.id);
 
-    const res = await pinMessage(app, outsider.id, conversationId, messageId);
+    const res = await pinMessage(app, outsider.id, messageId);
     assert.equal(res.statusCode, 403);
 
     const row = await app.prisma.pinnedMessage.findUnique({ where: { messageId } });
@@ -185,7 +175,7 @@ describe("POST /api/conversations/:id/messages/:messageId/pin", () => {
 
   it("lets the RECIPIENT (not just the sender) pin a message — either participant can pin any message", async () => {
     const { b, conversationId, messageId } = await setup();
-    const res = await pinMessage(app, b.id, conversationId, messageId);
+    const res = await pinMessage(app, b.id, messageId);
     assert.equal(res.statusCode, 201);
 
     const body = res.json() as PinnedMessage;
@@ -200,35 +190,33 @@ describe("POST /api/conversations/:id/messages/:messageId/pin", () => {
     assert.equal(row!.pinnedBy, b.id);
   });
 
-  it("404s pinning a message that doesn't belong to this conversation", async () => {
-    const { a, conversationId } = await setup();
-    const c = await createUser(app.prisma, "c");
-    createdUserIds.push(c.id);
-    const otherConversationId = await makeAcceptedConversation(app, a.id, c.id);
-    createdConversationIds.push(otherConversationId);
-
-    const otherMsgRes = await sendText(app, a.id, otherConversationId, "wrong thread");
-    const otherMessageId = (otherMsgRes.json() as { messageId: string }).messageId;
-
-    const res = await pinMessage(app, a.id, conversationId, otherMessageId);
+  // The route no longer takes a conversationId path param (see
+  // message.routes.ts), so the old "messageId belongs to a different
+  // conversation than the one named in the path" mismatch this test used to
+  // guard against can no longer be constructed at all — conversationId is
+  // now derived exclusively from the message's own row. The equivalent
+  // not-found coverage for the flat route is a messageId that doesn't exist.
+  it("404s pinning a message that doesn't exist", async () => {
+    const { a } = await setup();
+    const res = await pinMessage(app, a.id, randomUUID());
     assert.equal(res.statusCode, 404);
   });
 
   it("422s pinning an already-deleted message", async () => {
-    const { a, conversationId, messageId } = await setup();
+    const { a, messageId } = await setup();
     const delRes = await deleteMessage(app, a.id, messageId);
     assert.equal(delRes.statusCode, 204);
 
-    const res = await pinMessage(app, a.id, conversationId, messageId);
+    const res = await pinMessage(app, a.id, messageId);
     assert.equal(res.statusCode, 422);
   });
 
   it("409s re-pinning an already-pinned message (unique messageId constraint)", async () => {
-    const { a, conversationId, messageId } = await setup();
-    const first = await pinMessage(app, a.id, conversationId, messageId);
+    const { a, messageId } = await setup();
+    const first = await pinMessage(app, a.id, messageId);
     assert.equal(first.statusCode, 201);
 
-    const second = await pinMessage(app, a.id, conversationId, messageId);
+    const second = await pinMessage(app, a.id, messageId);
     assert.equal(second.statusCode, 409);
 
     const count = await app.prisma.pinnedMessage.count({ where: { messageId } });
@@ -242,13 +230,13 @@ describe("POST /api/conversations/:id/messages/:messageId/pin", () => {
       const sendRes = await sendText(app, a.id, conversationId, `pin candidate ${i}`);
       const mid = (sendRes.json() as { messageId: string }).messageId;
       messageIds.push(mid);
-      const pinRes = await pinMessage(app, a.id, conversationId, mid);
+      const pinRes = await pinMessage(app, a.id, mid);
       assert.equal(pinRes.statusCode, 201, `expected pin #${i} to succeed`);
     }
 
     const overflowRes = await sendText(app, a.id, conversationId, "one too many");
     const overflowId = (overflowRes.json() as { messageId: string }).messageId;
-    const res = await pinMessage(app, a.id, conversationId, overflowId);
+    const res = await pinMessage(app, a.id, overflowId);
     assert.equal(res.statusCode, 409);
     assert.match(res.json().detail as string, /unpin one first/i);
 
@@ -256,14 +244,14 @@ describe("POST /api/conversations/:id/messages/:messageId/pin", () => {
     assert.equal(count, MAX_PINNED_MESSAGES, "the rejected 4th pin must not have been created");
 
     // Unpinning one frees a slot for a new pin.
-    const unpinRes = await unpinMessage(app, a.id, conversationId, messageIds[0]!);
+    const unpinRes = await unpinMessage(app, a.id, messageIds[0]!);
     assert.equal(unpinRes.statusCode, 204);
-    const retryRes = await pinMessage(app, a.id, conversationId, overflowId);
+    const retryRes = await pinMessage(app, a.id, overflowId);
     assert.equal(retryRes.statusCode, 201);
   });
 });
 
-describe("DELETE /api/conversations/:id/messages/:messageId/pin", () => {
+describe("DELETE /api/messages/:messageId/pin", () => {
   let app: Awaited<ReturnType<typeof buildTestApp>>;
   const createdUserIds: string[] = [];
   const createdConversationIds: string[] = [];
@@ -286,14 +274,14 @@ describe("DELETE /api/conversations/:id/messages/:messageId/pin", () => {
     createdConversationIds.push(conversationId);
     const sendRes = await sendText(app, a.id, conversationId, "pin me");
     const messageId = (sendRes.json() as { messageId: string }).messageId;
-    const pinRes = await pinMessage(app, a.id, conversationId, messageId);
+    const pinRes = await pinMessage(app, a.id, messageId);
     assert.equal(pinRes.statusCode, 201);
     return { a, b, conversationId, messageId };
   }
 
   it("lets the RECIPIENT unpin a message pinned by the sender — either participant can unpin any message", async () => {
-    const { b, conversationId, messageId } = await setup();
-    const res = await unpinMessage(app, b.id, conversationId, messageId);
+    const { b, messageId } = await setup();
+    const res = await unpinMessage(app, b.id, messageId);
     assert.equal(res.statusCode, 204);
 
     const row = await app.prisma.pinnedMessage.findUnique({ where: { messageId } });
@@ -301,11 +289,11 @@ describe("DELETE /api/conversations/:id/messages/:messageId/pin", () => {
   });
 
   it("403s a non-participant", async () => {
-    const { conversationId, messageId } = await setup();
+    const { messageId } = await setup();
     const outsider = await createUser(app.prisma, "outsider");
     createdUserIds.push(outsider.id);
 
-    const res = await unpinMessage(app, outsider.id, conversationId, messageId);
+    const res = await unpinMessage(app, outsider.id, messageId);
     assert.equal(res.statusCode, 403);
 
     const row = await app.prisma.pinnedMessage.findUnique({ where: { messageId } });
@@ -317,7 +305,7 @@ describe("DELETE /api/conversations/:id/messages/:messageId/pin", () => {
     const sendRes = await sendText(app, a.id, conversationId, "never pinned");
     const messageId = (sendRes.json() as { messageId: string }).messageId;
 
-    const res = await unpinMessage(app, a.id, conversationId, messageId);
+    const res = await unpinMessage(app, a.id, messageId);
     assert.equal(res.statusCode, 404);
   });
 });
@@ -349,8 +337,8 @@ describe("GET /api/conversations/:id/pins", () => {
     const second = await sendText(app, b.id, conversationId, "second");
     const secondId = (second.json() as { messageId: string }).messageId;
 
-    assert.equal((await pinMessage(app, a.id, conversationId, firstId)).statusCode, 201);
-    assert.equal((await pinMessage(app, b.id, conversationId, secondId)).statusCode, 201);
+    assert.equal((await pinMessage(app, a.id, firstId)).statusCode, 201);
+    assert.equal((await pinMessage(app, b.id, secondId)).statusCode, 201);
 
     const res = await listPins(app, a.id, conversationId);
     assert.equal(res.statusCode, 200);
@@ -402,7 +390,7 @@ describe("Soft-delete consistency — DELETE /api/messages/:messageId auto-unpin
     const sendRes = await sendText(app, a.id, conversationId, "about to be pinned then deleted");
     const messageId = (sendRes.json() as { messageId: string }).messageId;
 
-    const pinRes = await pinMessage(app, b.id, conversationId, messageId);
+    const pinRes = await pinMessage(app, b.id, messageId);
     assert.equal(pinRes.statusCode, 201);
     assert.ok(await app.prisma.pinnedMessage.findUnique({ where: { messageId } }), "sanity check: pin exists before delete");
 
@@ -427,7 +415,7 @@ describe("Soft-delete consistency — DELETE /api/messages/:messageId auto-unpin
 
     const pinnedRes = await sendText(app, a.id, conversationId, "stays pinned");
     const pinnedId = (pinnedRes.json() as { messageId: string }).messageId;
-    assert.equal((await pinMessage(app, a.id, conversationId, pinnedId)).statusCode, 201);
+    assert.equal((await pinMessage(app, a.id, pinnedId)).statusCode, 201);
 
     const unpinnedRes = await sendText(app, a.id, conversationId, "never pinned");
     const unpinnedId = (unpinnedRes.json() as { messageId: string }).messageId;

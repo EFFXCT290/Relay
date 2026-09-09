@@ -154,7 +154,7 @@ describe("message:pinned / message:unpinned — real Socket.IO broadcast", () =>
 
     const pinRes = await app.inject({
       method: "POST",
-      url: `/api/conversations/${conversation.id}/messages/${messageId}/pin`,
+      url: `/api/messages/${messageId}/pin`,
       headers: { cookie: cookieFor(other.id) },
     });
     assert.equal(pinRes.statusCode, 201);
@@ -169,7 +169,7 @@ describe("message:pinned / message:unpinned — real Socket.IO broadcast", () =>
     const unpinnerEvent = waitForEvent<MessageUnpinnedEvent>(pinnerSocket, MESSAGE_EVENTS.UNPINNED, 3000);
     const unpinRes = await app.inject({
       method: "DELETE",
-      url: `/api/conversations/${conversation.id}/messages/${messageId}/pin`,
+      url: `/api/messages/${messageId}/pin`,
       headers: { cookie: cookieFor(pinner.id) },
     });
     assert.equal(unpinRes.statusCode, 204);
@@ -202,7 +202,7 @@ describe("message:pinned / message:unpinned — real Socket.IO broadcast", () =>
 
     const pinRes = await app.inject({
       method: "POST",
-      url: `/api/conversations/${conversation.id}/messages/${messageId}/pin`,
+      url: `/api/messages/${messageId}/pin`,
       headers: { cookie: cookieFor(pinner.id) },
     });
     assert.equal(pinRes.statusCode, 201);

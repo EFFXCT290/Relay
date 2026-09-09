@@ -304,10 +304,10 @@ describe("POST /api/messages/:messageId/view — views mode", () => {
   });
 
   it("unpins a pinned disappearing message the instant its last view is spent", async () => {
-    const { a, b, conversationId, messageId } = await setup(1);
+    const { a, b, messageId } = await setup(1);
     const pinRes = await ctx.app.inject({
       method: "POST",
-      url: `/api/conversations/${conversationId}/messages/${messageId}/pin`,
+      url: `/api/messages/${messageId}/pin`,
       headers: { cookie: cookieFor(a.id) },
     });
     assert.equal(pinRes.statusCode, 201);

@@ -1162,21 +1162,21 @@ export default function ChatThreadPage() {
 
   const handlePin = useCallback(async (msg: Message) => {
     try {
-      const pin = await api<PinnedMessage>(`/api/conversations/${conversationId}/messages/${msg.messageId}/pin`, { method: "POST" });
+      const pin = await api<PinnedMessage>(`/api/messages/${msg.messageId}/pin`, { method: "POST" });
       setPins((prev) => (prev.some((p) => p.id === pin.id) ? prev : [pin, ...prev]));
     } catch (err) {
       setError(err instanceof ApiError ? err.problem.detail : "Failed to pin message");
     }
-  }, [conversationId]);
+  }, []);
 
   const handleUnpin = useCallback(async (messageId: string) => {
     try {
-      await api(`/api/conversations/${conversationId}/messages/${messageId}/pin`, { method: "DELETE" });
+      await api(`/api/messages/${messageId}/pin`, { method: "DELETE" });
       setPins((prev) => prev.filter((p) => p.messageId !== messageId));
     } catch (err) {
       setError(err instanceof ApiError ? err.problem.detail : "Failed to unpin message");
     }
-  }, [conversationId]);
+  }, []);
 
   const handleDismissFailed = useCallback((messageId: string) => {
     delete messagesRef.current[messageId];
