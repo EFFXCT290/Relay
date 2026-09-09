@@ -13,9 +13,12 @@ import {
   DisappearSendSchema,
   DisappearStateSchema,
   MessageOpenResponseSchema,
+  MediaGalleryItemSchema,
   type PinnedMessage,
   type DisappearState,
   type MessageDisappearProgressEvent,
+  type ImageAttachment,
+  type VideoAttachment,
 } from "@relay/contracts";
 import { serializeAttachment, mediaKindFromMime } from "../media/media.service.js";
 import { createMediaRepository } from "../media/media.repository.js";
@@ -1295,6 +1298,74 @@ const messageRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
       });
 
       return { pins: rows.map(serializePinnedMessage) };
+    },
+  );
+
+  // ── GET /api/conversations/:conversationId/media (Contact info "Shared media") ──
+  // Image/video attachments only — voice notes aren't part of this gallery.
+  // Queried at the MessageAttachment level (not Message) so a multi-image
+  // message contributes one gallery item per attachment, matching what the
+  // grid actually renders and what totalCount should read.
+  fastify.get(
+    "/conversations/:conversationId/media",
+    {
+      preHandler: [fastify.authenticate],
+      schema: {
+        params: Type.Object({ conversationId: Type.String({ format: "uuid" }) }),
+        querystring: Type.Object({
+          cursor: Type.Optional(Type.String()),
+          limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 60, default: 30 })),
+        }),
+        response: {
+          200: Type.Object({
+            items: Type.Array(MediaGalleryItemSchema),
+            nextCursor: Type.Union([Type.String(), Type.Null()]),
+            totalCount: Type.Number(),
+          }),
+        },
+      },
+    },
+    async (request) => {
+      const callerId = request.userId!;
+      const { conversationId } = request.params;
+      const { cursor, limit = 30 } = request.query;
+      await assertParticipant(fastify, callerId, conversationId);
+
+      // isDeleted lives on the parent Message (soft-delete), not the
+      // attachment row — a deleted message's images/videos must not surface
+      // here even though the MessageAttachment row itself is untouched.
+      const where = {
+        type: { in: ["image", "video"] },
+        message: { conversationId, isDeleted: false },
+      };
+
+      const [rows, totalCount] = await Promise.all([
+        fastify.prisma.messageAttachment.findMany({
+          where,
+          include: {
+            media:   { include: { variants: true, temporary: true } },
+            message: { select: { id: true, createdAt: true } },
+          },
+          orderBy: { createdAt: "desc" },
+          take: limit + 1,
+          ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
+        }),
+        fastify.prisma.messageAttachment.count({ where }),
+      ]);
+
+      const hasMore = rows.length > limit;
+      const slice = hasMore ? rows.slice(0, -1) : rows;
+      const nextCursor = hasMore ? slice[slice.length - 1]?.id ?? null : null;
+
+      const items = await Promise.all(slice.map(async (att) => ({
+        messageId: att.message.id,
+        createdAt: att.message.createdAt.toISOString(),
+        // where.type narrows this to image|video at runtime; serializeAttachment's
+        // return type is the wider MessageAttachment union (it also handles voice).
+        attachment: await serializeAttachment(att.id, att.type, att.media, (key) => fastify.getMediaUrl(key)) as ImageAttachment | VideoAttachment,
+      })));
+
+      return { items, nextCursor, totalCount };
     },
   );
 };

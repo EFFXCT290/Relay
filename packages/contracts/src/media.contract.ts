@@ -223,3 +223,14 @@ export const MessageAttachmentSchema = Type.Union([
   VoiceAttachmentSchema,
 ]);
 export type MessageAttachment = Static<typeof MessageAttachmentSchema>;
+
+// ── Conversation media gallery (Contact info "Shared media") ──────────────────
+// Image/video attachments only (voice excluded) for a conversation, newest
+// first. Wraps the existing attachment union with the owning message's id so
+// the client can jump to it, mirroring PinnedMessage's messageId reference.
+export const MediaGalleryItemSchema = Type.Object({
+  messageId: Type.String({ format: "uuid" }),
+  createdAt: Type.String({ format: "date-time" }),
+  attachment: Type.Union([ImageAttachmentSchema, VideoAttachmentSchema]),
+});
+export type MediaGalleryItem = Static<typeof MediaGalleryItemSchema>;

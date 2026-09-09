@@ -1,8 +1,20 @@
 import { getApiUrl } from "@/frontend-core/runtime-env";
-import { ApiError } from "@/frontend-core/api";
-import type { MediaUploadResponse, DeliveryMode } from "@relay/contracts";
+import { ApiError, api } from "@/frontend-core/api";
+import type { MediaUploadResponse, DeliveryMode, MediaGalleryItem } from "@relay/contracts";
 
 export const mediaApi = {
+  // Contact info "Shared media" — image/video attachments for a conversation,
+  // newest first. totalCount also drives the Info Card's count badge.
+  gallery: (conversationId: string, cursor?: string, limit?: number) => {
+    const params = new URLSearchParams();
+    if (cursor) params.set("cursor", cursor);
+    if (limit) params.set("limit", String(limit));
+    const qs = params.toString();
+    return api<{ items: MediaGalleryItem[]; nextCursor: string | null; totalCount: number }>(
+      `/api/conversations/${conversationId}/media${qs ? `?${qs}` : ""}`,
+    );
+  },
+
   upload: async (
     file:         File | Blob,
     uploadId:     string,

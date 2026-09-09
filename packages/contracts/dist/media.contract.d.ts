@@ -240,3 +240,57 @@ export declare const MessageAttachmentSchema: import("@sinclair/typebox").TUnion
     }>;
 }>]>;
 export type MessageAttachment = Static<typeof MessageAttachmentSchema>;
+export declare const MediaGalleryItemSchema: import("@sinclair/typebox").TObject<{
+    messageId: import("@sinclair/typebox").TString;
+    createdAt: import("@sinclair/typebox").TString;
+    attachment: import("@sinclair/typebox").TUnion<[import("@sinclair/typebox").TObject<{
+        id: import("@sinclair/typebox").TString;
+        type: import("@sinclair/typebox").TLiteral<"image">;
+        media: import("@sinclair/typebox").TObject<{
+            id: import("@sinclair/typebox").TString;
+            url: import("@sinclair/typebox").TOptional<import("@sinclair/typebox").TUnion<[import("@sinclair/typebox").TString, import("@sinclair/typebox").TNull]>>;
+            blurUrl: import("@sinclair/typebox").TOptional<import("@sinclair/typebox").TUnion<[import("@sinclair/typebox").TString, import("@sinclair/typebox").TNull]>>;
+            thumbUrl: import("@sinclair/typebox").TOptional<import("@sinclair/typebox").TUnion<[import("@sinclair/typebox").TString, import("@sinclair/typebox").TNull]>>;
+            width: import("@sinclair/typebox").TOptional<import("@sinclair/typebox").TUnion<[import("@sinclair/typebox").TNumber, import("@sinclair/typebox").TNull]>>;
+            height: import("@sinclair/typebox").TOptional<import("@sinclair/typebox").TUnion<[import("@sinclair/typebox").TNumber, import("@sinclair/typebox").TNull]>>;
+            blurWidth: import("@sinclair/typebox").TOptional<import("@sinclair/typebox").TUnion<[import("@sinclair/typebox").TNumber, import("@sinclair/typebox").TNull]>>;
+            blurHeight: import("@sinclair/typebox").TOptional<import("@sinclair/typebox").TUnion<[import("@sinclair/typebox").TNumber, import("@sinclair/typebox").TNull]>>;
+            thumbWidth: import("@sinclair/typebox").TOptional<import("@sinclair/typebox").TUnion<[import("@sinclair/typebox").TNumber, import("@sinclair/typebox").TNull]>>;
+            thumbHeight: import("@sinclair/typebox").TOptional<import("@sinclair/typebox").TUnion<[import("@sinclair/typebox").TNumber, import("@sinclair/typebox").TNull]>>;
+            mimeType: import("@sinclair/typebox").TString;
+            sizeBytes: import("@sinclair/typebox").TNumber;
+            isLss: import("@sinclair/typebox").TOptional<import("@sinclair/typebox").TBoolean>;
+            deliveryMode: import("@sinclair/typebox").TOptional<import("@sinclair/typebox").TUnion<[import("@sinclair/typebox").TLiteral<"optimized">, import("@sinclair/typebox").TLiteral<"lss">]>>;
+            ephemeral: import("@sinclair/typebox").TOptional<import("@sinclair/typebox").TUnion<[import("@sinclair/typebox").TNull, import("@sinclair/typebox").TObject<{
+                maxViews: import("@sinclair/typebox").TInteger;
+                viewCount: import("@sinclair/typebox").TInteger;
+                consumedAt: import("@sinclair/typebox").TUnion<[import("@sinclair/typebox").TString, import("@sinclair/typebox").TNull]>;
+            }>]>>;
+        }>;
+    }>, import("@sinclair/typebox").TObject<{
+        id: import("@sinclair/typebox").TString;
+        type: import("@sinclair/typebox").TLiteral<"video">;
+        media: import("@sinclair/typebox").TObject<{
+            id: import("@sinclair/typebox").TString;
+            url: import("@sinclair/typebox").TOptional<import("@sinclair/typebox").TUnion<[import("@sinclair/typebox").TString, import("@sinclair/typebox").TNull]>>;
+            streamUrl: import("@sinclair/typebox").TOptional<import("@sinclair/typebox").TUnion<[import("@sinclair/typebox").TString, import("@sinclair/typebox").TNull]>>;
+            posterUrl: import("@sinclair/typebox").TOptional<import("@sinclair/typebox").TUnion<[import("@sinclair/typebox").TString, import("@sinclair/typebox").TNull]>>;
+            thumbUrl: import("@sinclair/typebox").TOptional<import("@sinclair/typebox").TUnion<[import("@sinclair/typebox").TString, import("@sinclair/typebox").TNull]>>;
+            width: import("@sinclair/typebox").TOptional<import("@sinclair/typebox").TUnion<[import("@sinclair/typebox").TNumber, import("@sinclair/typebox").TNull]>>;
+            height: import("@sinclair/typebox").TOptional<import("@sinclair/typebox").TUnion<[import("@sinclair/typebox").TNumber, import("@sinclair/typebox").TNull]>>;
+            durationMs: import("@sinclair/typebox").TUnion<[import("@sinclair/typebox").TNumber, import("@sinclair/typebox").TNull]>;
+            mimeType: import("@sinclair/typebox").TString;
+            sizeBytes: import("@sinclair/typebox").TNumber;
+            codec: import("@sinclair/typebox").TOptional<import("@sinclair/typebox").TUnion<[import("@sinclair/typebox").TString, import("@sinclair/typebox").TNull]>>;
+            isLss: import("@sinclair/typebox").TOptional<import("@sinclair/typebox").TBoolean>;
+            deliveryMode: import("@sinclair/typebox").TOptional<import("@sinclair/typebox").TUnion<[import("@sinclair/typebox").TLiteral<"optimized">, import("@sinclair/typebox").TLiteral<"lss">]>>;
+            status: import("@sinclair/typebox").TOptional<import("@sinclair/typebox").TString>;
+            ephemeral: import("@sinclair/typebox").TOptional<import("@sinclair/typebox").TUnion<[import("@sinclair/typebox").TNull, import("@sinclair/typebox").TObject<{
+                maxViews: import("@sinclair/typebox").TInteger;
+                viewCount: import("@sinclair/typebox").TInteger;
+                consumedAt: import("@sinclair/typebox").TUnion<[import("@sinclair/typebox").TString, import("@sinclair/typebox").TNull]>;
+            }>]>>;
+        }>;
+    }>]>;
+}>;
+export type MediaGalleryItem = Static<typeof MediaGalleryItemSchema>;

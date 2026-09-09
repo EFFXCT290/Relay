@@ -16,31 +16,62 @@ vi.mock("@/frontend-core/api-client/spotify", () => ({
   spotifyApi: { getBadge: vi.fn(async () => ({ spotify: null })) },
 }));
 
+// Info Card's media count is fetched on mount — stub it so tests don't hit
+// the network; individual tests override the resolved value as needed.
+vi.mock("@/frontend-core/api-client/media", () => ({
+  mediaApi: { gallery: vi.fn(async () => ({ items: [], nextCursor: null, totalCount: 0 })) },
+}));
+
 import { nicknamesApi } from "@/frontend-core/api-client/nicknames";
+import { mediaApi } from "@/frontend-core/api-client/media";
 
 const PARTICIPANT = { userId: "user-1", username: "alice" };
+const CONVERSATION_CREATED_AT = "2026-05-01T00:00:00.000Z";
 
-function renderModal(overrides: Partial<typeof PARTICIPANT & { nickname: string | null }> = {}, onNicknameChange = vi.fn()) {
+function renderModal(
+  overrides: Partial<typeof PARTICIPANT & { nickname: string | null }> = {},
+  callbacks: Partial<{
+    onNicknameChange: (nickname: string | null) => void;
+    onOpenMedia: () => void;
+    onOpenPinned: () => void;
+    onStartVoiceCall: () => void;
+    onStartVideoCall: () => void;
+    pinCount: number;
+  }> = {},
+) {
   const onClose = vi.fn();
+  const onNicknameChange = callbacks.onNicknameChange ?? vi.fn();
+  const onOpenMedia = callbacks.onOpenMedia ?? vi.fn();
+  const onOpenPinned = callbacks.onOpenPinned ?? vi.fn();
+  const onStartVoiceCall = callbacks.onStartVoiceCall ?? vi.fn();
+  const onStartVideoCall = callbacks.onStartVideoCall ?? vi.fn();
   render(
     <ContactInfoModal
       participant={{ ...PARTICIPANT, ...overrides }}
+      conversationId="conv-1"
+      conversationCreatedAt={CONVERSATION_CREATED_AT}
+      pinCount={callbacks.pinCount ?? 0}
       onClose={onClose}
       onNicknameChange={onNicknameChange}
+      onOpenMedia={onOpenMedia}
+      onOpenPinned={onOpenPinned}
+      onStartVoiceCall={onStartVoiceCall}
+      onStartVideoCall={onStartVideoCall}
     />,
   );
-  return { onClose, onNicknameChange };
+  return { onClose, onNicknameChange, onOpenMedia, onOpenPinned, onStartVoiceCall, onStartVideoCall };
 }
 
 beforeEach(() => {
   vi.clearAllMocks();
   vi.mocked(nicknamesApi.get).mockResolvedValue({ nickname: null, sharedWithTarget: false });
+  vi.mocked(mediaApi.gallery).mockResolvedValue({ items: [], nextCursor: null, totalCount: 0 });
 });
 
 describe("ContactInfoModal — stacking order and defaults", () => {
   it("always shows the real @username, regardless of nickname state", async () => {
     renderModal();
-    expect(screen.getByText("@alice")).toBeInTheDocument();
+    expect(screen.getByText(/@alice\s+·/)).toBeInTheDocument();
   });
 
   it("no nickname set: shows 'Add nickname', no Share toggle (nothing to share yet)", async () => {
@@ -54,7 +85,7 @@ describe("ContactInfoModal — stacking order and defaults", () => {
     expect(screen.getByText("Bug")).toBeInTheDocument();
     expect(screen.queryByText("Add nickname")).not.toBeInTheDocument();
     // Real username is still shown alongside it, never hidden.
-    expect(screen.getByText("@alice")).toBeInTheDocument();
+    expect(screen.getByText(/@alice\s+·/)).toBeInTheDocument();
   });
 
   it("nickname set: the Share toggle appears, reflecting the fetched sharedWithTarget value", async () => {
@@ -128,6 +159,63 @@ describe("ContactInfoModal — share toggle and removal", () => {
 
     await waitFor(() => expect(nicknamesApi.clear).toHaveBeenCalledWith("user-1"));
     await waitFor(() => expect(onNicknameChange).toHaveBeenCalledWith(null));
+  });
+});
+
+describe("ContactInfoModal — actions row", () => {
+  it("Voice and Video buttons call their respective callbacks", () => {
+    const { onStartVoiceCall, onStartVideoCall } = renderModal();
+    fireEvent.click(screen.getByText("Voice"));
+    expect(onStartVoiceCall).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByText("Video"));
+    expect(onStartVideoCall).toHaveBeenCalledTimes(1);
+  });
+
+  it("Search is a disabled, inert placeholder (no destination exists yet)", () => {
+    renderModal();
+    expect(screen.getByText("Search").closest("button")).toBeDisabled();
+  });
+});
+
+describe("ContactInfoModal — info card (media + pinned)", () => {
+  it("fetches and shows the real media count, and opens the shared-media grid on tap", async () => {
+    vi.mocked(mediaApi.gallery).mockResolvedValue({ items: [], nextCursor: null, totalCount: 152 });
+    const { onOpenMedia, onOpenPinned } = renderModal();
+
+    await waitFor(() => expect(screen.getByText("152")).toBeInTheDocument());
+    fireEvent.click(screen.getByText("Media, links and docs"));
+    expect(onOpenMedia).toHaveBeenCalledTimes(1);
+    expect(onOpenPinned).not.toHaveBeenCalled();
+  });
+
+  it("shows the real pinned count (from the pinCount prop, not a re-fetch) and opens the existing PinnedMessagesList on tap — not a second list", async () => {
+    const { onOpenPinned, onOpenMedia } = renderModal({}, { pinCount: 3 });
+    expect(screen.getByText("3")).toBeInTheDocument();
+    fireEvent.click(screen.getByText("Pinned messages"));
+    expect(onOpenPinned).toHaveBeenCalledTimes(1);
+    expect(onOpenMedia).not.toHaveBeenCalled();
+  });
+
+  it("shows a 'Chatting since' footer derived from conversationCreatedAt", () => {
+    renderModal();
+    expect(screen.getByText(/Chatting since/)).toBeInTheDocument();
+  });
+});
+
+describe("ContactInfoModal — responsive shell (desktop modal vs mobile full page)", () => {
+  it("is one component that switches via lg: classes — no scrim on mobile, scrim + fixed width + rounded panel at lg:", () => {
+    renderModal();
+    const dialog = screen.getByRole("dialog");
+    // Mobile-default: fills the viewport, no rounding/border.
+    expect(dialog.className).toMatch(/flex-1/);
+    // Desktop: fixed width, centered, rounded panel — gated behind lg:.
+    expect(dialog.className).toMatch(/lg:w-\[420px\]/);
+    expect(dialog.className).toMatch(/lg:rounded-\[20px\]/);
+    // Scrim exists but is hidden until lg: (mobile is a full page, not an
+    // overlay over the conversation behind it).
+    const scrim = dialog.previousElementSibling as HTMLElement;
+    expect(scrim.className).toMatch(/hidden/);
+    expect(scrim.className).toMatch(/lg:block/);
   });
 });
 

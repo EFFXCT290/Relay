@@ -179,6 +179,10 @@ async function renderPage(initialMessages: Message[] = []) {
     }
     if (path === `/api/conversations/${CONV_ID}/read` && method === "POST") return undefined;
     if (path === `/api/conversations/${CONV_ID}/pins` && method === "GET") return { pins: [] };
+    // ContactInfoModal fetches this on mount for the Info Card's media count.
+    if (path.startsWith(`/api/conversations/${CONV_ID}/media?`) && method === "GET") {
+      return { items: [], nextCursor: null, totalCount: 0 };
+    }
     throw new Error(`renderPage's default apiImpl doesn't handle: ${method} ${path}`);
   };
   const view = render(<ChatThreadPage />);
@@ -335,5 +339,25 @@ describe("ChatThreadPage — sync-barrier ordering on reconnect replay", () => {
     const elLive      = screen.getByText("live while syncing", { selector: "div" });
     expect(elExisting.compareDocumentPosition(elRecovered) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(elRecovered.compareDocumentPosition(elLive) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+});
+
+describe("ChatThreadPage — header avatar/name opens Contact info", () => {
+  it("clicking the header avatar/name block opens ContactInfoModal (same surface the ⋯ menu's 'Contact info' item opens)", async () => {
+    await renderPage();
+    const user = userEvent.setup();
+
+    expect(screen.queryByRole("dialog", { name: "Contact info" })).not.toBeInTheDocument();
+    await user.click(screen.getByLabelText("Contact info for @partner"));
+    expect(screen.getByRole("dialog", { name: "Contact info" })).toBeInTheDocument();
+  });
+
+  it("also opens from the ⋯ menu's 'Contact info' item, into the exact same dialog — one surface, two triggers", async () => {
+    await renderPage();
+    const user = userEvent.setup();
+
+    await user.click(screen.getByLabelText("More"));
+    await user.click(screen.getByText("Contact info"));
+    expect(screen.getByRole("dialog", { name: "Contact info" })).toBeInTheDocument();
   });
 });

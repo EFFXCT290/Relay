@@ -35,6 +35,7 @@ import { ACK_EVENT, MEDIA_EVENTS, VOICE_EVENTS, PRESENCE_EVENTS, SYNC_EVENTS, TY
 import { formatLastSeen } from "@/frontend-core/format-presence";
 import { SpotifyBadge } from "@/features/spotify/spotify-badge";
 import { ContactInfoModal } from "@/features/conversations/components/contact-info-modal";
+import { SharedMediaGrid } from "@/features/conversations/components/shared-media-grid";
 import { useCall } from "@/features/calls/call-provider";
 import { useMe } from "@/providers/me-provider";
 
@@ -236,6 +237,7 @@ export default function ChatThreadPage() {
   const [headerMenuOpen, setHeaderMenuOpen] = useState(false);
   const [pinnedListOpen, setPinnedListOpen] = useState(false);
   const [contactInfoOpen, setContactInfoOpen] = useState(false);
+  const [sharedMediaOpen, setSharedMediaOpen] = useState(false);
   const [flashMessageId, setFlashMessageId] = useState<string | null>(null);
 
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -1564,7 +1566,18 @@ export default function ChatThreadPage() {
         </Link>
         <div className="flex min-w-0 flex-1 items-center gap-2.5">
           {detail ? (
-            <>
+            // Not a <button>: SpotifyBadge (compact) renders a nested <a> when
+            // the peer has a track link, and a real <a> inside a <button> is
+            // invalid HTML — role="button" on a div sidesteps that while
+            // staying keyboard-operable.
+            <div
+              role="button"
+              tabIndex={0}
+              aria-label={`Contact info for ${displayNameHandle(detail.participant)}`}
+              onClick={() => setContactInfoOpen(true)}
+              onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setContactInfoOpen(true); } }}
+              className="flex min-w-0 flex-1 cursor-pointer items-center gap-2.5 rounded-lg text-left hover:bg-white/[0.04]"
+            >
               <Avatar
                 username={displayName(detail.participant)}
                 src={detail.participant.avatarUrl}
@@ -1590,10 +1603,14 @@ export default function ChatThreadPage() {
                   >
                     {formatLastSeen(detail.participant.lastSeenAt, detail.participant.isOnline)}
                   </span>
-                  <SpotifyBadge userId={detail.participant.userId} compact />
+                  {/* stopPropagation: this may render a nested <a> to the
+                      track — must not also trigger the row's own onClick. */}
+                  <span onClick={(e) => e.stopPropagation()}>
+                    <SpotifyBadge userId={detail.participant.userId} compact />
+                  </span>
                 </div>
               </div>
-            </>
+            </div>
           ) : (
             <div className="h-9 w-32 animate-pulse rounded bg-white/5" />
           )}
@@ -1669,11 +1686,28 @@ export default function ChatThreadPage() {
       {contactInfoOpen && detail && (
         <ContactInfoModal
           participant={detail.participant}
+          conversationId={conversationId}
+          conversationCreatedAt={detail.createdAt}
+          pinCount={pins.length}
           onClose={() => setContactInfoOpen(false)}
           onNicknameChange={(nickname) =>
             setDetail((prev) => (prev ? { ...prev, participant: { ...prev.participant, nickname } } : prev))
           }
+          onOpenMedia={() => { setContactInfoOpen(false); setSharedMediaOpen(true); }}
+          onOpenPinned={() => { setContactInfoOpen(false); setPinnedListOpen(true); }}
+          onStartVoiceCall={() => {
+            setContactInfoOpen(false);
+            startCall({ id: detail.participant.userId, username: detail.participant.username }, "AUDIO", conversationId);
+          }}
+          onStartVideoCall={() => {
+            setContactInfoOpen(false);
+            startCall({ id: detail.participant.userId, username: detail.participant.username }, "VIDEO", conversationId);
+          }}
         />
+      )}
+
+      {sharedMediaOpen && (
+        <SharedMediaGrid conversationId={conversationId} onClose={() => setSharedMediaOpen(false)} />
       )}
 
       {/* "X calls you: Y" — separate from the peer's own identity above, never
