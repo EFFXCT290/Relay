@@ -294,6 +294,21 @@ const messageRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
           disappear:       Type.Optional(DisappearSendSchema),
         }),
         response: {
+          200: Type.Object({
+            messageId:      Type.String({ format: "uuid" }),
+            conversationId: Type.String({ format: "uuid" }),
+            senderId:       Type.String({ format: "uuid" }),
+            senderUsername: Type.String(),
+            type:           Type.Literal("TEXT"),
+            body:           Type.Union([Type.String(), Type.Null()]),
+            replyTo:        Type.Union([Type.Null(), Type.Object({ messageId: Type.String(), preview: Type.Union([Type.String(), Type.Null()]), type: Type.String() })]),
+            reactions:      Type.Record(Type.String(), Type.Integer()),
+            myReaction:     Type.Union([Type.String(), Type.Null()]),
+            readBy:         Type.Array(Type.Object({ userId: Type.String({ format: "uuid" }), readAt: Type.String({ format: "date-time" }) })),
+            deliveredAt:    Type.Union([Type.String({ format: "date-time" }), Type.Null()]),
+            createdAt:      Type.String({ format: "date-time" }),
+            disappear:      Type.Optional(Type.Union([Type.Null(), DisappearStateSchema])),
+          }),
           201: Type.Object({
             messageId:      Type.String({ format: "uuid" }),
             conversationId: Type.String({ format: "uuid" }),
@@ -358,7 +373,7 @@ const messageRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
       // requests that both pass this check concurrently.
       if (clientMessageId) {
         const existing = await findExistingByClientMessageId(clientMessageId);
-        if (existing) return reply.code(201).send(existingMessageResponse(existing));
+        if (existing) return reply.code(200).send(existingMessageResponse(existing));
       }
 
       if (replyToId) {
@@ -425,7 +440,7 @@ const messageRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
         // successful send.
         if (clientMessageId && err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
           const existing = await findExistingByClientMessageId(clientMessageId);
-          if (existing) return reply.code(201).send(existingMessageResponse(existing));
+          if (existing) return reply.code(200).send(existingMessageResponse(existing));
         }
         throw err;
       }
@@ -788,7 +803,8 @@ const messageRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
           attachmentId: Type.String(),
         }),
         response: {
-          202: Type.Object({ status: Type.Union([Type.Literal("pending"), Type.Literal("ready")]) }),
+          200: Type.Object({ status: Type.Literal("ready") }),
+          202: Type.Object({ status: Type.Literal("pending") }),
         },
       },
       config: { rateLimit: { max: 30, timeWindow: "1 minute" } },
@@ -809,9 +825,9 @@ const messageRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
         throw new ProblemError("bad_request", "Attachment is not a voice note.");
       }
 
-      // Already transcribed → nothing to do (idempotent).
+      // Already transcribed → nothing to do, no new work enqueued.
       if (attachment.media.transcriptStatus === "ready" && attachment.media.transcript) {
-        return reply.code(202).send({ status: "ready" });
+        return reply.code(200).send({ status: "ready" });
       }
 
       await fastify.prisma.media.update({

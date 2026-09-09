@@ -162,7 +162,7 @@ describe("sw.js — pushsubscriptionchange: re-subscribes and re-registers with 
     expect(env.subscribe).toHaveBeenCalledWith({ userVisibleOnly: true, applicationServerKey: fakeKey });
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const [url, init] = fetchMock.mock.calls[0]!;
-    expect(url).toBe("https://api.relay.example/api/push/subscribe");
+    expect(url).toBe("https://api.relay.example/api/push/subscriptions");
     expect(init).toMatchObject({ method: "POST", credentials: "include" });
     expect(JSON.parse(init.body)).toEqual({ endpoint: "https://push.example/ep" });
   });

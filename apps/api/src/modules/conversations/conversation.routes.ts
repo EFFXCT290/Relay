@@ -689,6 +689,15 @@ const conversationRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
       const callerId = request.userId!;
       const { conversationId } = request.params;
 
+      // Checked separately from the participant lookup below so a repeat
+      // DELETE (conversation already gone — cascade removed its Participant
+      // rows too) reports 404, not a misleading 403 "not a participant".
+      const conversation = await fastify.prisma.conversation.findUnique({
+        where: { id: conversationId },
+        select: { id: true },
+      });
+      if (!conversation) throw new ProblemError("not_found", "Conversation not found.");
+
       const me = await fastify.prisma.participant.findUnique({
         where: { userId_conversationId: { userId: callerId, conversationId } },
         select: { userId: true, acceptedAt: true },

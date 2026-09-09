@@ -83,7 +83,7 @@ self.addEventListener("pushsubscriptionchange", (event) => {
           userVisibleOnly: true,
           applicationServerKey: appServerKey || undefined,
         });
-        await fetch(`${API_BASE}/api/push/subscribe`, {
+        await fetch(`${API_BASE}/api/push/subscriptions`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           credentials: "include",

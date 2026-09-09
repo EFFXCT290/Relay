@@ -63,7 +63,7 @@ export async function buildServer() {
   await app.register(cors, {
     origin: env.WEB_ORIGIN,
     credentials: true,
-    methods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
   });
   await app.register(cookie, { secret: env.COOKIE_SECRET, parseOptions: { sameSite: "strict" } });
   await app.register(rateLimit, {

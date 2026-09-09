@@ -344,6 +344,26 @@ describe("DELETE /api/conversations/:conversationId", () => {
     createdConversationIds.splice(createdConversationIds.indexOf(conversationId), 1);
   });
 
+  it("returns 404, not 403, for a repeat delete once the conversation is already gone", async () => {
+    const { b, conversationId } = await makeConversation();
+
+    const first = await deleteConversation(b.id, conversationId);
+    assert.equal(first.statusCode, 204);
+    createdConversationIds.splice(createdConversationIds.indexOf(conversationId), 1);
+
+    // Cascade removed b's Participant row along with the conversation, so a
+    // naive re-lookup would (mis)report "not a participant" (403) — the real
+    // state is "this conversation doesn't exist any more" (404).
+    const second = await deleteConversation(b.id, conversationId);
+    assert.equal(second.statusCode, 404);
+  });
+
+  it("returns 404 for a conversationId that never existed", async () => {
+    const { b } = await makeConversation();
+    const res = await deleteConversation(b.id, randomUUID());
+    assert.equal(res.statusCode, 404);
+  });
+
   it("rejects a participant once their own side has already been accepted", async () => {
     const { b, conversationId } = await makeConversation();
 

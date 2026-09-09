@@ -2,26 +2,14 @@ import type { FastifyPluginAsyncTypebox } from "@fastify/type-provider-typebox";
 import { Type } from "@sinclair/typebox";
 import { ProblemError } from "../../backend-core/http/errors.js";
 import { env } from "../../backend-core/runtime/env.js";
+import {
+  PushPreferencesSchema,
+  VapidPublicKeyResponseSchema,
+  WebPushSubscriptionSchema,
+} from "@relay/contracts";
 import { PushRepository, type WebPushSubscription } from "./push.repository.js";
 import { pushQueue, SEND_PUSH_JOB } from "../../queues/push.queue.js";
 import type { PushPayload } from "./push.service.js";
-
-// The browser's PushSubscription.toJSON() shape. additionalProperties is left
-// open so we persist whatever the browser sends verbatim (future-proof) — we
-// only pin the fields web-push actually needs.
-const SubscriptionSchema = Type.Object(
-  {
-    endpoint:       Type.String({ minLength: 1, maxLength: 2048 }),
-    expirationTime: Type.Optional(Type.Union([Type.Number(), Type.Null()])),
-    keys:           Type.Object({ p256dh: Type.String(), auth: Type.String() }),
-  },
-  { additionalProperties: true },
-);
-
-const PreferencesSchema = Type.Object({
-  pushMessages: Type.Boolean(),
-  pushCalls:    Type.Boolean(),
-});
 
 const pushRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
   const repo = new PushRepository(fastify.prisma);
@@ -31,16 +19,16 @@ const pushRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
   // client normally reads the key from /runtime-env.js — this is a fallback.
   fastify.get(
     "/push/vapid-public-key",
-    { schema: { response: { 200: Type.Object({ publicKey: Type.String() }) } } },
+    { schema: { response: { 200: VapidPublicKeyResponseSchema } } },
     async () => ({ publicKey: env.VAPID_PUBLIC_KEY }),
   );
 
-  // ── POST /api/push/subscribe ─────────────────────────────────────────────
+  // ── POST /api/push/subscriptions ─────────────────────────────────────────
   fastify.post(
-    "/push/subscribe",
+    "/push/subscriptions",
     {
       preHandler: [fastify.authenticate],
-      schema: { body: SubscriptionSchema },
+      schema: { body: WebPushSubscriptionSchema },
     },
     async (request, reply) => {
       const sub = request.body as WebPushSubscription;
@@ -62,15 +50,23 @@ const pushRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
     },
   );
 
-  // ── DELETE /api/push/subscribe ───────────────────────────────────────────
+  // ── DELETE /api/push/subscriptions?endpoint=... ──────────────────────────
+  // A subscription has no client-facing id — the browser's PushSubscription
+  // object only ever exposes its `endpoint` URL, which is also the DB's
+  // unique key (see push.repository.ts's upsert). That rules out a path
+  // segment (`endpoint` is a full URL up to 2048 chars — embedding one verbatim
+  // as a path segment means URL-encoding its own "/", which nginx and other
+  // reverse proxies routinely mishandle/reject ahead of routing); a query
+  // param carries it with no such ambiguity, the same way every other
+  // identify-by-opaque-string case in this API (q, cursor) already does.
   fastify.delete(
-    "/push/subscribe",
+    "/push/subscriptions",
     {
       preHandler: [fastify.authenticate],
-      schema: { body: Type.Object({ endpoint: Type.String({ minLength: 1, maxLength: 2048 }) }) },
+      schema: { querystring: Type.Object({ endpoint: Type.String({ minLength: 1, maxLength: 2048 }) }) },
     },
     async (request, reply) => {
-      await repo.deleteByEndpoint(request.userId!, request.body.endpoint);
+      await repo.deleteByEndpoint(request.userId!, request.query.endpoint);
       return reply.code(204).send();
     },
   );
@@ -80,7 +76,7 @@ const pushRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
     "/push/preferences",
     {
       preHandler: [fastify.authenticate],
-      schema: { response: { 200: PreferencesSchema } },
+      schema: { response: { 200: PushPreferencesSchema } },
     },
     async (request) => {
       const prefs = await repo.getPreferences(request.userId!);
@@ -94,8 +90,8 @@ const pushRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
     {
       preHandler: [fastify.authenticate],
       schema: {
-        body:     Type.Partial(PreferencesSchema),
-        response: { 200: PreferencesSchema },
+        body:     Type.Partial(PushPreferencesSchema),
+        response: { 200: PushPreferencesSchema },
       },
     },
     async (request) => {

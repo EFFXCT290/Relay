@@ -110,7 +110,7 @@ describe("POST /api/conversations/:conversationId/messages — clientMessageId i
     return `${ACCESS_COOKIE}=${token}`;
   }
 
-  it("two concurrent identical sends (same clientMessageId) both resolve 201 with the same messageId, never a 500", async () => {
+  it("two concurrent identical sends (same clientMessageId) resolve exactly one 201 and one 200 for the same messageId, never a 500", async () => {
     const payload = { body: "concurrent retry test", clientMessageId };
     const fire = () =>
       app.inject({
@@ -129,8 +129,12 @@ describe("POST /api/conversations/:conversationId/messages — clientMessageId i
 
     assert.notEqual(resA.statusCode, 500);
     assert.notEqual(resB.statusCode, 500);
-    assert.equal(resA.statusCode, 201);
-    assert.equal(resB.statusCode, 201);
+    // The race's winner genuinely creates the row (201); the loser hits the
+    // P2002 recovery path and replays the winner's message back — that's an
+    // idempotent "found existing", so it must report 200, not 201 (see
+    // existingMessageResponse's two call sites in message.routes.ts). Order
+    // is nondeterministic, so compare the pair, not either side by itself.
+    assert.deepEqual([resA.statusCode, resB.statusCode].sort(), [200, 201]);
 
     const bodyA = resA.json() as { messageId: string; body: string };
     const bodyB = resB.json() as { messageId: string; body: string };
@@ -140,5 +144,130 @@ describe("POST /api/conversations/:conversationId/messages — clientMessageId i
 
     const count = await app.prisma.message.count({ where: { conversationId, clientMessageId } });
     assert.equal(count, 1);
+  });
+
+  it("a sequential resend of the same clientMessageId hits the fast idempotency path and returns 200 with the original message", async () => {
+    const clientMessageId2 = randomUUID();
+    const first = await app.inject({
+      method: "POST",
+      url: `/api/conversations/${conversationId}/messages`,
+      headers: { cookie: cookieFor(senderId), "content-type": "application/json" },
+      payload: { body: "sequential retry test", clientMessageId: clientMessageId2 },
+    });
+    assert.equal(first.statusCode, 201);
+    const firstBody = first.json() as { messageId: string };
+
+    const second = await app.inject({
+      method: "POST",
+      url: `/api/conversations/${conversationId}/messages`,
+      headers: { cookie: cookieFor(senderId), "content-type": "application/json" },
+      payload: { body: "sequential retry test", clientMessageId: clientMessageId2 },
+    });
+    assert.equal(second.statusCode, 200);
+    const secondBody = second.json() as { messageId: string };
+    assert.equal(secondBody.messageId, firstBody.messageId);
+
+    const count = await app.prisma.message.count({ where: { conversationId, clientMessageId: clientMessageId2 } });
+    assert.equal(count, 1);
+  });
+});
+
+describe("POST /api/messages/:messageId/attachments/:attachmentId/transcribe — status codes", () => {
+  let app: Awaited<ReturnType<typeof buildTestApp>>;
+  let userId: string;
+  let conversationId: string;
+  const createdMediaIds: string[] = [];
+  const createdMessageIds: string[] = [];
+
+  before(async () => {
+    app = await buildTestApp();
+    const prisma = app.prisma;
+
+    const suffix = randomUUID().slice(0, 8);
+    const passwordHash = "not-a-real-hash";
+    const passwordSalt = randomBytes(32).toString("hex");
+    const user = await prisma.user.create({
+      data: { username: `transcribe-${suffix}`, passwordHash, passwordSalt },
+    });
+    userId = user.id;
+
+    const conversation = await prisma.conversation.create({ data: {} });
+    conversationId = conversation.id;
+    await prisma.participant.create({ data: { userId, conversationId, acceptedAt: new Date() } });
+  });
+
+  after(async () => {
+    const prisma = app.prisma;
+    await prisma.messageAttachment.deleteMany({ where: { messageId: { in: createdMessageIds } } });
+    await prisma.message.deleteMany({ where: { id: { in: createdMessageIds } } });
+    await prisma.media.deleteMany({ where: { id: { in: createdMediaIds } } });
+    await prisma.participant.deleteMany({ where: { conversationId } });
+    await prisma.conversation.delete({ where: { id: conversationId } });
+    await prisma.user.delete({ where: { id: userId } });
+    await app.close();
+  });
+
+  function cookieFor(id: string): string {
+    const { token } = signAccessToken(id);
+    return `${ACCESS_COOKIE}=${token}`;
+  }
+
+  async function createVoiceAttachment(transcriptStatus: string | null, transcript: unknown = null) {
+    const suffix = randomUUID().slice(0, 8);
+    const media = await app.prisma.media.create({
+      data: {
+        uploaderId: userId,
+        storageKey: `voice/test/${suffix}.opus`,
+        mimeType: "audio/opus",
+        sizeBytes: 1024,
+        transcriptStatus,
+        transcript: transcript as never,
+      },
+    });
+    createdMediaIds.push(media.id);
+    const message = await app.prisma.message.create({
+      data: { conversationId, senderId: userId, type: "AUDIO", body: null },
+    });
+    createdMessageIds.push(message.id);
+    const attachment = await app.prisma.messageAttachment.create({
+      data: { messageId: message.id, mediaId: media.id, type: "voice" },
+    });
+    return { mediaId: media.id, messageId: message.id, attachmentId: attachment.id };
+  }
+
+  it("returns 200 {status:\"ready\"} — not 202 — when the attachment is already transcribed (idempotent no-op, no new job enqueued)", async () => {
+    const { messageId, attachmentId, mediaId } = await createVoiceAttachment("ready", {
+      segments: [], fullText: "already done", primaryLanguage: "en",
+    });
+
+    const res = await app.inject({
+      method: "POST",
+      url: `/api/messages/${messageId}/attachments/${attachmentId}/transcribe`,
+      headers: { cookie: cookieFor(userId) },
+    });
+
+    assert.equal(res.statusCode, 200);
+    assert.deepEqual(res.json(), { status: "ready" });
+
+    // No new job was enqueued — the row's status must be left exactly as-is,
+    // not reset to "pending" the way the genuine-enqueue branch would.
+    const media = await app.prisma.media.findUnique({ where: { id: mediaId } });
+    assert.equal(media!.transcriptStatus, "ready");
+  });
+
+  it("returns 202 {status:\"pending\"} when transcription is genuinely enqueued for the first time", async () => {
+    const { messageId, attachmentId, mediaId } = await createVoiceAttachment(null);
+
+    const res = await app.inject({
+      method: "POST",
+      url: `/api/messages/${messageId}/attachments/${attachmentId}/transcribe`,
+      headers: { cookie: cookieFor(userId) },
+    });
+
+    assert.equal(res.statusCode, 202);
+    assert.deepEqual(res.json(), { status: "pending" });
+
+    const media = await app.prisma.media.findUnique({ where: { id: mediaId } });
+    assert.equal(media!.transcriptStatus, "pending");
   });
 });

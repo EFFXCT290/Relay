@@ -8,7 +8,7 @@ import {
   clearRefreshCookieOpts,
   refreshCookieOpts,
 } from "../../backend-core/auth/cookies.js";
-import { ProblemError, problemResponse } from "../../backend-core/http/errors.js";
+import { ProblemError } from "../../backend-core/http/errors.js";
 import { generateSalt, hashPassword, verifyPassword } from "../../backend-core/crypto/passwords.js";
 import {
   blocklistJti,
@@ -45,7 +45,7 @@ const authRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
 
       const existing = await fastify.prisma.user.findUnique({ where: { username } });
       if (existing) {
-        return problemResponse(reply, "conflict", "Username is already taken.");
+        throw new ProblemError("conflict", "Username is already taken.");
       }
 
       const salt = generateSalt();
@@ -83,7 +83,7 @@ const authRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
 
       // Soft per-username lockout after 10 consecutive failures.
       if (await fastify.redis.exists(lockoutKey)) {
-        return problemResponse(reply, "unauthorized", "Invalid credentials.");
+        throw new ProblemError("unauthorized", "Invalid credentials.");
       }
 
       const user = await fastify.prisma.user.findUnique({ where: { username } });
@@ -102,7 +102,7 @@ const authRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
         const count = await fastify.redis.incr(failKey);
         if (count === 1) await fastify.redis.expire(failKey, 60 * 30);
         if (count >= 10) await fastify.redis.set(lockoutKey, "1", "EX", 60 * 30);
-        return problemResponse(reply, "unauthorized", "Invalid credentials.");
+        throw new ProblemError("unauthorized", "Invalid credentials.");
       }
 
       // Successful login — clear the fail counter.
@@ -129,19 +129,19 @@ const authRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
     async (request, reply) => {
       const oldRefresh = request.cookies[REFRESH_COOKIE];
       if (!oldRefresh) {
-        return problemResponse(reply, "unauthorized", "Refresh token missing.");
+        throw new ProblemError("unauthorized", "Refresh token missing.");
       }
 
       let payload;
       try {
         payload = verifyRefreshToken(oldRefresh);
       } catch {
-        return problemResponse(reply, "unauthorized", "Refresh token invalid or expired.");
+        throw new ProblemError("unauthorized", "Refresh token invalid or expired.");
       }
 
       const blockKey = `jti:${payload.jti}`;
       if (await fastify.redis.exists(blockKey)) {
-        return problemResponse(reply, "unauthorized", "Refresh token has been revoked.");
+        throw new ProblemError("unauthorized", "Refresh token has been revoked.");
       }
 
       // Rotate both tokens — blocklist the old refresh jti so it can't be

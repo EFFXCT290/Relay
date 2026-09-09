@@ -357,8 +357,10 @@ describe("Soft-delete consistency — reply-to preview never leaks a deleted par
 
     // Same clientMessageId again — hits the idempotent fast path, which
     // re-reads the existing message's replyTo relation fresh from the DB.
+    // It's a found-existing replay, not a new creation, so it's 200 (see
+    // POST /conversations' identical existing/created 200-vs-201 pattern).
     const retryReply = await sendText(app, b.id, conversationId, "got it", { replyToId: parentId, clientMessageId });
-    assert.equal(retryReply.statusCode, 201);
+    assert.equal(retryReply.statusCode, 200);
     const body = retryReply.json() as { replyTo: { messageId: string; preview: string | null } | null };
     assert.equal(body.replyTo?.messageId, parentId);
     assert.equal(body.replyTo?.preview ?? null, null);

@@ -105,3 +105,54 @@ describe("PATCH /api/notifications/:notificationId/read", () => {
     assert.equal(afterRow!.isRead, true);
   });
 });
+
+describe("GET /api/notifications — NotificationSchema (now sourced from @relay/contracts)", () => {
+  let app: Awaited<ReturnType<typeof buildTestApp>>;
+  const createdUserIds: string[] = [];
+
+  before(async () => {
+    app = await buildTestApp();
+  });
+
+  after(async () => {
+    const prisma = app.prisma;
+    await prisma.user.deleteMany({ where: { id: { in: createdUserIds } } }); // cascades notifications
+    await app.close();
+  });
+
+  // Confirms the route's response still validates and serializes exactly the
+  // same shape it did with the old inline schema: an object-valued `payload`
+  // (the only shape notify() ever actually writes — see notification.service.ts)
+  // must still pass through untouched, not get stripped by the swap from
+  // Type.Unknown() to the contract's Type.Record(Type.String(), Type.Unknown()).
+  it("returns 200 with notifications[].payload intact as an object, plus unreadCount/nextCursor", async () => {
+    const owner = await createUser(app.prisma, "list");
+    createdUserIds.push(owner.id);
+    const fromUserId = randomUUID();
+    const insertedPayload = { from: { userId: fromUserId, username: "someone" }, preview: "hi" };
+    await app.prisma.notification.create({
+      data: { userId: owner.id, type: "MESSAGE_RECEIVED", payload: insertedPayload },
+    });
+
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/notifications",
+      headers: { cookie: cookieFor(owner.id) },
+    });
+    assert.equal(res.statusCode, 200);
+
+    const body = res.json() as {
+      notifications: { notificationId: string; type: string; isRead: boolean; payload: Record<string, unknown>; createdAt: string }[];
+      unreadCount: number;
+      nextCursor: string | null;
+    };
+    assert.equal(body.notifications.length, 1);
+    assert.equal(body.notifications[0]!.type, "MESSAGE_RECEIVED");
+    // Every key survives the round trip — proves the contract's
+    // Type.Record(Type.String(), Type.Unknown()) serializes an arbitrary
+    // object payload exactly like the old inline Type.Unknown() did.
+    assert.deepEqual(body.notifications[0]!.payload, insertedPayload);
+    assert.equal(body.unreadCount, 1);
+    assert.equal(body.nextCursor, null);
+  });
+});

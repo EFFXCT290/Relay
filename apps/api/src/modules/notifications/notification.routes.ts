@@ -1,14 +1,7 @@
 import type { FastifyPluginAsyncTypebox } from "@fastify/type-provider-typebox";
 import { Type } from "@sinclair/typebox";
 import { ProblemError } from "../../backend-core/http/errors.js";
-
-const NotificationSchema = Type.Object({
-  notificationId: Type.String({ format: "uuid" }),
-  type: Type.String(),
-  isRead: Type.Boolean(),
-  payload: Type.Unknown(),
-  createdAt: Type.String({ format: "date-time" }),
-});
+import { NotificationSchema } from "@relay/contracts";
 
 const notificationRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
   // ── GET /api/notifications ────────────────────────────────────────────────
@@ -56,7 +49,10 @@ const notificationRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
           notificationId: n.id,
           type: n.type,
           isRead: n.isRead,
-          payload: n.payload,
+          // Prisma's Json column type admits any JSON value, but every write
+          // goes through notify()'s Record<string, unknown> payload param
+          // (notification.service.ts) — it's always an object in practice.
+          payload: n.payload as Record<string, unknown>,
           createdAt: n.createdAt.toISOString(),
         })),
         unreadCount,
