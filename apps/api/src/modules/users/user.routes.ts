@@ -128,15 +128,12 @@ const userRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
   // ── DELETE /api/users/me/avatar ───────────────────────────────────────────
   fastify.delete(
     "/users/me/avatar",
-    {
-      preHandler: [fastify.authenticate],
-      schema: { response: { 200: AvatarResponseSchema } },
-    },
-    async (request) => {
+    { preHandler: [fastify.authenticate] },
+    async (request, reply) => {
       const userId = request.userId!;
       await clearAvatar({ userId, prisma: fastify.prisma, s3: fastify.s3, log: fastify.log });
       await broadcastProfileUpdate(fastify, userId, null);
-      return { avatarUrl: null };
+      return reply.code(204).send();
     },
   );
 };

@@ -171,7 +171,7 @@ describe("user:profile-updated broadcast scoping", () => {
       url: "/api/users/me/avatar",
       headers: { cookie: `${ACCESS_COOKIE}=${token}` },
     });
-    assert.equal(delRes.statusCode, 200);
+    assert.equal(delRes.statusCode, 204);
 
     const received = await bEvent;
     assert.equal(received.userId, a.id, "the co-participant should receive the broadcast");

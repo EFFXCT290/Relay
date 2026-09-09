@@ -26,5 +26,5 @@ export const usersApi = {
     return res.json() as Promise<AvatarResponse>;
   },
 
-  deleteAvatar: () => api<AvatarResponse>("/api/users/me/avatar", { method: "DELETE" }),
+  deleteAvatar: () => api<void>("/api/users/me/avatar", { method: "DELETE" }),
 };
