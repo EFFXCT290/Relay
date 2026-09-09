@@ -55,3 +55,6 @@ redis-data/
 
 # graphify (generated knowledge graph)
 graphify-out/
+
+# docs
+docs/
