@@ -5,7 +5,7 @@ import { createPortal } from "react-dom";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
-import { ArrowLeft, ImagePlus, MoreHorizontal, Phone, Video } from "lucide-react";
+import { ArrowLeft, ImagePlus, MoreHorizontal, Phone, Search, Video } from "lucide-react";
 import imageCompression from "browser-image-compression";
 import { ApiError, api } from "@/frontend-core/api";
 import { getSocket, getReconnectEpoch } from "@/frontend-core/socket";
@@ -20,6 +20,7 @@ import { ChatComposer, MAX_IMAGES_PER_SEND } from "@/features/messages/component
 import { UploadPreview } from "@/features/messages/components/upload-preview";
 import { PinnedBanner } from "@/features/messages/components/pinned-banner";
 import { PinnedMessagesList } from "@/features/messages/components/pinned-messages-list";
+import { MessageSearchBar } from "@/features/messages/components/message-search-bar";
 import { mediaApi } from "@/frontend-core/api-client/media";
 import { syncApi } from "@/frontend-core/api-client/sync";
 import {
@@ -239,6 +240,11 @@ export default function ChatThreadPage() {
   const [contactInfoOpen, setContactInfoOpen] = useState(false);
   const [sharedMediaOpen, setSharedMediaOpen] = useState(false);
   const [flashMessageId, setFlashMessageId] = useState<string | null>(null);
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
+  // Set by jumpToMessage while a target isn't yet in the loaded window;
+  // consumed by the effect below once more history has been paged in.
+  const pendingJumpRef = useRef<string | null>(null);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   // meId comes from MeContext (resolved by AppShell before this page mounts).
@@ -1519,6 +1525,55 @@ export default function ChatThreadPage() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [flatRows]);
 
+  // Flushes a pending search-result jump once its target has actually
+  // reached flatRows — separate from scrollToMessage because the message may
+  // still be several pages of history away when jumpToMessage is first
+  // called (unlike the pinned-banner jump above, which only ever targets
+  // something already loaded). Re-checks on every flatRows change so it
+  // fires the instant jumpToMessage's own paging loop below merges in the
+  // right page.
+  useEffect(() => {
+    const targetId = pendingJumpRef.current;
+    if (!targetId) return;
+    const index = flatRows.findIndex((row) => row.kind === "message" && row.message.messageId === targetId);
+    if (index === -1) return;
+    pendingJumpRef.current = null;
+    virtualizer.scrollToIndex(index, { align: "center" });
+    setFlashMessageId(targetId);
+    window.setTimeout(() => setFlashMessageId((cur) => (cur === targetId ? null : cur)), 1500);
+  }, [flatRows, virtualizer]);
+
+  // Jump to a message found via search — unlike a pinned-message jump, the
+  // target can be arbitrarily far back in history, outside the currently
+  // loaded window. Pages older history in via the same cursor endpoint
+  // loadOlder uses, bounded so a match near the very start of a long thread
+  // can't page forever.
+  const MAX_JUMP_PAGES = 40;
+  const jumpToMessage = useCallback(async (messageId: string) => {
+    if (messagesRef.current[messageId]) {
+      pendingJumpRef.current = messageId;
+      setRenderTick((x) => x + 1);
+      return;
+    }
+    let cursor = nextCursor;
+    for (let page = 0; cursor && page < MAX_JUMP_PAGES; page++) {
+      const res = await api<{ messages: Message[]; nextCursor: string | null }>(
+        `/api/conversations/${conversationId}/messages?limit=${PAGE_SIZE}&cursor=${cursor}`,
+      );
+      let found = false;
+      for (const m of res.messages) {
+        if (!messagesRef.current[m.messageId]) messagesRef.current[m.messageId] = m;
+        if (m.messageId === messageId) found = true;
+      }
+      cursor = res.nextCursor;
+      setNextCursor(cursor);
+      if (found) break;
+    }
+    pendingJumpRef.current = messageId;
+    setRenderTick((x) => x + 1);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [conversationId, nextCursor]);
+
   // Malformed id — the redirect effect above is already navigating away.
   // Render nothing rather than the "loading conversation" skeleton below,
   // which would misleadingly imply a real conversation is about to appear.
@@ -1552,7 +1607,18 @@ export default function ChatThreadPage() {
         </div>
       )}
 
-      {/* Header */}
+      {/* Header — replaced entirely by the search bar while searching. On
+          mobile this reads as "the icon opens a search bar overlaying the
+          header"; on desktop the same trigger sits right-aligned next to the
+          call/video icons it temporarily displaces. */}
+      {searchOpen ? (
+        <MessageSearchBar
+          conversationId={conversationId}
+          onClose={() => { setSearchOpen(false); setSearchQuery(""); }}
+          onJumpToMessage={jumpToMessage}
+          onQueryChange={setSearchQuery}
+        />
+      ) : (
       <header
         className="flex items-center gap-3 border-b bg-[var(--color-bg)]/92 px-4 py-2 backdrop-blur-xl"
         style={{ borderColor: "var(--color-hairline)" }}
@@ -1617,6 +1683,14 @@ export default function ChatThreadPage() {
         </div>
         <button
           type="button"
+          aria-label="Search in conversation"
+          onClick={() => setSearchOpen(true)}
+          className="flex h-10 w-10 items-center justify-center rounded-full hover:bg-white/5"
+        >
+          <Search className="h-5 w-5 text-[var(--color-text)]" />
+        </button>
+        <button
+          type="button"
           aria-label="Audio call"
           disabled={!detail}
           onClick={() =>
@@ -1656,6 +1730,7 @@ export default function ChatThreadPage() {
           <MoreHorizontal className="h-5 w-5 text-[var(--color-text)]" />
         </button>
       </header>
+      )}
 
       {headerMenuOpen && createPortal(
         <>
@@ -1805,6 +1880,7 @@ export default function ChatThreadPage() {
                           onViewEphemeral={handleViewEphemeral}
                           onViewDisappear={handleViewDisappear}
                           onRequestTranscript={handleRequestTranscript}
+                          highlightQuery={searchOpen ? searchQuery : undefined}
                         />
                       </div>
                     );

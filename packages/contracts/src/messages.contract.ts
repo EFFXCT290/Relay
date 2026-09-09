@@ -150,6 +150,25 @@ export type Message = Static<typeof MessageSchema>;
 // Narrowed media-type literal — components and DB switch on this
 export type MessageType = "TEXT" | "IMAGE" | "VIDEO" | "AUDIO";
 
+// ── Per-conversation message search (GET /conversations/:id/messages/search) ──
+// One row per matching message OR matching voice-note transcript — never both
+// for the same message. `snippet` is a window of context around the match,
+// already truncated server-side; the client re-locates the substring client-
+// side (case-insensitive) to render the inline highlight. Excludes soft-
+// deleted messages and any disappearing message whose body is still hidden
+// (see message-search.service.ts's WHERE-clause-level exclusion) — a row
+// here is a guarantee the content was safe to reveal, not just that it
+// matched.
+export const MessageSearchHitSchema = Type.Object({
+  messageId: Type.String({ format: "uuid" }),
+  type:      Type.String(),
+  senderId:  Type.String({ format: "uuid" }),
+  createdAt: Type.String({ format: "date-time" }),
+  snippet:   Type.String(),
+  matchedIn: Type.Union([Type.Literal("body"), Type.Literal("transcript")]),
+});
+export type MessageSearchHit = Static<typeof MessageSearchHitSchema>;
+
 // ── Request payloads ─────────────────────────────────────────────────────────
 export const SendMessagePayloadSchema = Type.Object({
   conversationId: Type.String({ format: "uuid" }),

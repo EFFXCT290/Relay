@@ -18,6 +18,31 @@ const mono = "var(--font-mono)";
 const QUICK_EMOJI = ["❤️", "😂", "😮", "😢", "🔥", "👍"];
 const SWIPE_THRESHOLD = 60;
 
+// Escapes regex metacharacters so an arbitrary search query can be used as a
+// literal substring pattern, not interpreted as a regex.
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+// Wraps every case-insensitive occurrence of `query` in `text` with <mark>,
+// for the message-search inline highlight (see message-search-bar.tsx). A
+// blank query renders the text unchanged rather than matching everything.
+function highlightMatches(text: string, query: string) {
+  const q = query.trim();
+  if (!q) return text;
+  const parts = text.split(new RegExp(`(${escapeRegExp(q)})`, "gi"));
+  if (parts.length === 1) return text;
+  return parts.map((part, i) =>
+    part.toLowerCase() === q.toLowerCase() ? (
+      <mark key={i} className="rounded-[3px] bg-[#FFD84D] px-0.5 text-[#1a1a1a]">
+        {part}
+      </mark>
+    ) : (
+      part
+    ),
+  );
+}
+
 // macOS natural scrolling sends negative deltaX for a rightward finger swipe.
 // Windows / Linux send positive deltaX for the same gesture.
 const isMacOS = typeof navigator !== "undefined" && /Mac/.test(navigator.userAgent);
@@ -41,6 +66,8 @@ type Props = {
   onViewEphemeral?: (attachment: ImageAttachment | VideoAttachment) => void;
   onViewDisappear?: (messageId: string) => void;
   onRequestTranscript?: (messageId: string, attachmentId: string) => Promise<void> | void;
+  /** Active message-search query, if any — highlights matches inline in the body. */
+  highlightQuery?: string;
 };
 
 export function MessageBubble({
@@ -62,6 +89,7 @@ export function MessageBubble({
   onViewEphemeral,
   onViewDisappear,
   onRequestTranscript,
+  highlightQuery,
 }: Props) {
   const [pickerOpen, setPickerOpen] = useState(false);
   const [longMenuOpen, setLongMenuOpen] = useState(false);
@@ -365,7 +393,7 @@ export function MessageBubble({
                     wordBreak: "break-word",
                   }}
                 >
-                  {message.body}
+                  {highlightQuery ? highlightMatches(message.body, highlightQuery) : message.body}
                 </div>
               )
             )}

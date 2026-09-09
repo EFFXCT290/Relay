@@ -60,6 +60,22 @@ export declare const ConversationSchema: import("@sinclair/typebox").TObject<{
     createdAt: import("@sinclair/typebox").TString;
 }>;
 export type Conversation = Static<typeof ConversationSchema>;
+export declare const ConversationSearchHitSchema: import("@sinclair/typebox").TObject<{
+    conversationId: import("@sinclair/typebox").TString;
+    participant: import("@sinclair/typebox").TObject<{
+        userId: import("@sinclair/typebox").TString;
+        username: import("@sinclair/typebox").TString;
+        avatarUrl: import("@sinclair/typebox").TOptional<import("@sinclair/typebox").TUnion<[import("@sinclair/typebox").TString, import("@sinclair/typebox").TNull]>>;
+        isOnline: import("@sinclair/typebox").TOptional<import("@sinclair/typebox").TBoolean>;
+        lastSeenAt: import("@sinclair/typebox").TOptional<import("@sinclair/typebox").TUnion<[import("@sinclair/typebox").TString, import("@sinclair/typebox").TNull]>>;
+        nickname: import("@sinclair/typebox").TOptional<import("@sinclair/typebox").TUnion<[import("@sinclair/typebox").TString, import("@sinclair/typebox").TNull]>>;
+    }>;
+    matchType: import("@sinclair/typebox").TUnion<[import("@sinclair/typebox").TLiteral<"participant">, import("@sinclair/typebox").TLiteral<"content">]>;
+    snippet: import("@sinclair/typebox").TUnion<[import("@sinclair/typebox").TString, import("@sinclair/typebox").TNull]>;
+    messageId: import("@sinclair/typebox").TUnion<[import("@sinclair/typebox").TString, import("@sinclair/typebox").TNull]>;
+    updatedAt: import("@sinclair/typebox").TString;
+}>;
+export type ConversationSearchHit = Static<typeof ConversationSearchHitSchema>;
 export declare const CreateConversationPayloadSchema: import("@sinclair/typebox").TObject<{
     participantId: import("@sinclair/typebox").TString;
 }>;

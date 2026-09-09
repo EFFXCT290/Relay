@@ -1,7 +1,12 @@
 import type { FastifyPluginAsyncTypebox } from "@fastify/type-provider-typebox";
 import { Type } from "@sinclair/typebox";
 import { ProblemError } from "../../backend-core/http/errors.js";
-import { MESSAGE_EVENTS, SpotifyConversationSummarySchema, type SpotifyConversationSummary } from "@relay/contracts";
+import {
+  MESSAGE_EVENTS,
+  SpotifyConversationSummarySchema,
+  ConversationSearchHitSchema,
+  type SpotifyConversationSummary,
+} from "@relay/contracts";
 import {
   emitConversationAccepted,
   emitConversationDeleted,
@@ -11,6 +16,7 @@ import { PresenceService } from "../presence/presence.service.js";
 import { SpotifyService } from "../spotify/spotify.service.js";
 import { NicknameService } from "../nicknames/nickname.service.js";
 import { connectedUserIds, isConnected } from "./connection.service.js";
+import { searchMessages } from "../messages/services/message-search.service.js";
 
 const ParticipantSchema = Type.Object({
   userId:     Type.String({ format: "uuid" }),
@@ -448,6 +454,108 @@ const conversationRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
             updatedAt: c.updatedAt.toISOString(),
           };
         })),
+      };
+    },
+  );
+
+  // ── GET /api/conversations/search ──────────────────────────────────────────
+  // Global inbox search: live-as-you-type across every conversation the
+  // caller has accepted (same scoping as GET /conversations above — a
+  // pending request isn't a "conversation" yet). Matches either the other
+  // participant's username/nickname, or message/transcript content inside
+  // that conversation. A name match takes priority over a content match for
+  // the same conversation — see ConversationSearchHitSchema. Content
+  // matching reuses searchMessages, so it inherits the exact same
+  // disappearing-message WHERE-clause exclusion as the per-conversation
+  // search (message-search.service.ts) — there is only one place that logic
+  // lives.
+  const CONVERSATION_SEARCH_SCAN_CAP = 500; // messages scanned per query, not rows returned
+
+  fastify.get(
+    "/conversations/search",
+    {
+      preHandler: [fastify.authenticate],
+      schema: {
+        querystring: Type.Object({ q: Type.String({ minLength: 1, maxLength: 200 }) }),
+        response: { 200: Type.Object({ results: Type.Array(ConversationSearchHitSchema) }) },
+      },
+    },
+    async (request) => {
+      const callerId = request.userId!;
+      const q = request.query.q.trim();
+      if (!q) return { results: [] };
+      const qLower = q.toLowerCase();
+
+      const rows = await fastify.prisma.conversation.findMany({
+        where: { participants: { some: { userId: callerId, acceptedAt: { not: null } } } },
+        include: {
+          participants: { include: { user: { select: { id: true, username: true, avatarKey: true } } } },
+        },
+      });
+      if (rows.length === 0) return { results: [] };
+
+      const otherIds = rows.map((c) => c.participants.find((p) => p.userId !== callerId)?.userId ?? callerId);
+      const conversationIds = rows.map((c) => c.id);
+
+      const [nicknames, connected, contentHits] = await Promise.all([
+        myNicknamesFor(fastify, callerId, otherIds),
+        connectedUserIds(fastify, callerId, otherIds),
+        searchMessages(fastify.prisma, conversationIds, q, CONVERSATION_SEARCH_SCAN_CAP),
+      ]);
+
+      // contentHits is already most-recent-first (see searchMessages) — keep
+      // only the first (i.e. latest) hit seen per conversation.
+      const latestContentByConversation = new Map<string, (typeof contentHits)[number]>();
+      for (const hit of contentHits) {
+        if (!latestContentByConversation.has(hit.conversationId)) {
+          latestContentByConversation.set(hit.conversationId, hit);
+        }
+      }
+
+      const matched = rows
+        .map((c) => {
+          const other = c.participants.find((p) => p.userId !== callerId);
+          const otherId = other?.userId ?? callerId;
+          const nickname = nicknames.get(otherId) ?? null;
+          const nameMatches =
+            (other?.user.username.toLowerCase().includes(qLower) ?? false) ||
+            (nickname?.toLowerCase().includes(qLower) ?? false);
+          const contentHit = nameMatches ? undefined : latestContentByConversation.get(c.id);
+          if (!nameMatches && !contentHit) return null;
+
+          return {
+            conversationId: c.id,
+            otherId,
+            username:       other?.user.username ?? "—",
+            nickname,
+            // See connection.service.ts — real avatar only once BOTH sides
+            // have accepted, same gate as GET /conversations above.
+            avatarKey:      other?.user.avatarKey && connected.has(otherId) ? other.user.avatarKey : null,
+            matchType:      (nameMatches ? "participant" : "content") as "participant" | "content",
+            snippet:        contentHit?.snippet ?? null,
+            messageId:      contentHit?.messageId ?? null,
+            updatedAt:      c.updatedAt,
+          };
+        })
+        .filter((r): r is NonNullable<typeof r> => r !== null)
+        .sort((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime());
+
+      return {
+        results: await Promise.all(
+          matched.map(async (r) => ({
+            conversationId: r.conversationId,
+            participant: {
+              userId:    r.otherId,
+              username:  r.username,
+              nickname:  r.nickname,
+              avatarUrl: r.avatarKey ? await fastify.getMediaUrl(r.avatarKey) : null,
+            },
+            matchType: r.matchType,
+            snippet:   r.snippet,
+            messageId: r.messageId,
+            updatedAt: r.updatedAt.toISOString(),
+          })),
+        ),
       };
     },
   );

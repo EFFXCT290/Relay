@@ -14,6 +14,7 @@ import {
   DisappearStateSchema,
   MessageOpenResponseSchema,
   MediaGalleryItemSchema,
+  MessageSearchHitSchema,
   type PinnedMessage,
   type DisappearState,
   type MessageDisappearProgressEvent,
@@ -38,6 +39,7 @@ import {
   emitMessageDisappearProgress,
   emitMessageDisappearStarted,
 } from "./message.socket.js";
+import { searchMessages } from "./services/message-search.service.js";
 import { extractUrls } from "./utils/extract-urls.js";
 import { fetchEmbed } from "./services/embed.service.js";
 import { maybeNotifyDiscord } from "./services/discord-notify.js";
@@ -1366,6 +1368,45 @@ const messageRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
       })));
 
       return { items, nextCursor, totalCount };
+    },
+  );
+
+  // ── GET /api/conversations/:conversationId/messages/search ────────────────
+  // WhatsApp-style per-conversation search: message text + voice-note
+  // transcripts, case-insensitive substring, most-recent-first. The
+  // disappearing-message exclusion happens inside searchMessages' WHERE
+  // clause (message-search.service.ts), not here — this route never sees a
+  // hidden body/transcript to begin with, matched or not.
+  const MESSAGE_SEARCH_CAP = 200;
+
+  fastify.get(
+    "/conversations/:conversationId/messages/search",
+    {
+      preHandler: [fastify.authenticate],
+      schema: {
+        params: Type.Object({ conversationId: Type.String({ format: "uuid" }) }),
+        querystring: Type.Object({ q: Type.String({ minLength: 1, maxLength: 200 }) }),
+        response: { 200: Type.Object({ hits: Type.Array(MessageSearchHitSchema) }) },
+      },
+    },
+    async (request) => {
+      const callerId = request.userId!;
+      const { conversationId } = request.params;
+      const q = request.query.q.trim();
+      await assertParticipant(fastify, callerId, conversationId);
+      if (!q) return { hits: [] };
+
+      const hits = await searchMessages(fastify.prisma, [conversationId], q, MESSAGE_SEARCH_CAP);
+      return {
+        hits: hits.map((h) => ({
+          messageId: h.messageId,
+          type:      h.type,
+          senderId:  h.senderId,
+          createdAt: h.createdAt.toISOString(),
+          snippet:   h.snippet,
+          matchedIn: h.matchedIn,
+        })),
+      };
     },
   );
 };

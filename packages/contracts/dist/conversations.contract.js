@@ -51,6 +51,24 @@ export const ConversationSchema = Type.Object({
     unreadCount: Type.Number(),
     createdAt: Type.String({ format: "date-time" }),
 });
+// ── Global inbox search (GET /conversations/search) ─────────────────────────
+// One row per matching conversation, scoped to the caller's own accepted
+// conversations. "participant" means the other participant's username or the
+// caller's own nickname override for them matched; "content" means a message
+// body or voice transcript inside that conversation matched (same
+// disappearing-message exclusion as the per-conversation search — see
+// message-search.service.ts) and carries the most recent such match as
+// `snippet`/`messageId`. A conversation matched by name never sets a snippet
+// even if it also happens to contain matching content — the name match alone
+// is reason enough to surface it.
+export const ConversationSearchHitSchema = Type.Object({
+    conversationId: Type.String({ format: "uuid" }),
+    participant: ConversationParticipantSchema,
+    matchType: Type.Union([Type.Literal("participant"), Type.Literal("content")]),
+    snippet: Type.Union([Type.String(), Type.Null()]),
+    messageId: Type.Union([Type.String({ format: "uuid" }), Type.Null()]),
+    updatedAt: Type.String({ format: "date-time" }),
+});
 // ── Request payloads ─────────────────────────────────────────────────────────
 export const CreateConversationPayloadSchema = Type.Object({
     participantId: Type.String({ format: "uuid" }),

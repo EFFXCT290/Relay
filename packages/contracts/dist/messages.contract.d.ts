@@ -174,6 +174,15 @@ export declare const MessageSchema: import("@sinclair/typebox").TObject<{
 }>;
 export type Message = Static<typeof MessageSchema>;
 export type MessageType = "TEXT" | "IMAGE" | "VIDEO" | "AUDIO";
+export declare const MessageSearchHitSchema: import("@sinclair/typebox").TObject<{
+    messageId: import("@sinclair/typebox").TString;
+    type: import("@sinclair/typebox").TString;
+    senderId: import("@sinclair/typebox").TString;
+    createdAt: import("@sinclair/typebox").TString;
+    snippet: import("@sinclair/typebox").TString;
+    matchedIn: import("@sinclair/typebox").TUnion<[import("@sinclair/typebox").TLiteral<"body">, import("@sinclair/typebox").TLiteral<"transcript">]>;
+}>;
+export type MessageSearchHit = Static<typeof MessageSearchHitSchema>;
 export declare const SendMessagePayloadSchema: import("@sinclair/typebox").TObject<{
     conversationId: import("@sinclair/typebox").TString;
     body: import("@sinclair/typebox").TString;
