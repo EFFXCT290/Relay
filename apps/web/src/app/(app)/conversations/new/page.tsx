@@ -8,7 +8,7 @@ import { api } from "@/frontend-core/api";
 import { Avatar } from "@/shared/components/avatar";
 import { Input } from "@/shared/ui/input";
 
-type SearchHit = { userId: string; username: string };
+type SearchHit = { userId: string; username: string; avatarUrl?: string | null };
 
 const mono = "var(--font-mono)";
 const display = "var(--font-display)";
@@ -146,7 +146,7 @@ export default function NewMessagePage() {
                 disabled={busyUserId === user.userId}
                 className="flex w-full items-center gap-3.5 px-6 py-3 text-left transition-colors hover:bg-white/[0.02] disabled:opacity-60"
               >
-                <Avatar username={user.username} size={44} />
+                <Avatar username={user.username} src={user.avatarUrl} size={44} />
                 <div className="flex flex-1 flex-col gap-0.5">
                   <span
                     className="text-[16px] font-bold tracking-[-0.01em] text-[var(--color-text)]"
