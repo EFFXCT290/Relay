@@ -55,9 +55,24 @@ function cookieFor(userId: string): string {
   return `${ACCESS_COOKIE}=${token}`;
 }
 
+// avatarUrl is now gated on connection (see connection.service.ts) — tests
+// that need to see a REAL avatarUrl must set up an accepted-both-sides
+// conversation between the two users first.
+async function makeAcceptedConversation(prisma: PrismaClient, aId: string, bId: string) {
+  const conversation = await prisma.conversation.create({ data: {} });
+  await prisma.participant.createMany({
+    data: [
+      { userId: aId, conversationId: conversation.id, acceptedAt: new Date() },
+      { userId: bId, conversationId: conversation.id, acceptedAt: new Date() },
+    ],
+  });
+  return conversation.id;
+}
+
 describe("GET /api/users/search", () => {
   let app: Awaited<ReturnType<typeof buildTestApp>>;
   const createdUserIds: string[] = [];
+  const createdConversationIds: string[] = [];
   const suffix = randomUUID().slice(0, 8); // shared, unique-per-run prefix so `q` can't accidentally match another test's leftover data
 
   before(async () => {
@@ -65,6 +80,7 @@ describe("GET /api/users/search", () => {
   });
 
   after(async () => {
+    await app.prisma.conversation.deleteMany({ where: { id: { in: createdConversationIds } } });
     await app.prisma.user.deleteMany({ where: { id: { in: createdUserIds } } });
     await app.close();
   });
@@ -91,6 +107,10 @@ describe("GET /api/users/search", () => {
     const caller = await createUser(app.prisma, `srch-${suffix}-caller2`);
     const withAvatar = await createUser(app.prisma, `srch-${suffix}-withavatar`, "avatars/some-user/deadbeef.webp");
     createdUserIds.push(caller.id, withAvatar.id);
+    // avatarUrl is gated on connection — without this, the real signed URL
+    // this test asserts on would correctly come back null (see the separate
+    // connection-gating describe block below for that behavior itself).
+    createdConversationIds.push(await makeAcceptedConversation(app.prisma, caller.id, withAvatar.id));
 
     const res = await app.inject({
       method: "GET",
@@ -115,6 +135,26 @@ describe("GET /api/users/search", () => {
     for (const forbidden of ["passwordHash", "passwordSalt", "avatarKey", "email", "createdAt", "updatedAt", "pushMessages", "pushCalls"]) {
       assert.equal(hit[forbidden], undefined, `response must not include "${forbidden}"`);
     }
+  });
+
+  it("hides a search hit's real avatarUrl when the caller is NOT connected to them (no accepted conversation)", async () => {
+    const caller = await createUser(app.prisma, `srch-${suffix}-caller2b`);
+    const stranger = await createUser(app.prisma, `srch-${suffix}-stranger`, "avatars/some-user/deadbeef.webp");
+    createdUserIds.push(caller.id, stranger.id);
+    // Deliberately no conversation at all between them — the "no connection
+    // whatsoever" case, distinct from the pending-request case covered in
+    // conversation.routes.test.ts.
+
+    const res = await app.inject({
+      method: "GET",
+      url: `/api/users/search?q=srch-${suffix}-stranger`,
+      headers: { cookie: cookieFor(caller.id) },
+    });
+
+    assert.equal(res.statusCode, 200);
+    const body = res.json() as { users: Array<{ avatarUrl: string | null }> };
+    assert.equal(body.users.length, 1);
+    assert.equal(body.users[0]!.avatarUrl, null, "a real avatarKey exists, but must never be signed/returned for a non-connected viewer");
   });
 
   it("a user with no avatar gets avatarUrl: null, not an error or a broken URL", async () => {
@@ -166,5 +206,62 @@ describe("GET /api/users/search", () => {
   it("requires authentication", async () => {
     const res = await app.inject({ method: "GET", url: `/api/users/search?q=${suffix}` });
     assert.equal(res.statusCode, 401);
+  });
+});
+
+describe("GET /api/users/:userId", () => {
+  let app: Awaited<ReturnType<typeof buildTestApp>>;
+  const createdUserIds: string[] = [];
+  const createdConversationIds: string[] = [];
+
+  before(async () => {
+    app = await buildTestApp();
+  });
+
+  after(async () => {
+    await app.prisma.conversation.deleteMany({ where: { id: { in: createdConversationIds } } });
+    await app.prisma.user.deleteMany({ where: { id: { in: createdUserIds } } });
+    await app.close();
+  });
+
+  function get(callerId: string, targetId: string) {
+    return app.inject({ method: "GET", url: `/api/users/${targetId}`, headers: { cookie: cookieFor(callerId) } });
+  }
+
+  // This route has no search query to filter by — a direct id lookup is an
+  // even broader leak surface than search (no username prefix needed), so
+  // it gets the identical gate.
+  it("hides the target's real avatarUrl when the caller is NOT connected to them", async () => {
+    const caller = await createUser(app.prisma, `uid-${randomUUID().slice(0, 8)}-caller`);
+    const stranger = await createUser(app.prisma, `uid-${randomUUID().slice(0, 8)}-stranger`, "avatars/some-user/deadbeef.webp");
+    createdUserIds.push(caller.id, stranger.id);
+
+    const res = await get(caller.id, stranger.id);
+    assert.equal(res.statusCode, 200);
+    assert.equal((res.json() as { avatarUrl: string | null }).avatarUrl, null);
+  });
+
+  it("shows the real avatarUrl once the caller and target have an accepted-both-sides conversation", async () => {
+    const caller = await createUser(app.prisma, `uid-${randomUUID().slice(0, 8)}-caller`);
+    const connected = await createUser(app.prisma, `uid-${randomUUID().slice(0, 8)}-connected`, "avatars/some-user/deadbeef.webp");
+    createdUserIds.push(caller.id, connected.id);
+    createdConversationIds.push(await makeAcceptedConversation(app.prisma, caller.id, connected.id));
+
+    const res = await get(caller.id, connected.id);
+    assert.equal(res.statusCode, 200);
+    const avatarUrl = (res.json() as { avatarUrl: string | null }).avatarUrl;
+    assert.equal(typeof avatarUrl, "string");
+    assert.ok(String(avatarUrl).includes("deadbeef"));
+  });
+
+  it("looking yourself up is unaffected by the gate — your own real avatarUrl always comes back", async () => {
+    const caller = await createUser(app.prisma, `uid-${randomUUID().slice(0, 8)}-self`, "avatars/some-user/deadbeef.webp");
+    createdUserIds.push(caller.id);
+
+    const res = await get(caller.id, caller.id);
+    assert.equal(res.statusCode, 200);
+    const avatarUrl = (res.json() as { avatarUrl: string | null }).avatarUrl;
+    assert.equal(typeof avatarUrl, "string");
+    assert.ok(String(avatarUrl).includes("deadbeef"));
   });
 });

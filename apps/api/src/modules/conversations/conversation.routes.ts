@@ -10,6 +10,7 @@ import {
 import { PresenceService } from "../presence/presence.service.js";
 import { SpotifyService } from "../spotify/spotify.service.js";
 import { NicknameService } from "../nicknames/nickname.service.js";
+import { connectedUserIds, isConnected } from "./connection.service.js";
 
 const ParticipantSchema = Type.Object({
   userId:     Type.String({ format: "uuid" }),
@@ -195,7 +196,14 @@ const conversationRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
         select: { id: true, username: true, avatarKey: true },
       });
       if (!other) throw new ProblemError("not_found", "Participant not found.");
-      const otherAvatarUrl = other.avatarKey ? await fastify.getMediaUrl(other.avatarKey) : null;
+      // Real avatar only if we're already connected (an existing conversation
+      // with BOTH sides accepted) — a brand-new conversation about to be
+      // created below is by definition not that yet (the other side hasn't
+      // accepted), and re-POSTing against a still-pending existing one isn't
+      // either. See connection.service.ts.
+      const otherAvatarUrl = other.avatarKey && (await isConnected(fastify, callerId, other.id))
+        ? await fastify.getMediaUrl(other.avatarKey)
+        : null;
       // A nickname can already exist even before any conversation did (e.g.
       // set from a mutual-contacts surface elsewhere) — same batched lookup
       // as every other participant-bearing response, just a single-element
@@ -308,11 +316,12 @@ const conversationRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
         return other?.userId ?? callerId;
       });
 
-      const [unreadCounts, presences, spotifies, nicknames] = await Promise.all([
+      const [unreadCounts, presences, spotifies, nicknames, connected] = await Promise.all([
         unreadCountsFor(fastify, callerId, slice.map((c) => c.id)),
         presencesFor(fastify, otherIds),
         spotifySummariesFor(fastify, otherIds),
         myNicknamesFor(fastify, callerId, otherIds),
+        connectedUserIds(fastify, callerId, otherIds),
       ]);
 
       return {
@@ -320,7 +329,11 @@ const conversationRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
           const other = c.participants.find((p) => p.userId !== callerId);
           const last  = c.messages[0];
           const p     = presences.get(other?.userId ?? callerId);
-          const avatarUrl = other?.user.avatarKey ? await fastify.getMediaUrl(other.user.avatarKey) : null;
+          // This row's WHERE clause only guarantees the CALLER'S OWN side is
+          // accepted — a conversation the caller just created shows up here
+          // immediately even though the other side hasn't accepted yet. Real
+          // avatar requires both sides (see connection.service.ts).
+          const avatarUrl = other?.user.avatarKey && connected.has(other.userId) ? await fastify.getMediaUrl(other.user.avatarKey) : null;
           return {
             conversationId: c.id,
             participant: other
@@ -403,7 +416,14 @@ const conversationRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
           const other = c.participants.find((p) => p.userId !== callerId);
           const last  = c.messages[0];
           const p     = presences.get(other?.userId ?? callerId);
-          const avatarUrl = other?.user.avatarKey ? await fastify.getMediaUrl(other.user.avatarKey) : null;
+          // This route's own WHERE clause guarantees the caller's side is
+          // NOT accepted for every row here — by definition that's never
+          // "connected" (see connection.service.ts), and since a 1:1 pair
+          // can have at most one conversation between them (POST
+          // /conversations' own idempotent lookup enforces that), there's no
+          // separate already-accepted conversation with this same person
+          // either. No query needed — always redacted.
+          const avatarUrl = null;
           return {
             conversationId: c.id,
             participant: other
@@ -468,17 +488,21 @@ const conversationRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
       if (!me) throw new ProblemError("forbidden", "You are not a participant.");
 
       const other = conv.participants.find((p) => p.userId !== callerId) ?? conv.participants[0]!;
-      const [presence, myNicknames, sharedNicknames] = await Promise.all([
+      const [presence, myNicknames, sharedNicknames, canSeeAvatar] = await Promise.all([
         new PresenceService(fastify).getFor(other.user.id),
         myNicknamesFor(fastify, callerId, [other.user.id]),
         sharedNicknamesForMe(fastify, callerId, [other.user.id]),
+        // Authz above only checks "are you A participant" — a still-pending
+        // request (either side unaccepted) is a valid participant view but
+        // not yet "connected" (see connection.service.ts).
+        isConnected(fastify, callerId, other.user.id),
       ]);
       return {
         conversationId: conv.id,
         participant: {
           userId:     other.user.id,
           username:   other.user.username,
-          avatarUrl:  other.user.avatarKey ? await fastify.getMediaUrl(other.user.avatarKey) : null,
+          avatarUrl:  other.user.avatarKey && canSeeAvatar ? await fastify.getMediaUrl(other.user.avatarKey) : null,
           isOnline:   presence.isOnline,
           lastSeenAt: presence.lastSeen ?? null,
           nickname:   myNicknames.get(other.user.id) ?? null,

@@ -9,6 +9,7 @@ import { ProblemError, problemResponse } from "../../backend-core/http/errors.js
 import prismaPlugin from "../../plugins/prisma.js";
 import redisPlugin from "../../plugins/redis.js";
 import authPlugin from "../../plugins/auth.js";
+import minioPlugin from "../../plugins/minio.js";
 import conversationRoutes from "./conversation.routes.js";
 import { signAccessToken } from "../../backend-core/auth/tokens.js";
 import { ACCESS_COOKIE } from "../../backend-core/auth/cookies.js";
@@ -32,6 +33,7 @@ async function buildTestApp() {
   await app.register(prismaPlugin);
   await app.register(redisPlugin);
   await app.register(authPlugin);
+  await app.register(minioPlugin); // avatarUrl construction calls fastify.getMediaUrl for any participant with a real avatarKey
 
   // The routes emit conversation:request/accepted/deleted via fastify.io —
   // stub it, real socket delivery isn't what this test covers. No `.sockets`
@@ -812,5 +814,158 @@ describe("lastMessage.preview — disappearing messages must never leak through 
     const res = await getRequests(b.id);
     const body = res.json() as { requests: ConversationListItem[] };
     assert.equal(body.requests[0]!.lastMessage!.preview, `${a.username} sent a disappearing message`);
+  });
+});
+
+describe("avatarUrl — gated on connection (accepted-both-sides), not just participation", () => {
+  let app: Awaited<ReturnType<typeof buildTestApp>>;
+  const createdUserIds: string[] = [];
+  const createdConversationIds: string[] = [];
+
+  before(async () => {
+    app = await buildTestApp();
+  });
+
+  after(async () => {
+    const prisma = app.prisma;
+    await prisma.conversation.deleteMany({ where: { id: { in: createdConversationIds } } });
+    await prisma.user.deleteMany({ where: { id: { in: createdUserIds } } });
+    await app.close();
+  });
+
+  async function withAvatar(label: string) {
+    // username is @db.VarChar(30) — keep this short (unlike other files'
+    // longer descriptive prefixes elsewhere in this suite).
+    const suffix = randomUUID().slice(0, 8);
+    const user = await app.prisma.user.create({
+      data: {
+        username: `ag-${suffix}-${label}`,
+        passwordHash: "not-a-real-hash",
+        passwordSalt: randomBytes(32).toString("hex"),
+        avatarKey: "avatars/some-user/deadbeef.webp",
+      },
+    });
+    createdUserIds.push(user.id);
+    return user;
+  }
+
+  async function makeConversation(aId: string, bId: string, aAccepted: boolean, bAccepted: boolean) {
+    const conversation = await app.prisma.conversation.create({ data: {} });
+    createdConversationIds.push(conversation.id);
+    await app.prisma.participant.createMany({
+      data: [
+        { userId: aId, conversationId: conversation.id, acceptedAt: aAccepted ? new Date() : null },
+        { userId: bId, conversationId: conversation.id, acceptedAt: bAccepted ? new Date() : null },
+      ],
+    });
+    return conversation.id;
+  }
+
+  function isRealSignedUrl(v: unknown): boolean {
+    return typeof v === "string" && v.includes("deadbeef");
+  }
+
+  describe("POST /api/conversations", () => {
+    it("a BRAND NEW conversation (201) hides the recipient's real avatarUrl — they haven't accepted anything yet", async () => {
+      const caller = await withAvatar("caller");
+      const recipient = await withAvatar("recipient");
+
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/conversations",
+        headers: { cookie: cookieFor(caller.id), "content-type": "application/json" },
+        payload: { participantId: recipient.id },
+      });
+      assert.equal(res.statusCode, 201);
+      createdConversationIds.push((res.json() as { conversationId: string }).conversationId);
+      assert.equal((res.json() as { participant: { avatarUrl: string | null } }).participant.avatarUrl, null);
+    });
+
+    it("re-POSTing against an existing conversation where only the caller's side is accepted (200) still hides the real avatarUrl", async () => {
+      const caller = await withAvatar("caller2");
+      const recipient = await withAvatar("recipient2");
+      await makeConversation(caller.id, recipient.id, true, false);
+
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/conversations",
+        headers: { cookie: cookieFor(caller.id), "content-type": "application/json" },
+        payload: { participantId: recipient.id },
+      });
+      assert.equal(res.statusCode, 200);
+      assert.equal((res.json() as { participant: { avatarUrl: string | null } }).participant.avatarUrl, null);
+    });
+
+    it("re-POSTing against an ACCEPTED-both-sides existing conversation (200) shows the real avatarUrl", async () => {
+      const caller = await withAvatar("caller3");
+      const recipient = await withAvatar("recipient3");
+      await makeConversation(caller.id, recipient.id, true, true);
+
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/conversations",
+        headers: { cookie: cookieFor(caller.id), "content-type": "application/json" },
+        payload: { participantId: recipient.id },
+      });
+      assert.equal(res.statusCode, 200);
+      assert.ok(isRealSignedUrl((res.json() as { participant: { avatarUrl: string | null } }).participant.avatarUrl));
+    });
+  });
+
+  describe("GET /api/conversations (list)", () => {
+    it("hides the other participant's real avatarUrl for a conversation only the caller has accepted", async () => {
+      const caller = await withAvatar("list-caller");
+      const other = await withAvatar("list-other");
+      await makeConversation(caller.id, other.id, true, false);
+
+      const res = await app.inject({ method: "GET", url: "/api/conversations", headers: { cookie: cookieFor(caller.id) } });
+      const body = res.json() as { conversations: ConversationListItem[] };
+      assert.equal(body.conversations.length, 1);
+      assert.equal((body.conversations[0]!.participant as { avatarUrl: string | null }).avatarUrl, null);
+    });
+
+    it("shows the real avatarUrl once both sides have accepted", async () => {
+      const caller = await withAvatar("list-caller2");
+      const other = await withAvatar("list-other2");
+      await makeConversation(caller.id, other.id, true, true);
+
+      const res = await app.inject({ method: "GET", url: "/api/conversations", headers: { cookie: cookieFor(caller.id) } });
+      const body = res.json() as { conversations: ConversationListItem[] };
+      assert.ok(isRealSignedUrl((body.conversations[0]!.participant as { avatarUrl: string | null }).avatarUrl));
+    });
+  });
+
+  describe("GET /api/conversations/requests", () => {
+    it("always hides the requester's real avatarUrl — the caller hasn't accepted anything here by definition", async () => {
+      const requester = await withAvatar("req-sender");
+      const caller = await withAvatar("req-recipient");
+      await makeConversation(requester.id, caller.id, true, false); // requester's own side accepted, caller's is not
+
+      const res = await app.inject({ method: "GET", url: "/api/conversations/requests", headers: { cookie: cookieFor(caller.id) } });
+      const body = res.json() as { requests: ConversationListItem[] };
+      assert.equal(body.requests.length, 1);
+      assert.equal((body.requests[0]!.participant as { avatarUrl: string | null }).avatarUrl, null);
+    });
+  });
+
+  describe("GET /api/conversations/:conversationId (detail)", () => {
+    it("hides the real avatarUrl for a still-pending conversation (valid participant view, not yet connected)", async () => {
+      const caller = await withAvatar("detail-caller");
+      const other = await withAvatar("detail-other");
+      const conversationId = await makeConversation(caller.id, other.id, true, false);
+
+      const res = await app.inject({ method: "GET", url: `/api/conversations/${conversationId}`, headers: { cookie: cookieFor(caller.id) } });
+      assert.equal(res.statusCode, 200);
+      assert.equal((res.json() as { participant: { avatarUrl: string | null } }).participant.avatarUrl, null);
+    });
+
+    it("shows the real avatarUrl for an accepted-both-sides conversation", async () => {
+      const caller = await withAvatar("detail-caller2");
+      const other = await withAvatar("detail-other2");
+      const conversationId = await makeConversation(caller.id, other.id, true, true);
+
+      const res = await app.inject({ method: "GET", url: `/api/conversations/${conversationId}`, headers: { cookie: cookieFor(caller.id) } });
+      assert.ok(isRealSignedUrl((res.json() as { participant: { avatarUrl: string | null } }).participant.avatarUrl));
+    });
   });
 });

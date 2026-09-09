@@ -15,6 +15,7 @@ import userRoutes from "./user.routes.js";
 import { signAccessToken } from "../../backend-core/auth/tokens.js";
 import { ACCESS_COOKIE } from "../../backend-core/auth/cookies.js";
 import { USER_EVENTS, type UserProfileUpdatedEvent } from "@relay/contracts";
+import { broadcastProfileUpdate } from "./user.socket.js";
 import type { PrismaClient } from "@prisma/client";
 
 // Real integration test — real Postgres/Redis AND a real Socket.IO server
@@ -179,5 +180,51 @@ describe("user:profile-updated broadcast scoping", () => {
     // slow/out-of-order emit to C would still be caught before we assert.
     await sleep(500);
     assert.equal(cReceived.length, 0, "a user sharing no conversation with A must not receive the broadcast");
+  });
+
+  // The scoping test above only ever broadcasts avatarUrl:null (DELETE
+  // /users/me/avatar's real trigger, with clearAvatar's early-return for a
+  // user with no avatarKey) — it can't tell a redacted null apart from a
+  // genuinely-null value. This drives broadcastProfileUpdate() directly with
+  // a REAL non-null avatarUrl instead, since exercising this through the
+  // real POST /users/me/avatar route would require a full multipart image
+  // upload + S3 write harness to test a privacy gate that lives entirely in
+  // this function — real Postgres connection-status lookup and real
+  // Socket.IO delivery either way, just without that unrelated plumbing.
+  it("a co-participant who hasn't accepted (pending, either direction) gets the event with avatarUrl redacted to null — a connected co-participant gets the real one", async () => {
+    // A+B: accepted both sides (connected). A+D: pending (D never accepted).
+    const [a, b, d] = await Promise.all([
+      createUser(app.prisma, "a2"),
+      createUser(app.prisma, "b2"),
+      createUser(app.prisma, "d2"),
+    ]);
+    createdUserIds.push(a.id, b.id, d.id);
+
+    const [convoAB, convoAD] = await Promise.all([
+      app.prisma.conversation.create({ data: {} }),
+      app.prisma.conversation.create({ data: {} }),
+    ]);
+    createdConversationIds.push(convoAB.id, convoAD.id);
+    await app.prisma.participant.createMany({
+      data: [
+        { userId: a.id, conversationId: convoAB.id, acceptedAt: new Date() },
+        { userId: b.id, conversationId: convoAB.id, acceptedAt: new Date() },
+        { userId: a.id, conversationId: convoAD.id, acceptedAt: new Date() },
+        { userId: d.id, conversationId: convoAD.id, acceptedAt: null },
+      ],
+    });
+
+    const [bSocket, dSocket] = await Promise.all([connectSocket(url, b.id), connectSocket(url, d.id)]);
+    sockets.push(bSocket, dSocket);
+
+    const bEvent = waitForEvent<UserProfileUpdatedEvent>(bSocket, USER_EVENTS.PROFILE_UPDATED, 3000);
+    const dEvent = waitForEvent<UserProfileUpdatedEvent>(dSocket, USER_EVENTS.PROFILE_UPDATED, 3000);
+
+    const realAvatarUrl = "https://minio.example/avatars/a-real.webp?X-Amz-Expires=3600";
+    await broadcastProfileUpdate(app, a.id, realAvatarUrl);
+
+    const [bReceived, dReceived] = await Promise.all([bEvent, dEvent]);
+    assert.equal(bReceived.avatarUrl, realAvatarUrl, "a connected (accepted-both-sides) co-participant gets the real avatarUrl");
+    assert.equal(dReceived.avatarUrl, null, "a pending (not-yet-accepted) co-participant must get the real avatarUrl redacted to null, even though they DO receive the event");
   });
 });

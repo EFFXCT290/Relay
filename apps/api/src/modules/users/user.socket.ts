@@ -1,5 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import { USER_EVENTS, type UserProfileUpdatedEvent } from "@relay/contracts";
+import { connectedUserIds } from "../conversations/connection.service.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Users socket layer — outbound only (for now).
@@ -23,11 +24,18 @@ export async function broadcastProfileUpdate(
     distinct: ["userId"],
   });
 
-  const event: UserProfileUpdatedEvent = { userId, avatarUrl };
-  const recipientIds = new Set(rows.map((r) => r.userId));
-  recipientIds.add(userId); // covers a user with no conversations yet
+  const candidateIds = rows.map((r) => r.userId).filter((id) => id !== userId);
+  // Same gate as every HTTP avatarUrl response (see connection.service.ts):
+  // a co-participant only gets the real URL once BOTH sides have accepted —
+  // otherwise this live push would bypass the HTTP-side gating entirely.
+  const connected = await connectedUserIds(fastify, userId, candidateIds);
 
-  for (const id of recipientIds) {
+  const realEvent:     UserProfileUpdatedEvent = { userId, avatarUrl };
+  const redactedEvent: UserProfileUpdatedEvent = { userId, avatarUrl: null };
+
+  fastify.io.to(`user:${userId}`).emit(USER_EVENTS.PROFILE_UPDATED, realEvent); // the uploader's own other tabs
+  for (const id of candidateIds) {
+    const event = connected.has(id) ? realEvent : redactedEvent;
     fastify.io.to(`user:${id}`).emit(USER_EVENTS.PROFILE_UPDATED, event);
   }
 }

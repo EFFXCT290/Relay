@@ -4,6 +4,7 @@ import { ProblemError } from "../../backend-core/http/errors.js";
 import { AvatarResponseSchema } from "@relay/contracts";
 import { putAvatar, clearAvatar, AvatarBadFormatError, AvatarTooLargeError } from "./avatar.service.js";
 import { broadcastProfileUpdate } from "./user.socket.js";
+import { connectedUserIds, isConnected } from "../conversations/connection.service.js";
 
 const PublicUserSchema = Type.Object({
   userId: Type.String({ format: "uuid" }),
@@ -26,22 +27,27 @@ const userRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
       },
     },
     async (request) => {
+      const callerId = request.userId!;
       const { q, limit = 20 } = request.query;
       const users = await fastify.prisma.user.findMany({
         where: {
           username: { startsWith: q, mode: "insensitive" },
-          NOT: { id: request.userId },
+          NOT: { id: callerId },
         },
         select: { id: true, username: true, avatarKey: true },
         take: limit,
         orderBy: { username: "asc" },
       });
-      // Signing is local (HMAC, no network), so one per row is cheap.
+      // A stranger's real avatar must never leave the server for a viewer
+      // who isn't connected to them yet (accepted conversation on both
+      // sides) — see connection.service.ts. Batched: one query for every
+      // hit in this page, not N+1.
+      const connected = await connectedUserIds(fastify, callerId, users.map((u) => u.id));
       const serialized = await Promise.all(
         users.map(async (u) => ({
           userId:    u.id,
           username:  u.username,
-          avatarUrl: u.avatarKey ? await fastify.getMediaUrl(u.avatarKey) : null,
+          avatarUrl: u.avatarKey && connected.has(u.id) ? await fastify.getMediaUrl(u.avatarKey) : null,
         })),
       );
       return { users: serialized };
@@ -66,15 +72,20 @@ const userRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
       },
     },
     async (request) => {
+      const callerId = request.userId!;
       const user = await fastify.prisma.user.findUnique({
         where: { id: request.params.userId },
         select: { id: true, username: true, avatarKey: true, createdAt: true },
       });
       if (!user) throw new ProblemError("not_found", "User not found.");
+      // Looking yourself up here is allowed and unaffected by this gate —
+      // only an OTHER user's real avatar requires a connection check.
+      const isSelf = user.id === callerId;
+      const canSeeAvatar = isSelf || (await isConnected(fastify, callerId, user.id));
       return {
         userId: user.id,
         username: user.username,
-        avatarUrl: user.avatarKey ? await fastify.getMediaUrl(user.avatarKey) : null,
+        avatarUrl: user.avatarKey && canSeeAvatar ? await fastify.getMediaUrl(user.avatarKey) : null,
         createdAt: user.createdAt.toISOString(),
       };
     },
