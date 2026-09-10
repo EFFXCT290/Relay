@@ -1368,16 +1368,25 @@ const messageRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
       // isDeleted lives on the parent Message (soft-delete), not the
       // attachment row — a deleted message's images/videos must not surface
       // here even though the MessageAttachment row itself is untouched.
+      //
+      // Ephemeral (view-once) media is excluded the same way, regardless of
+      // consumed/purged state: serializeAttachment never emits a url/thumbUrl
+      // for a TemporaryMedia-linked attachment (Phase 6E anti-leak), so it can
+      // only ever render as a broken tile here. A persistent, browsable
+      // gallery is fundamentally incompatible with "view once" — surfacing it
+      // at all, even as a locked card, either leaks that it existed or defeats
+      // the ephemerality by making it revisitable.
       const where = {
         type: { in: ["image", "video"] },
         message: { conversationId, isDeleted: false },
+        media: { temporary: { is: null } },
       };
 
       const [rows, totalCount] = await Promise.all([
         fastify.prisma.messageAttachment.findMany({
           where,
           include: {
-            media:   { include: { variants: true, temporary: true } },
+            media:   { include: { variants: true } },
             message: { select: { id: true, createdAt: true } },
           },
           orderBy: { createdAt: "desc" },

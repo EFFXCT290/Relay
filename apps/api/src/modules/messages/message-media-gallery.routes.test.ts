@@ -128,6 +128,20 @@ describe("GET /api/conversations/:id/media (Contact info \"Shared media\" galler
     return (res.json() as { messageId: string }).messageId;
   }
 
+  // Same as attachMedia but marks the medium ephemeral (view-once), exercising
+  // the real ephemeral send path (POST body's `ephemeral` field) rather than
+  // inserting a TemporaryMedia row by hand.
+  async function attachEphemeralMedia(callerId: string, conversationId: string, mediaId: string) {
+    const res = await app.inject({
+      method: "POST",
+      url: `/api/conversations/${conversationId}/messages/media`,
+      headers: { cookie: cookieFor(callerId), "content-type": "application/json" },
+      payload: { mediaIds: [mediaId], ephemeral: { maxViews: 1 } },
+    });
+    assert.equal(res.statusCode, 201);
+    return (res.json() as { messageId: string }).messageId;
+  }
+
   async function sendText(callerId: string, conversationId: string, body: string) {
     const res = await app.inject({
       method: "POST",
@@ -229,6 +243,33 @@ describe("GET /api/conversations/:id/media (Contact info \"Shared media\" galler
     } while (cursor);
 
     assert.equal(seenMessageIds.size, 5);
+  });
+
+  it("excludes ephemeral (view-once) media regardless of consumed state, and adjusts totalCount", async () => {
+    const { a, conversationId } = await setup();
+    const regular            = await createMedia(a.id, "image/jpeg");
+    const ephemeralPending   = await createMedia(a.id, "image/jpeg");
+    const ephemeralConsumed  = await createMedia(a.id, "image/jpeg");
+
+    await attachMedia(a.id, conversationId, regular.id);
+    await attachEphemeralMedia(a.id, conversationId, ephemeralPending.id);
+    await attachEphemeralMedia(a.id, conversationId, ephemeralConsumed.id);
+
+    // Simulate the sweep having already consumed + purged one of the two
+    // ephemeral media, proving the exclusion isn't conditioned on
+    // consumed/purged state — both must be absent from the gallery.
+    await app.prisma.temporaryMedia.updateMany({
+      where: { mediaId: ephemeralConsumed.id },
+      data: { consumedAt: new Date(), purgedAt: new Date() },
+    });
+
+    const res = await getGallery(a.id, conversationId);
+    assert.equal(res.statusCode, 200);
+    const body = res.json() as { items: MediaGalleryItem[]; totalCount: number };
+    assert.equal(body.totalCount, 1);
+    assert.equal(body.items.length, 1);
+    assert.equal(body.items[0]!.attachment.type, "image");
+    assert.equal((body.items[0]!.attachment as { media: { id: string } }).media.id, regular.id);
   });
 
   // Standardized to 100 across every paginated GET (conversations, messages,
