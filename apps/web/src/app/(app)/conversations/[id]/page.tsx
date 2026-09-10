@@ -5,7 +5,7 @@ import { createPortal } from "react-dom";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
-import { ArrowLeft, ImagePlus, MoreHorizontal, Phone, Search, Video } from "lucide-react";
+import { ArrowLeft, ChevronDown, ImagePlus, MoreHorizontal, Phone, Search, Video } from "lucide-react";
 import imageCompression from "browser-image-compression";
 import { ApiError, api } from "@/frontend-core/api";
 import { getSocket, getReconnectEpoch } from "@/frontend-core/socket";
@@ -470,6 +470,15 @@ export default function ChatThreadPage() {
       }
 
       rerender();
+
+      // Jump-to-bottom badge: count a partner message as "unseen" only while
+      // scrolled away from the bottom. stickToBottomRef (not the atBottom
+      // state) is read here since this whole socket effect only re-subscribes
+      // on conversationId change — a state closure here would go stale for
+      // the life of the conversation, same reasoning as meIdRef/partnerIdRef.
+      if (message.senderId !== meIdRef.current && !stickToBottomRef.current) {
+        setUnseenCount((c) => c + 1);
+      }
 
       if (
         message.senderId !== meIdRef.current &&
@@ -1014,12 +1023,24 @@ export default function ChatThreadPage() {
   // We only stick to bottom when the user was already there (within 120px),
   // so reading older messages mid-scroll isn't yanked away.
   const stickToBottomRef = useRef(true);
+  // Jump-to-bottom affordance state — mirrors stickToBottomRef into actual
+  // React state (the ref alone can't drive a render), plus a count of
+  // partner messages that arrived while scrolled away from the bottom. This
+  // is deliberately separate from server-side read receipts (applyMessageNew
+  // below already marks a conversation read on arrival whenever the tab is
+  // focused, regardless of scroll position) — unseenCount is a purely local,
+  // ephemeral "have you scrolled past this yet" signal, not an unread count.
+  const [atBottom, setAtBottom] = useState(true);
+  const [unseenCount, setUnseenCount] = useState(0);
   useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
     const onScroll = () => {
       const distFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
-      stickToBottomRef.current = distFromBottom < 120;
+      const nearBottom = distFromBottom < 120;
+      stickToBottomRef.current = nearBottom;
+      setAtBottom(nearBottom);
+      if (nearBottom) setUnseenCount(0);
     };
     el.addEventListener("scroll", onScroll, { passive: true });
     return () => el.removeEventListener("scroll", onScroll);
@@ -1566,13 +1587,28 @@ export default function ChatThreadPage() {
     paddingEnd:   16,
   });
 
-  // Stick to bottom on new rows.
+  // Stick to bottom on new rows. Also clears the unseen badge — covers both
+  // "my own send" (handleSend/handleSendImages/handleSendVoice force
+  // stickToBottomRef true before this fires) and "a message arrived while
+  // already at the bottom" (nothing was ever counted, so this is a no-op).
   useEffect(() => {
     if (stickToBottomRef.current && flatRows.length > 0) {
       const el = scrollRef.current;
       if (el) el.scrollTop = el.scrollHeight;
+      setUnseenCount(0);
     }
   }, [flatRows.length]);
+
+  // Explicit jump via the floating "jump to bottom" button — smooth-scrolls
+  // rather than the instant snap the auto-stick effect above uses, since this
+  // one is a deliberate, visible user action rather than a background sync.
+  const jumpToBottom = useCallback(() => {
+    const el = scrollRef.current;
+    if (el) el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+    stickToBottomRef.current = true;
+    setAtBottom(true);
+    setUnseenCount(0);
+  }, []);
 
   // "Jump to message" from the pinned banner/list — only works for a message
   // already in the currently loaded window (flatRows). A pin older than the
@@ -1881,7 +1917,7 @@ export default function ChatThreadPage() {
       )}
 
       {/* Message scroll — virtualized */}
-      <div ref={scrollRef} className="flex-1 overflow-y-auto" style={{ touchAction: "pan-y" }}>
+      <div ref={scrollRef} className="relative flex-1 overflow-y-auto" style={{ touchAction: "pan-y" }}>
         {!messagesLoaded ? (
           <div className="flex items-center justify-center py-12">
             <span className="text-[11px] uppercase tracking-[0.18em] text-[var(--color-text-muted)]" style={{ fontFamily: mono }}>
@@ -1975,6 +2011,33 @@ export default function ChatThreadPage() {
               );
             })}
           </div>
+        )}
+
+        {/* Jump-to-bottom — same circular-signal-button language as the
+            composer's send/mic buttons; badge matches conversation-row's
+            unread-count pill. Absolute inside this (now relative) scrolling
+            container, so it stays put in the viewport instead of scrolling
+            away with the content. */}
+        {!atBottom && (
+          <button
+            type="button"
+            aria-label={unseenCount > 0 ? `${unseenCount} new message${unseenCount === 1 ? "" : "s"} — jump to latest` : "Jump to latest messages"}
+            onClick={jumpToBottom}
+            className="absolute bottom-4 right-4 z-20 flex h-10 w-10 items-center justify-center rounded-full text-white shadow-[0_8px_24px_rgba(0,0,0,0.35)]"
+            style={{ background: "var(--color-signal)" }}
+          >
+            <ChevronDown className="h-5 w-5" strokeWidth={2.4} />
+            {unseenCount > 0 && (
+              <span
+                className="absolute -top-1.5 -right-1.5 flex h-5 min-w-[20px] items-center justify-center rounded-full border-2 px-1.5"
+                style={{ background: "var(--color-signal)", borderColor: "var(--color-bg)" }}
+              >
+                <span className="text-[11px] font-bold text-white" style={{ fontFamily: mono }}>
+                  {unseenCount > 99 ? "99+" : unseenCount}
+                </span>
+              </span>
+            )}
+          </button>
         )}
       </div>
 

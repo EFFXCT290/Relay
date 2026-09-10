@@ -154,6 +154,39 @@ class ResizeObserverStub {
 Object.defineProperty(HTMLElement.prototype, "offsetHeight", { configurable: true, value: 600 });
 Object.defineProperty(HTMLElement.prototype, "offsetWidth", { configurable: true, value: 800 });
 
+// jsdom also has no scrollTo implementation — the jump-to-bottom button calls
+// el.scrollTo({ top, behavior: "smooth" }), which would throw without this.
+if (!HTMLElement.prototype.scrollTo) {
+  HTMLElement.prototype.scrollTo = function (this: HTMLElement, opts?: ScrollToOptions | number) {
+    if (typeof opts === "object" && opts !== null && typeof opts.top === "number") {
+      this.scrollTop = opts.top;
+    }
+  };
+}
+
+// Sets the scroll metrics the page's scroll handler reads (el.scrollHeight /
+// el.clientHeight / el.scrollTop) — jsdom has no layout engine, so these are
+// all 0 by default and must be defined per-test to simulate a given
+// scroll position.
+function setScrollMetrics(el: HTMLElement, opts: { scrollHeight: number; clientHeight: number; scrollTop: number }) {
+  Object.defineProperty(el, "scrollHeight", { configurable: true, value: opts.scrollHeight });
+  Object.defineProperty(el, "clientHeight", { configurable: true, value: opts.clientHeight });
+  Object.defineProperty(el, "scrollTop", { configurable: true, writable: true, value: opts.scrollTop });
+}
+
+// @tanstack/react-virtual attaches its OWN native 'scroll' listener to the
+// same element and, on a real (non-zero) scrollHeight/clientHeight change,
+// schedules a 150ms-debounced "isScrolling" reset via a raw window.setTimeout
+// it never exposes a way to cancel. If a test ends and unmounts (afterEach's
+// cleanup()) before that fires, the timer still fires later for real,
+// against an unmounted tree — a stray cross-test error. Waiting it out here,
+// while the component is still mounted, lets it settle harmlessly.
+async function flushVirtualizerDebounce() {
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  });
+}
+
 let ChatThreadPage: typeof import("./page").default;
 
 beforeEach(async () => {
@@ -415,5 +448,93 @@ describe("ChatThreadPage — infinite scroll-up reentrancy", () => {
       olderPageGate.resolve({ messages: [older], nextCursor: null });
       await olderPageGate.promise;
     });
+  });
+});
+
+describe("ChatThreadPage — jump-to-bottom affordance", () => {
+  it("shows the button once scrolled away from the bottom, and hides it again once scrolled back", async () => {
+    const msg = makeMessage({ messageId: "msg-1", body: "hello", createdAt: "2026-01-01T00:00:00.000Z" });
+    const { container } = await renderPage([msg]);
+    const scrollEl = container.querySelector(".overflow-y-auto") as HTMLElement;
+
+    expect(screen.queryByRole("button", { name: "Jump to latest messages" })).not.toBeInTheDocument();
+
+    act(() => {
+      setScrollMetrics(scrollEl, { scrollHeight: 2000, clientHeight: 600, scrollTop: 0 }); // 1400px from bottom
+      fireEvent.scroll(scrollEl);
+    });
+    expect(screen.getByRole("button", { name: "Jump to latest messages" })).toBeInTheDocument();
+
+    act(() => {
+      setScrollMetrics(scrollEl, { scrollHeight: 2000, clientHeight: 600, scrollTop: 1400 }); // back at the bottom
+      fireEvent.scroll(scrollEl);
+    });
+    expect(screen.queryByRole("button", { name: "Jump to latest messages" })).not.toBeInTheDocument();
+    await flushVirtualizerDebounce();
+  });
+
+  it("shows an unseen-count badge for a partner message that arrives while scrolled up, but not one that arrives while already at the bottom", async () => {
+    const msg = makeMessage({ messageId: "msg-1", body: "hello", createdAt: "2026-01-01T00:00:00.000Z" });
+    const { container } = await renderPage([msg]);
+    const scrollEl = container.querySelector(".overflow-y-auto") as HTMLElement;
+
+    // Already at the bottom (default state) — a partner message shouldn't
+    // surface the button/badge at all, since nothing was missed.
+    act(() => {
+      fakeSocket.simulateMessageNew(makeMessage({
+        messageId: "msg-seen", body: "seen already", senderId: PARTNER_ID, createdAt: "2026-01-01T00:01:00.000Z",
+      }));
+    });
+    await screen.findByText("seen already", { selector: "div" });
+    expect(screen.queryByRole("button", { name: "Jump to latest messages" })).not.toBeInTheDocument();
+
+    // Scroll away from the bottom.
+    act(() => {
+      setScrollMetrics(scrollEl, { scrollHeight: 2000, clientHeight: 600, scrollTop: 0 });
+      fireEvent.scroll(scrollEl);
+    });
+    expect(screen.getByRole("button", { name: "Jump to latest messages" })).toBeInTheDocument();
+
+    // A partner message arrives while scrolled up — badge appears with count 1.
+    act(() => {
+      fakeSocket.simulateMessageNew(makeMessage({
+        messageId: "msg-missed-1", body: "missed 1", senderId: PARTNER_ID, createdAt: "2026-01-01T00:02:00.000Z",
+      }));
+    });
+    expect(await screen.findByRole("button", { name: "1 new message — jump to latest" })).toBeInTheDocument();
+
+    // A second one increments it.
+    act(() => {
+      fakeSocket.simulateMessageNew(makeMessage({
+        messageId: "msg-missed-2", body: "missed 2", senderId: PARTNER_ID, createdAt: "2026-01-01T00:03:00.000Z",
+      }));
+    });
+    expect(await screen.findByRole("button", { name: "2 new messages — jump to latest" })).toBeInTheDocument();
+    await flushVirtualizerDebounce();
+  });
+
+  it("tapping the button smooth-scrolls to the bottom and clears the button/badge", async () => {
+    const msg = makeMessage({ messageId: "msg-1", body: "hello", createdAt: "2026-01-01T00:00:00.000Z" });
+    const { container } = await renderPage([msg]);
+    const scrollEl = container.querySelector(".overflow-y-auto") as HTMLElement;
+    const scrollToSpy = vi.spyOn(scrollEl, "scrollTo");
+
+    act(() => {
+      setScrollMetrics(scrollEl, { scrollHeight: 2000, clientHeight: 600, scrollTop: 0 });
+      fireEvent.scroll(scrollEl);
+    });
+    act(() => {
+      fakeSocket.simulateMessageNew(makeMessage({
+        messageId: "msg-missed", body: "missed", senderId: PARTNER_ID, createdAt: "2026-01-01T00:02:00.000Z",
+      }));
+    });
+    const button = await screen.findByRole("button", { name: "1 new message — jump to latest" });
+
+    const user = userEvent.setup();
+    await user.click(button);
+
+    expect(scrollToSpy).toHaveBeenCalledWith({ top: 2000, behavior: "smooth" });
+    expect(screen.queryByRole("button", { name: /jump to latest/ })).not.toBeInTheDocument();
+    await flushVirtualizerDebounce();
   });
 });
