@@ -242,6 +242,13 @@ export default function ChatThreadPage() {
   const [editing, setEditing] = useState<Message | null>(null);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [loadingOlder, setLoadingOlder] = useState(false);
+  // Synchronous re-entrancy guard for loadOlder/jumpToMessage. `loadingOlder`
+  // (React state) isn't enough on its own: a fast scroll-up fires several
+  // native 'scroll' events synchronously, all before React commits the
+  // setLoadingOlder(true) update and the listener effect below picks up a
+  // fresh loadOlder closure — so the state-only guard let concurrent fetches
+  // for the same cursor through. This ref closes that window immediately.
+  const loadingOlderRef = useRef(false);
 
   type PendingBatch = {
     batchId:         string;
@@ -1023,7 +1030,8 @@ export default function ChatThreadPage() {
   // Anchor preservation: capture scrollHeight before prepend, then shift
   // scrollTop by the delta so the user's viewport doesn't jump.
   const loadOlder = useCallback(async () => {
-    if (!nextCursor || loadingOlder || !scrollRef.current) return;
+    if (!nextCursor || loadingOlderRef.current || !scrollRef.current) return;
+    loadingOlderRef.current = true;
     setLoadingOlder(true);
     const beforeHeight = scrollRef.current.scrollHeight;
     try {
@@ -1043,9 +1051,10 @@ export default function ChatThreadPage() {
         el.scrollTop += delta;
       });
     } finally {
+      loadingOlderRef.current = false;
       setLoadingOlder(false);
     }
-  }, [conversationId, nextCursor, loadingOlder]);
+  }, [conversationId, nextCursor]);
 
   useEffect(() => {
     const el = scrollRef.current;
@@ -1483,7 +1492,10 @@ export default function ChatThreadPage() {
 
   type VirtualRow =
     | { kind: "loader" }
-    | { kind: "separator"; label: string }
+    // dateKey (not the display label) is the virtualizer's getItemKey source
+    // below — dayLabel() drops the year for anything older than yesterday, so
+    // two different days a year+ apart can render the identical label text.
+    | { kind: "separator"; label: string; dateKey: string }
     | { kind: "message"; message: LocalMessage }
     | { kind: "pending"; batch: PendingBatch }
     | { kind: "typing" };
@@ -1495,7 +1507,7 @@ export default function ChatThreadPage() {
     let lastLabel = "";
     for (const m of getMessagesArray()) {
       const label = dayLabel(m.createdAt);
-      if (label !== lastLabel) { rows.push({ kind: "separator", label }); lastLabel = label; }
+      if (label !== lastLabel) { rows.push({ kind: "separator", label, dateKey: m.createdAt.slice(0, 10) }); lastLabel = label; }
       rows.push({ kind: "message", message: m });
     }
     for (const batch of pendingBatches) rows.push({ kind: "pending", batch });
@@ -1507,6 +1519,24 @@ export default function ChatThreadPage() {
   const virtualizer = useVirtualizer({
     count:           flatRows.length,
     getScrollElement: () => scrollRef.current,
+    // Stable per-row identity, not the default index-based key: loadOlder
+    // prepends older messages to the FRONT of flatRows, which shifts every
+    // existing row to a new index. Without this, the measurement cache stays
+    // keyed by index, so post-prepend it applies each row's OLD (now
+    // mismatched) cached height to whatever row now occupies that index,
+    // until it happens to scroll into view and gets remeasured — a visible
+    // stutter as getTotalSize()/offsets diverge from the real DOM heights.
+    getItemKey: (index) => {
+      const row = flatRows[index];
+      if (!row) return index;
+      switch (row.kind) {
+        case "loader":    return "loader";
+        case "typing":    return "typing";
+        case "separator": return `separator:${row.dateKey}`;
+        case "pending":   return `pending:${row.batch.batchId}`;
+        case "message":   return `message:${row.message.messageId}`;
+      }
+    },
     estimateSize:    (i) => {
       const row = flatRows[i];
       if (!row) return 68;
@@ -1587,19 +1617,28 @@ export default function ChatThreadPage() {
       setRenderTick((x) => x + 1);
       return;
     }
-    let cursor = nextCursor;
-    for (let page = 0; cursor && page < MAX_JUMP_PAGES; page++) {
-      const res = await api<{ messages: Message[]; nextCursor: string | null }>(
-        `/api/conversations/${conversationId}/messages?limit=${PAGE_SIZE}&cursor=${cursor}`,
-      );
-      let found = false;
-      for (const m of res.messages) {
-        if (!messagesRef.current[m.messageId]) messagesRef.current[m.messageId] = m;
-        if (m.messageId === messageId) found = true;
+    // Shares loadOlder's guard: both loops page the same cursor and mutate
+    // the same messagesRef/nextCursor, so letting them run concurrently (e.g.
+    // a scroll-up landing mid-jump) lets one clobber the other's cursor.
+    if (loadingOlderRef.current) return;
+    loadingOlderRef.current = true;
+    try {
+      let cursor = nextCursor;
+      for (let page = 0; cursor && page < MAX_JUMP_PAGES; page++) {
+        const res = await api<{ messages: Message[]; nextCursor: string | null }>(
+          `/api/conversations/${conversationId}/messages?limit=${PAGE_SIZE}&cursor=${cursor}`,
+        );
+        let found = false;
+        for (const m of res.messages) {
+          if (!messagesRef.current[m.messageId]) messagesRef.current[m.messageId] = m;
+          if (m.messageId === messageId) found = true;
+        }
+        cursor = res.nextCursor;
+        setNextCursor(cursor);
+        if (found) break;
       }
-      cursor = res.nextCursor;
-      setNextCursor(cursor);
-      if (found) break;
+    } finally {
+      loadingOlderRef.current = false;
     }
     pendingJumpRef.current = messageId;
     setRenderTick((x) => x + 1);

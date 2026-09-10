@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, waitFor, act } from "@testing-library/react";
+import { render, screen, waitFor, act, fireEvent } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { Message, ReplayResponse } from "@relay/contracts";
 import { SYNC_EVENTS } from "@relay/contracts";
@@ -359,5 +359,61 @@ describe("ChatThreadPage — header avatar/name opens Contact info", () => {
     await user.click(screen.getByLabelText("More"));
     await user.click(screen.getByText("Contact info"));
     expect(screen.getByRole("dialog", { name: "Contact info" })).toBeInTheDocument();
+  });
+});
+
+describe("ChatThreadPage — infinite scroll-up reentrancy", () => {
+  it("fires exactly one fetch for the older-messages page, even when a fast scroll-up delivers a burst of 'scroll' events before the loading-state update commits", async () => {
+    const newer = makeMessage({ messageId: "msg-newer", body: "newer message", createdAt: "2026-01-01T00:05:00.000Z" });
+    const older = makeMessage({ messageId: "msg-older", body: "older message", createdAt: "2026-01-01T00:00:00.000Z" });
+
+    let olderPageCallCount = 0;
+    const olderPageGate = deferred<{ messages: Message[]; nextCursor: string | null }>();
+
+    apiImpl = async (path, opts) => {
+      const method = opts?.method ?? "GET";
+      if (path === `/api/conversations/${CONV_ID}` && method === "GET") return makeDetail();
+      // Initial history load — establishes nextCursor so loadOlder becomes eligible.
+      if (path === `/api/conversations/${CONV_ID}/messages?limit=30` && method === "GET") {
+        return { messages: [newer], nextCursor: "cursor-1" };
+      }
+      // loadOlder's page fetch — held open (deferred) so overlapping calls are observable.
+      if (path === `/api/conversations/${CONV_ID}/messages?limit=30&cursor=cursor-1` && method === "GET") {
+        olderPageCallCount++;
+        return olderPageGate.promise;
+      }
+      if (path === `/api/conversations/${CONV_ID}/read` && method === "POST") return undefined;
+      if (path === `/api/conversations/${CONV_ID}/pins` && method === "GET") return { pins: [] };
+      if (path.startsWith(`/api/conversations/${CONV_ID}/media?`) && method === "GET") {
+        return { items: [], nextCursor: null, totalCount: 0 };
+      }
+      throw new Error(`unexpected call: ${method} ${path}`);
+    };
+
+    const { container } = render(<ChatThreadPage />);
+    await waitFor(() => expect(screen.queryByText("loading")).not.toBeInTheDocument());
+    await screen.findByText("newer message", { selector: "div" });
+
+    const scrollEl = container.querySelector(".overflow-y-auto") as HTMLElement | null;
+    expect(scrollEl).toBeTruthy();
+
+    // A fast trackpad/scroll-up gesture delivers several native 'scroll'
+    // events synchronously — all dispatched before React has a chance to
+    // commit the loadingOlder state flip from the first one, so they all
+    // land on the same (stale) listener closure.
+    act(() => {
+      Object.defineProperty(scrollEl, "scrollTop", { configurable: true, writable: true, value: 10 });
+      fireEvent.scroll(scrollEl!);
+      fireEvent.scroll(scrollEl!);
+      fireEvent.scroll(scrollEl!);
+    });
+
+    await waitFor(() => expect(olderPageCallCount).toBeGreaterThan(0));
+    expect(olderPageCallCount).toBe(1); // one page fetch, not three, despite the scroll burst
+
+    await act(async () => {
+      olderPageGate.resolve({ messages: [older], nextCursor: null });
+      await olderPageGate.promise;
+    });
   });
 });
