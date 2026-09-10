@@ -32,7 +32,8 @@ import {
 import { ImageLightbox, type LightboxState } from "@/features/messages/components/lightbox/image-lightbox";
 import { EphemeralViewer } from "@/features/messages/components/ephemeral-viewer";
 import { DisappearModal } from "@/features/messages/components/disappear-modal";
-import { ACK_EVENT, MEDIA_EVENTS, VOICE_EVENTS, PRESENCE_EVENTS, SYNC_EVENTS, TYPING_EVENTS, USER_EVENTS, USER_NICKNAME_EVENTS, MESSAGE_EVENTS, type MediaReadyEvent, type MediaProcessedEvent, type MediaViewedEvent, type VoiceTranscriptReadyEvent, type ImageAttachment, type VideoAttachment, type MediaViewResponse, type DeliveryMode, type EphemeralSend, type DisappearSend, type MessageOpenResponse, type MessageDisappearProgressEvent, type MessageDisappearStartedEvent, type PinnedMessage, type PresenceSyncResponse, type ReplayResponse, type TypingSyncResponse, type UserProfileUpdatedEvent, type UserNicknameSharedUpdatedEvent } from "@relay/contracts";
+import { useTypingBackstop } from "@/features/messages/hooks/use-typing-backstop";
+import { ACK_EVENT, MEDIA_EVENTS, VOICE_EVENTS, PRESENCE_EVENTS, SYNC_EVENTS, TYPING_EVENTS, TYPING_TIMEOUT_MS, TYPING_SWEEP_INTERVAL_MS, USER_EVENTS, USER_NICKNAME_EVENTS, MESSAGE_EVENTS, type MediaReadyEvent, type MediaProcessedEvent, type MediaViewedEvent, type VoiceTranscriptReadyEvent, type ImageAttachment, type VideoAttachment, type MediaViewResponse, type DeliveryMode, type EphemeralSend, type DisappearSend, type MessageOpenResponse, type MessageDisappearProgressEvent, type MessageDisappearStartedEvent, type PinnedMessage, type PresenceSyncResponse, type ReplayResponse, type TypingSyncResponse, type UserProfileUpdatedEvent, type UserNicknameSharedUpdatedEvent } from "@relay/contracts";
 import { formatLastSeen } from "@/frontend-core/format-presence";
 import { SpotifyBadge } from "@/features/spotify/spotify-badge";
 import { ContactInfoModal } from "@/features/conversations/components/contact-info-modal";
@@ -41,6 +42,35 @@ import { useCall } from "@/features/calls/call-provider";
 import { useMe } from "@/providers/me-provider";
 
 const PAGE_SIZE = 30;
+
+// Typing indicator is purely event-driven off the server's typing:update
+// broadcasts (see typing.service.ts) — by design there's no client-side
+// expiry, the server sweep is meant to be the sole authority. But that means
+// a single dropped typing:update (flaky connection, backgrounded sender tab,
+// etc.) leaves the bubble stuck forever with nothing to ever correct it.
+// useTypingBackstop (below) is the fix — a backstop, not a replacement: it
+// only ever fires when the server's own real signal never arrives at all.
+// See that hook for the reset/re-arm mechanics.
+//
+// This window is derived from the server's own worst-case "sender went
+// quiet" detection latency, not a guess: an entry expires after
+// TYPING_TIMEOUT_MS with no refresh, and the sweep that broadcasts the
+// resulting typing:update(false) runs at most TYPING_SWEEP_INTERVAL_MS
+// later. A real stop signal should always reach a healthy client within
+// that window, so this stays comfortably (2x) above it.
+//
+// One caveat, confirmed by reading typing.service.ts, not assumed:
+// typingStart()'s `wasActive` check means the server broadcasts
+// typing:update(true) only ONCE per continuous session (the absent→present
+// transition), never again on the debounced refreshes that follow while
+// someone keeps typing — so a single, long, uninterrupted session gets no
+// further "still typing" ping to reset this on, and could in principle
+// outlast this window and have its bubble cleared a few seconds early.
+// Accepted trade-off: this client can't distinguish "still typing, nothing
+// new to report" from "stopped, and the stop broadcast got lost" with only
+// the signal the server currently sends — and clearing a few seconds early
+// is a strict improvement over never clearing at all.
+const PARTNER_TYPING_BACKSTOP_MS = (TYPING_TIMEOUT_MS + TYPING_SWEEP_INTERVAL_MS) * 2;
 
 const mono = "var(--font-mono)";
 const display = "var(--font-display)";
@@ -205,7 +235,8 @@ export default function ChatThreadPage() {
   // Maps clientMessageId → tempId so the WS echo can atomically replace the
   // optimistic placeholder without causing a visible duplicate.
   const clientToTempRef  = useRef<Map<string, string>>(new Map());
-  const [partnerTyping, setPartnerTyping] = useState(false);
+  const [partnerTyping, setPartnerTypingWithBackstop, clearPartnerTypingBackstop] =
+    useTypingBackstop(PARTNER_TYPING_BACKSTOP_MS);
   const [error, setError] = useState<string | null>(null);
   const [replyTo, setReplyTo] = useState<Message | null>(null);
   const [editing, setEditing] = useState<Message | null>(null);
@@ -513,7 +544,7 @@ export default function ChatThreadPage() {
     // before the response arrives, the old handler is deregistered and any
     // response that still sneaks through is discarded by the epoch check.
     const onReconnect = () => {
-      setPartnerTyping(false);
+      setPartnerTypingWithBackstop(false);
       isSyncingRef.current = true;
       syncQueueRef.current  = [];
       pendingReadsRef.current.clear();
@@ -708,13 +739,13 @@ export default function ChatThreadPage() {
     }) => {
       if (payload.conversationId !== conversationId) return;
       if (payload.userId === meIdRef.current) return;
-      setPartnerTyping(payload.isTyping);
+      setPartnerTypingWithBackstop(payload.isTyping);
     };
 
     const onTypingSyncResponse = (res: TypingSyncResponse) => {
       const typers = res.active[conversationId] ?? [];
       const partnerId = partnerIdRef.current;
-      setPartnerTyping(!!partnerId && typers.includes(partnerId));
+      setPartnerTypingWithBackstop(!!partnerId && typers.includes(partnerId));
     };
 
     const onPresenceSyncResponse = (res: PresenceSyncResponse) => {
@@ -927,6 +958,7 @@ export default function ChatThreadPage() {
       messagesRef.current     = {};
       clientToTempRef.current.clear();
       replayCursorRef.current = null;
+      clearPartnerTypingBackstop();
       socket.off("connect", onReconnect);
       socket.emit("conversation:leave", { conversationId });
       if (currentReplayHandler) {
