@@ -1200,7 +1200,10 @@ const messageRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
   // MAX_PINNED_MESSAGES per conversation — enforced inside a Serializable
   // transaction so two concurrent pin requests in the same conversation can't
   // both read "2 pinned" and both land, pushing the count to 4; Postgres
-  // aborts the loser with a serialization failure (P2034) instead.
+  // aborts the loser with a serialization failure — verified directly
+  // against real Postgres (not assumed): Prisma surfaces it as P2034,
+  // "Transaction failed due to a write conflict or a deadlock. Please
+  // retry your transaction."
   //
   // Flat (no conversationId in the path) — messageId is a globally-unique
   // UUID, matching every other single-message action in this file (PATCH
@@ -1231,35 +1234,47 @@ const messageRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
       const conversationId = msg.conversationId;
       await assertParticipant(fastify, callerId, conversationId);
 
-      let created: PinnedMessageRow;
-      try {
-        created = await fastify.prisma.$transaction(
-          async (tx) => {
-            const count = await tx.pinnedMessage.count({ where: { conversationId } });
-            if (count >= MAX_PINNED_MESSAGES) {
-              throw new ProblemError(
-                "conflict",
-                `Already ${MAX_PINNED_MESSAGES} messages pinned in this conversation — unpin one first.`,
-              );
+      // P2034 is Postgres's SERIALIZABLE isolation telling us to retry, not
+      // a real failure — it fires only for the transaction that LOST a race
+      // against another commit, and a fresh attempt re-reads the count from
+      // scratch. Bounded at 3: two concurrent pins can only ever produce one
+      // loser, so a single retry already resolves the common case; the bound
+      // just guards against a pathological pile-up of pins landing at once.
+      const MAX_PIN_TXN_ATTEMPTS = 3;
+      async function createPinWithRetry(attempt: number): Promise<PinnedMessageRow> {
+        try {
+          return await fastify.prisma.$transaction(
+            async (tx) => {
+              const count = await tx.pinnedMessage.count({ where: { conversationId } });
+              if (count >= MAX_PINNED_MESSAGES) {
+                throw new ProblemError(
+                  "conflict",
+                  `Already ${MAX_PINNED_MESSAGES} messages pinned in this conversation — unpin one first.`,
+                );
+              }
+              return tx.pinnedMessage.create({
+                data: { conversationId, messageId, pinnedBy: callerId },
+                include: pinnedMessageInclude,
+              });
+            },
+            { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+          );
+        } catch (err) {
+          if (err instanceof ProblemError) throw err;
+          if (err instanceof Prisma.PrismaClientKnownRequestError) {
+            if (err.code === "P2002") throw new ProblemError("conflict", "This message is already pinned.");
+            if (err.code === "P2034") {
+              if (attempt < MAX_PIN_TXN_ATTEMPTS) return createPinWithRetry(attempt + 1);
+              // Retries exhausted — pins are still landing back-to-back in
+              // this conversation faster than we can keep up; the client's
+              // own retry (or a manual re-tap) is the recovery path here.
+              throw new ProblemError("conflict", "Another pin just landed — try again.");
             }
-            return tx.pinnedMessage.create({
-              data: { conversationId, messageId, pinnedBy: callerId },
-              include: pinnedMessageInclude,
-            });
-          },
-          { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
-        );
-      } catch (err) {
-        if (err instanceof ProblemError) throw err;
-        if (err instanceof Prisma.PrismaClientKnownRequestError) {
-          if (err.code === "P2002") throw new ProblemError("conflict", "This message is already pinned.");
-          // Serializable write-write conflict — another pin in the same
-          // conversation committed first; the client's own retry (or a
-          // manual re-tap) is the recovery path, same as any 409.
-          if (err.code === "P2034") throw new ProblemError("conflict", "Another pin just landed — try again.");
+          }
+          throw err;
         }
-        throw err;
       }
+      const created = await createPinWithRetry(1);
 
       const payload = serializePinnedMessage(created);
       emitMessagePinned(fastify.io, conversationId, { pin: payload });
@@ -1333,7 +1348,7 @@ const messageRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
         params: Type.Object({ conversationId: Type.String({ format: "uuid" }) }),
         querystring: Type.Object({
           cursor: Type.Optional(Type.String()),
-          limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 60, default: 30 })),
+          limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100, default: 30 })),
         }),
         response: {
           200: Type.Object({

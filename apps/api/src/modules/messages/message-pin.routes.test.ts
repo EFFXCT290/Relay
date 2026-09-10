@@ -249,6 +249,77 @@ describe("POST /api/messages/:messageId/pin", () => {
     const retryRes = await pinMessage(app, a.id, overflowId);
     assert.equal(retryRes.statusCode, 201);
   });
+
+  // Two concurrent pins on DIFFERENT messages in the same conversation both
+  // read pinnedMessage.count() before either commits — the exact write-skew
+  // shape Postgres's SERIALIZABLE isolation exists to catch, so one of the
+  // two transactions reliably gets aborted with a real write conflict (P2034)
+  // even though there is room for both (empirically confirmed directly
+  // against Postgres before writing this fix — not assumed). Before the fix,
+  // that abort surfaced immediately as a 409 "another pin just landed" with
+  // no retry, even though the client did nothing wrong and there was no real
+  // capacity problem. Same concurrent-fire technique as the clientMessageId
+  // race test in message.routes.test.ts (P2002) and the reaction toggle race
+  // in the same file (P2002/P2025) — fire both requests via Promise.all
+  // without awaiting either first, which is what actually produces the race
+  // window; two sequential awaited calls would never collide.
+  it("two concurrent pins with room for both both resolve 201 via retry, instead of one spuriously 409ing", async () => {
+    const { a, conversationId, messageId: firstMessageId } = await setup();
+    const secondRes = await sendText(app, a.id, conversationId, "second candidate");
+    const secondMessageId = (secondRes.json() as { messageId: string }).messageId;
+
+    const [resA, resB] = await Promise.all([
+      pinMessage(app, a.id, firstMessageId),
+      pinMessage(app, a.id, secondMessageId),
+    ]);
+
+    assert.notEqual(resA.statusCode, 500);
+    assert.notEqual(resB.statusCode, 500);
+    assert.equal(resA.statusCode, 201, `expected both pins to succeed, got ${resA.statusCode}: ${JSON.stringify(resA.json())}`);
+    assert.equal(resB.statusCode, 201, `expected both pins to succeed, got ${resB.statusCode}: ${JSON.stringify(resB.json())}`);
+
+    const count = await app.prisma.pinnedMessage.count({ where: { conversationId } });
+    assert.equal(count, 2, "both concurrent pins must have actually landed, not just returned 201");
+  });
+
+  // Same race, but staged right at the cap boundary (MAX_PINNED_MESSAGES - 1
+  // already pinned, exactly one slot left) — confirms the retry doesn't let
+  // the cap itself get bypassed: exactly one of the two racing pins gets the
+  // last slot, and the loser's retry re-reads the now-current count and
+  // correctly reports the cap error (not a raw conflict, and not a second
+  // successful pin past the cap).
+  it("two concurrent pins racing for the LAST slot: exactly one lands, the other gets a clean cap error", async () => {
+    const { a, conversationId } = await setup();
+    for (let i = 0; i < MAX_PINNED_MESSAGES - 1; i++) {
+      const sendRes = await sendText(app, a.id, conversationId, `filler ${i}`);
+      const mid = (sendRes.json() as { messageId: string }).messageId;
+      const pinRes = await pinMessage(app, a.id, mid);
+      assert.equal(pinRes.statusCode, 201, `expected filler pin #${i} to succeed`);
+    }
+
+    const raceA = await sendText(app, a.id, conversationId, "race candidate A");
+    const raceB = await sendText(app, a.id, conversationId, "race candidate B");
+    const raceMessageIdA = (raceA.json() as { messageId: string }).messageId;
+    const raceMessageIdB = (raceB.json() as { messageId: string }).messageId;
+
+    const [resA, resB] = await Promise.all([
+      pinMessage(app, a.id, raceMessageIdA),
+      pinMessage(app, a.id, raceMessageIdB),
+    ]);
+
+    const codes = [resA.statusCode, resB.statusCode].sort();
+    assert.deepEqual(codes, [201, 409], `expected exactly one winner and one clean cap rejection, got ${JSON.stringify(codes)}`);
+
+    const loser = resA.statusCode === 409 ? resA : resB;
+    assert.match(
+      loser.json().detail as string,
+      /unpin one first/i,
+      "the retry should surface the real cap error, not the transient 'another pin just landed' message",
+    );
+
+    const count = await app.prisma.pinnedMessage.count({ where: { conversationId } });
+    assert.equal(count, MAX_PINNED_MESSAGES, "the cap must still hold exactly — not under- or over-filled");
+  });
 });
 
 describe("DELETE /api/messages/:messageId/pin", () => {

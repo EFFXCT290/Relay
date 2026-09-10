@@ -1,7 +1,7 @@
 import { after, before, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID, randomBytes } from "node:crypto";
-import Fastify from "fastify";
+import Fastify, { type FastifyError } from "fastify";
 import { TypeBoxTypeProvider, TypeBoxValidatorCompiler } from "@fastify/type-provider-typebox";
 import cookie from "@fastify/cookie";
 import "../../backend-core/runtime/formats.js"; // side effect: registers uuid/date-time/email TypeBox formats
@@ -28,8 +28,14 @@ async function buildTestApp() {
   await app.register(redisPlugin);
   await app.register(authPlugin);
 
-  app.setErrorHandler((err, _req, reply) => {
+  app.setErrorHandler((rawErr, _req, reply) => {
+    // TypeBox provider widens the err type to unknown; narrow here so we can
+    // read Fastify's standard `validation` field (mirrors server.ts).
+    const err = rawErr as FastifyError;
     if (err instanceof ProblemError) return problemResponse(reply, err.code, err.detail);
+    if (err.validation) {
+      return problemResponse(reply, "validation_error", err.validation[0]?.message ?? "Request failed validation.");
+    }
     throw err;
   });
 
@@ -154,5 +160,32 @@ describe("GET /api/notifications — NotificationSchema (now sourced from @relay
     assert.deepEqual(body.notifications[0]!.payload, insertedPayload);
     assert.equal(body.unreadCount, 1);
     assert.equal(body.nextCursor, null);
+  });
+
+  // Standardized to 100 across every paginated GET (conversations, messages,
+  // media gallery, notifications, users/search) — this route was already at
+  // 100, the reference value the others were brought up to match.
+  it("accepts limit=100 (the standardized maximum)", async () => {
+    const owner = await createUser(app.prisma, "limitok");
+    createdUserIds.push(owner.id);
+
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/notifications?limit=100",
+      headers: { cookie: cookieFor(owner.id) },
+    });
+    assert.equal(res.statusCode, 200);
+  });
+
+  it("rejects limit=101 (one above the standardized maximum)", async () => {
+    const owner = await createUser(app.prisma, "limitov");
+    createdUserIds.push(owner.id);
+
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/notifications?limit=101",
+      headers: { cookie: cookieFor(owner.id) },
+    });
+    assert.equal(res.statusCode, 422);
   });
 });

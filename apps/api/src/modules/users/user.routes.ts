@@ -21,7 +21,7 @@ const userRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
       schema: {
         querystring: Type.Object({
           q: Type.String({ minLength: 2, maxLength: 30 }),
-          limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 50, default: 20 })),
+          limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100, default: 20 })),
         }),
         response: { 200: Type.Object({ users: Type.Array(PublicUserSchema) }) },
       },

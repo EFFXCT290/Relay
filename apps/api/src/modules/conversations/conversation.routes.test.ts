@@ -1,7 +1,7 @@
 import { after, before, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID, randomBytes } from "node:crypto";
-import Fastify from "fastify";
+import Fastify, { type FastifyError } from "fastify";
 import { TypeBoxTypeProvider, TypeBoxValidatorCompiler } from "@fastify/type-provider-typebox";
 import cookie from "@fastify/cookie";
 import "../../backend-core/runtime/formats.js"; // side effect: registers uuid/date-time/email TypeBox formats
@@ -45,8 +45,14 @@ async function buildTestApp() {
 
   // Mirrors server.ts's problem-details error handler — without it, thrown
   // ProblemErrors (403/404/422/etc.) would fall through to Fastify's generic 500.
-  app.setErrorHandler((err, _req, reply) => {
+  app.setErrorHandler((rawErr, _req, reply) => {
+    // TypeBox provider widens the err type to unknown; narrow here so we can
+    // read Fastify's standard `validation` field (mirrors server.ts).
+    const err = rawErr as FastifyError;
     if (err instanceof ProblemError) return problemResponse(reply, err.code, err.detail);
+    if (err.validation) {
+      return problemResponse(reply, "validation_error", err.validation[0]?.message ?? "Request failed validation.");
+    }
     throw err;
   });
 
@@ -987,5 +993,46 @@ describe("avatarUrl — gated on connection (accepted-both-sides), not just part
       const res = await app.inject({ method: "GET", url: `/api/conversations/${conversationId}`, headers: { cookie: cookieFor(caller.id) } });
       assert.ok(isRealSignedUrl((res.json() as { participant: { avatarUrl: string | null } }).participant.avatarUrl));
     });
+  });
+});
+
+// Standardized to 100 across every paginated GET (conversations, messages,
+// media gallery, notifications, users/search) — previously an arbitrary
+// per-module 50/60/100.
+describe("GET /api/conversations — limit query param ceiling", () => {
+  let app: Awaited<ReturnType<typeof buildTestApp>>;
+  const createdUserIds: string[] = [];
+
+  before(async () => {
+    app = await buildTestApp();
+  });
+
+  after(async () => {
+    await app.prisma.user.deleteMany({ where: { id: { in: createdUserIds } } });
+    await app.close();
+  });
+
+  it("accepts limit=100 (the standardized maximum)", async () => {
+    const caller = await createUser(app.prisma, "limit-ok");
+    createdUserIds.push(caller.id);
+
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/conversations?limit=100",
+      headers: { cookie: cookieFor(caller.id) },
+    });
+    assert.equal(res.statusCode, 200);
+  });
+
+  it("rejects limit=101 (one above the standardized maximum)", async () => {
+    const caller = await createUser(app.prisma, "limitov");
+    createdUserIds.push(caller.id);
+
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/conversations?limit=101",
+      headers: { cookie: cookieFor(caller.id) },
+    });
+    assert.equal(res.statusCode, 422);
   });
 });

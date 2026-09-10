@@ -1,7 +1,7 @@
 import { after, before, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID, randomBytes } from "node:crypto";
-import Fastify from "fastify";
+import Fastify, { type FastifyError } from "fastify";
 import { TypeBoxTypeProvider, TypeBoxValidatorCompiler } from "@fastify/type-provider-typebox";
 import cookie from "@fastify/cookie";
 import "../../backend-core/runtime/formats.js";
@@ -30,8 +30,14 @@ async function buildTestApp() {
   await app.register(authPlugin);
   await app.register(minioPlugin); // GET /users/search calls fastify.getMediaUrl for any hit with an avatar
 
-  app.setErrorHandler((err, _req, reply) => {
+  app.setErrorHandler((rawErr, _req, reply) => {
+    // TypeBox provider widens the err type to unknown; narrow here so we can
+    // read Fastify's standard `validation` field (mirrors server.ts).
+    const err = rawErr as FastifyError;
     if (err instanceof ProblemError) return problemResponse(reply, err.code, err.detail);
+    if (err.validation) {
+      return problemResponse(reply, "validation_error", err.validation[0]?.message ?? "Request failed validation.");
+    }
     throw err;
   });
 
@@ -200,7 +206,34 @@ describe("GET /api/users/search", () => {
       headers: { cookie: cookieFor(caller.id) },
     });
 
-    assert.equal(res.statusCode, 400);
+    assert.equal(res.statusCode, 422);
+  });
+
+  // Standardized to 100 across every paginated GET (conversations, messages,
+  // media gallery, notifications, users/search) — this route was previously
+  // capped at 50.
+  it("accepts limit=100 (the standardized maximum)", async () => {
+    const caller = await createUser(app.prisma, `srch-${suffix}-caller6`);
+    createdUserIds.push(caller.id);
+
+    const res = await app.inject({
+      method: "GET",
+      url: `/api/users/search?q=srch-${suffix}&limit=100`,
+      headers: { cookie: cookieFor(caller.id) },
+    });
+    assert.equal(res.statusCode, 200);
+  });
+
+  it("rejects limit=101 (one above the standardized maximum)", async () => {
+    const caller = await createUser(app.prisma, `srch-${suffix}-caller7`);
+    createdUserIds.push(caller.id);
+
+    const res = await app.inject({
+      method: "GET",
+      url: `/api/users/search?q=srch-${suffix}&limit=101`,
+      headers: { cookie: cookieFor(caller.id) },
+    });
+    assert.equal(res.statusCode, 422);
   });
 
   it("requires authentication", async () => {

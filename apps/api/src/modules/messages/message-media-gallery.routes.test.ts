@@ -1,7 +1,7 @@
 import { after, before, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID, randomBytes } from "node:crypto";
-import Fastify from "fastify";
+import Fastify, { type FastifyError } from "fastify";
 import { TypeBoxTypeProvider, TypeBoxValidatorCompiler } from "@fastify/type-provider-typebox";
 import cookie from "@fastify/cookie";
 import "../../backend-core/runtime/formats.js";
@@ -36,8 +36,14 @@ async function buildTestApp() {
   );
   app.decorate("getMediaUrl", async (key: string) => `https://fake.example/${key}`);
 
-  app.setErrorHandler((err, _req, reply) => {
+  app.setErrorHandler((rawErr, _req, reply) => {
+    // TypeBox provider widens the err type to unknown; narrow here so we can
+    // read Fastify's standard `validation` field (mirrors server.ts).
+    const err = rawErr as FastifyError;
     if (err instanceof ProblemError) return problemResponse(reply, err.code, err.detail);
+    if (err.validation) {
+      return problemResponse(reply, "validation_error", err.validation[0]?.message ?? "Request failed validation.");
+    }
     throw err;
   });
 
@@ -223,5 +229,20 @@ describe("GET /api/conversations/:id/media (Contact info \"Shared media\" galler
     } while (cursor);
 
     assert.equal(seenMessageIds.size, 5);
+  });
+
+  // Standardized to 100 across every paginated GET (conversations, messages,
+  // media gallery, notifications, users/search) — this route was previously
+  // capped at 60, the odd one out.
+  it("accepts limit=100 (the standardized maximum)", async () => {
+    const { a, conversationId } = await setup();
+    const res = await getGallery(a.id, conversationId, "?limit=100");
+    assert.equal(res.statusCode, 200);
+  });
+
+  it("rejects limit=101 (one above the standardized maximum)", async () => {
+    const { a, conversationId } = await setup();
+    const res = await getGallery(a.id, conversationId, "?limit=101");
+    assert.equal(res.statusCode, 422);
   });
 });

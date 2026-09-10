@@ -277,7 +277,7 @@ const conversationRoutes: FastifyPluginAsyncTypebox = async (fastify) => {
       schema: {
         querystring: Type.Object({
           cursor: Type.Optional(Type.String({ format: "uuid" })),
-          limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 50, default: 20 })),
+          limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100, default: 20 })),
         }),
         response: {
           200: Type.Object({

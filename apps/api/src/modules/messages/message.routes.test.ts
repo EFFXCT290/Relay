@@ -1,7 +1,7 @@
 import { after, before, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID, randomBytes } from "node:crypto";
-import Fastify from "fastify";
+import Fastify, { type FastifyError } from "fastify";
 import { TypeBoxTypeProvider, TypeBoxValidatorCompiler } from "@fastify/type-provider-typebox";
 import cookie from "@fastify/cookie";
 import "../../backend-core/runtime/formats.js"; // side effect: registers uuid/date-time/email TypeBox formats
@@ -42,8 +42,14 @@ async function buildTestApp() {
   // ProblemErrors (403/404/etc.) would fall through to Fastify's generic 500,
   // which would make it impossible to tell "correctly rejected" from "the
   // route crashed" in this test.
-  app.setErrorHandler((err, _req, reply) => {
+  app.setErrorHandler((rawErr, _req, reply) => {
+    // TypeBox provider widens the err type to unknown; narrow here so we can
+    // read Fastify's standard `validation` field (mirrors server.ts).
+    const err = rawErr as FastifyError;
     if (err instanceof ProblemError) return problemResponse(reply, err.code, err.detail);
+    if (err.validation) {
+      return problemResponse(reply, "validation_error", err.validation[0]?.message ?? "Request failed validation.");
+    }
     throw err;
   });
 
@@ -269,5 +275,60 @@ describe("POST /api/messages/:messageId/attachments/:attachmentId/transcribe —
 
     const media = await app.prisma.media.findUnique({ where: { id: mediaId } });
     assert.equal(media!.transcriptStatus, "pending");
+  });
+});
+
+// Standardized to 100 across every paginated GET (conversations, messages,
+// media gallery, notifications, users/search) — previously an arbitrary
+// per-module 50/60/100.
+describe("GET /api/conversations/:conversationId/messages — limit query param ceiling", () => {
+  let app: Awaited<ReturnType<typeof buildTestApp>>;
+  let userId: string;
+  let conversationId: string;
+
+  before(async () => {
+    app = await buildTestApp();
+    const prisma = app.prisma;
+
+    const suffix = randomUUID().slice(0, 8);
+    const user = await prisma.user.create({
+      data: { username: `msg-limit-${suffix}`, passwordHash: "not-a-real-hash", passwordSalt: randomBytes(32).toString("hex") },
+    });
+    userId = user.id;
+
+    const conversation = await prisma.conversation.create({ data: {} });
+    conversationId = conversation.id;
+    await prisma.participant.create({ data: { userId, conversationId, acceptedAt: new Date() } });
+  });
+
+  after(async () => {
+    const prisma = app.prisma;
+    await prisma.participant.deleteMany({ where: { conversationId } });
+    await prisma.conversation.delete({ where: { id: conversationId } });
+    await prisma.user.delete({ where: { id: userId } });
+    await app.close();
+  });
+
+  function cookieFor(id: string): string {
+    const { token } = signAccessToken(id);
+    return `${ACCESS_COOKIE}=${token}`;
+  }
+
+  it("accepts limit=100 (the standardized maximum)", async () => {
+    const res = await app.inject({
+      method: "GET",
+      url: `/api/conversations/${conversationId}/messages?limit=100`,
+      headers: { cookie: cookieFor(userId) },
+    });
+    assert.equal(res.statusCode, 200);
+  });
+
+  it("rejects limit=101 (one above the standardized maximum)", async () => {
+    const res = await app.inject({
+      method: "GET",
+      url: `/api/conversations/${conversationId}/messages?limit=101`,
+      headers: { cookie: cookieFor(userId) },
+    });
+    assert.equal(res.statusCode, 422);
   });
 });
