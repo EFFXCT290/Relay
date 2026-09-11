@@ -42,7 +42,7 @@ export function registerCallSocket(
         return;
       }
       void service
-        .initiate(userId, payload)
+        .initiate(userId, payload, socket.id)
         .then(respond)
         .catch((err) => {
           fastify.log.error({ err }, "[call] initiate failed");
@@ -53,7 +53,7 @@ export function registerCallSocket(
 
   socket.on(CALL_EVENTS.ACCEPT, (payload: CallByIdInbound) => {
     if (!isNonEmptyString(payload?.callId)) return;
-    void service.accept(userId, payload.callId);
+    void service.accept(userId, payload.callId, socket.id);
   });
 
   socket.on(CALL_EVENTS.REJECT, (payload: CallByIdInbound) => {
@@ -124,6 +124,6 @@ export function registerCallSocket(
   });
 
   socket.on("disconnect", () => {
-    void service.handleDisconnect(userId);
+    void service.handleDisconnect(userId, socket.id);
   });
 }

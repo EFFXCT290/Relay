@@ -300,4 +300,141 @@ describe("calls.socket.ts — real Socket.IO handlers", () => {
       assert.equal(row?.status, "FAILED");
     });
   });
+
+  describe("disconnect grace period — multi-session isolation (an unrelated tab/device for the same account must never touch someone else's call)", () => {
+    it("an unrelated second socket for the same user disconnecting does NOT arm the grace timer — the real call socket was never touched", async () => {
+      const [a, b] = await Promise.all([
+        createUser(app.prisma, "ms-a"),
+        createUser(app.prisma, "ms-b"),
+      ]);
+      createdUserIds.push(a.id, b.id);
+
+      const [aSocket, bSocket] = await Promise.all([connectSocket(url, a.id), connectSocket(url, b.id)]);
+      sockets.push(aSocket, bSocket);
+
+      const bRinging = waitForEvent(bSocket, CALL_EVENTS.RINGING, 3000);
+      const ack = await initAck(aSocket, { targetUserId: b.id, type: "AUDIO" });
+      assert.equal(ack.ok, true);
+      if (!ack.ok) return;
+      const callId = ack.callId;
+      await bRinging;
+
+      // bSocket accepts — it becomes the tracked call-socket for B.
+      const aAccepted = waitForEvent(aSocket, CALL_EVENTS.ACCEPTED, 3000);
+      bSocket.emit(CALL_EVENTS.ACCEPT, { callId });
+      await aAccepted;
+
+      // B now opens a second, entirely unrelated tab/device — same userId,
+      // a completely different socket that has nothing to do with this call.
+      const bSocketExtra = await connectSocket(url, b.id);
+      sockets.push(bSocketExtra);
+
+      const terminalEvents: string[] = [];
+      aSocket.on(CALL_EVENTS.FAILED, () => terminalEvents.push("failed"));
+      aSocket.on(CALL_EVENTS.ENDED, () => terminalEvents.push("ended"));
+
+      bSocketExtra.disconnect(); // the UNRELATED tab drops; bSocket (the real call socket) is untouched
+
+      await sleep(env.CALL_DISCONNECT_GRACE_MS + 500);
+      assert.equal(terminalEvents.length, 0, "an unrelated tab's disconnect must be a complete no-op for call state");
+
+      const row = await app.prisma.call.findUnique({ where: { id: callId } });
+      assert.equal(row?.status, "ANSWERED", "the call must still be live server-side — no grace timer should ever have armed");
+
+      // Prove the session is genuinely untouched: an explicit end from the
+      // real call socket still works normally.
+      const aEnded = waitForEvent(aSocket, CALL_EVENTS.ENDED, 3000);
+      bSocket.emit(CALL_EVENTS.END, { callId });
+      await aEnded;
+    });
+
+    it("the actual call-holding socket disconnecting still arms the grace timer and fails the call, even with another session open the whole time", async () => {
+      const [a, b] = await Promise.all([
+        createUser(app.prisma, "ms2-a"),
+        createUser(app.prisma, "ms2-b"),
+      ]);
+      createdUserIds.push(a.id, b.id);
+
+      const [aSocket, bSocket] = await Promise.all([connectSocket(url, a.id), connectSocket(url, b.id)]);
+      sockets.push(aSocket, bSocket);
+
+      const bRinging = waitForEvent(bSocket, CALL_EVENTS.RINGING, 3000);
+      const ack = await initAck(aSocket, { targetUserId: b.id, type: "AUDIO" });
+      assert.equal(ack.ok, true);
+      if (!ack.ok) return;
+      const callId = ack.callId;
+      await bRinging;
+
+      const aAccepted = waitForEvent(aSocket, CALL_EVENTS.ACCEPTED, 3000);
+      bSocket.emit(CALL_EVENTS.ACCEPT, { callId }); // bSocket becomes the tracked call-socket for B
+      await aAccepted;
+
+      // B has an unrelated second tab open throughout — it must have zero
+      // bearing on what happens when the REAL call socket drops.
+      const bSocketExtra = await connectSocket(url, b.id);
+      sockets.push(bSocketExtra);
+
+      const aFailed = waitForEvent<{ callId: string; status: string }>(
+        aSocket,
+        CALL_EVENTS.FAILED,
+        env.CALL_DISCONNECT_GRACE_MS + 2000,
+      );
+      bSocket.disconnect(); // the actual call-holding socket drops, and never comes back
+
+      const failedPayload = await aFailed;
+      assert.deepEqual(failedPayload, { callId, status: "FAILED" });
+
+      const row = await app.prisma.call.findUnique({ where: { id: callId } });
+      assert.equal(row?.status, "FAILED");
+    });
+
+    it("after a real reconnect cancels the grace timer, the NEW socket becomes the tracked call-socket — a later disconnect of that new socket arms a fresh timer", async () => {
+      const [a, b] = await Promise.all([
+        createUser(app.prisma, "ms3-a"),
+        createUser(app.prisma, "ms3-b"),
+      ]);
+      createdUserIds.push(a.id, b.id);
+
+      const [aSocket, bSocket] = await Promise.all([connectSocket(url, a.id), connectSocket(url, b.id)]);
+      sockets.push(aSocket, bSocket);
+
+      const bRinging = waitForEvent(bSocket, CALL_EVENTS.RINGING, 3000);
+      const ack = await initAck(aSocket, { targetUserId: b.id, type: "AUDIO" });
+      assert.equal(ack.ok, true);
+      if (!ack.ok) return;
+      const callId = ack.callId;
+      await bRinging;
+
+      const aAccepted = waitForEvent(aSocket, CALL_EVENTS.ACCEPTED, 3000);
+      bSocket.emit(CALL_EVENTS.ACCEPT, { callId });
+      await aAccepted;
+
+      // First drop + reconnect within the grace window — like a page reload.
+      // socket.io-client never reuses the old socket.id, so bSocket2 carries a
+      // genuinely new one.
+      bSocket.disconnect();
+      const bSocket2 = await connectSocket(url, b.id);
+      sockets.push(bSocket2);
+
+      // Give handleReconnect a moment to run before we act again.
+      await sleep(200);
+
+      // Now the NEW socket drops for good. If the tracked call-socket hadn't
+      // been repointed to bSocket2 on reconnect, this would compare against
+      // the stale (already-dead) original socket.id and never arm — the call
+      // would hang forever instead of failing.
+      const aFailed = waitForEvent<{ callId: string; status: string }>(
+        aSocket,
+        CALL_EVENTS.FAILED,
+        env.CALL_DISCONNECT_GRACE_MS + 2000,
+      );
+      bSocket2.disconnect();
+
+      const failedPayload = await aFailed;
+      assert.deepEqual(failedPayload, { callId, status: "FAILED" });
+
+      const row = await app.prisma.call.findUnique({ where: { id: callId } });
+      assert.equal(row?.status, "FAILED");
+    });
+  });
 });

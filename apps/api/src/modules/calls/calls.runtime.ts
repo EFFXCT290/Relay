@@ -42,6 +42,15 @@ export type ActiveCallSession = {
   // per candidate, which would fire dozens of times per call for no signal.
   iceCandidateCount: number;
 
+  // The specific socket.id actually on each side of the call — set at
+  // initiate() (caller) and accept() (recipient), then repointed by
+  // handleReconnect() to whatever socket.id most recently reconnected. A
+  // userId alone isn't enough to identify "the call's socket": either side
+  // may have other tabs/devices connected under the same userId, and their
+  // disconnect/reconnect events must have zero bearing on this call.
+  callerSocketId?: string;
+  recipientSocketId?: string;
+
   // Armed by handleDisconnect() when a participant's socket drops mid-call
   // (state "active"): gives them CALL_DISCONNECT_GRACE_MS to reconnect before
   // the call is actually torn down. disconnectedUserId records WHICH

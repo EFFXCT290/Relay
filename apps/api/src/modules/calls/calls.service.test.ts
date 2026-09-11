@@ -139,7 +139,7 @@ describe("CallService.initiate — offline-callee gate (Step C.1)", () => {
     const svc = new CallService(fastify);
 
     const { result: ack, pushCalls } = await withPushCapture(async () => {
-      const r = await svc.initiate(callerId, { targetUserId: recipientId, type: "AUDIO" });
+      const r = await svc.initiate(callerId, { targetUserId: recipientId, type: "AUDIO" }, "caller-socket");
       await drain(); // let the fire-and-forget pushIncomingCall() chain settle
       return r;
     });
@@ -174,7 +174,7 @@ describe("CallService.initiate — offline-callee gate (Step C.1)", () => {
     const svc = new CallService(fastify);
 
     const { result: ack, pushCalls } = await withPushCapture(async () => {
-      const r = await svc.initiate(callerId, { targetUserId: recipientId, type: "VIDEO" });
+      const r = await svc.initiate(callerId, { targetUserId: recipientId, type: "VIDEO" }, "caller-socket");
       await drain();
       return r;
     });
@@ -206,7 +206,7 @@ describe("CallService.accept — ringing → active state transition", () => {
     const session = seedSession({ callId, callerId, recipientId, ringTimer });
 
     const svc = new CallService(fastify);
-    await svc.accept(recipientId, callId);
+    await svc.accept(recipientId, callId, "recipient-socket");
 
     assert.equal(session.state, "active");
     assert.equal(typeof session.answeredAt, "number");
@@ -235,7 +235,7 @@ describe("CallService.accept — ringing → active state transition", () => {
     const session = seedSession({ callId, callerId, recipientId });
 
     const svc = new CallService(fastify);
-    await svc.accept(callerId, callId); // wrong side
+    await svc.accept(callerId, callId, "caller-socket"); // wrong side
 
     assert.equal(session.state, "ringing", "state must not change");
     assert.equal(callUpdates.length, 0);
@@ -253,7 +253,7 @@ describe("CallService.accept — ringing → active state transition", () => {
     seedSession({ callId, callerId, recipientId, state: "active", answeredAt: Date.now() });
 
     const svc = new CallService(fastify);
-    await svc.accept(recipientId, callId);
+    await svc.accept(recipientId, callId, "recipient-socket");
 
     assert.equal(callUpdates.length, 0, "an already-active call must not be re-answered");
     assert.equal(emitted.length, 0);
@@ -266,7 +266,7 @@ describe("CallService.accept — ringing → active state transition", () => {
     const { fastify, callUpdates, emitted } = makeFastify({ users: [] });
     const svc = new CallService(fastify);
 
-    await assert.doesNotReject(() => svc.accept(randomUUID(), randomUUID()));
+    await assert.doesNotReject(() => svc.accept(randomUUID(), randomUUID(), "some-socket"));
     assert.equal(callUpdates.length, 0);
     assert.equal(emitted.length, 0);
   });
@@ -438,10 +438,10 @@ describe("CallService.handleDisconnect — safety-net teardown on socket drop", 
     const recipientId = randomUUID();
     const callId = randomUUID();
     const { fastify, callUpdates, emitted } = makeFastify({ users: [] });
-    seedSession({ callId, callerId, recipientId, state: "active", answeredAt: Date.now() });
+    seedSession({ callId, callerId, recipientId, state: "active", answeredAt: Date.now(), recipientSocketId: "recipient-socket" });
 
     const svc = new CallService(fastify);
-    await svc.handleDisconnect(recipientId); // recipient's socket drops
+    await svc.handleDisconnect(recipientId, "recipient-socket"); // recipient's socket drops
 
     assert.equal(callUpdates.length, 0, "must not terminate on the spot — a grace period is pending");
     assert.equal(emitted.length, 0);
@@ -459,10 +459,10 @@ describe("CallService.handleDisconnect — safety-net teardown on socket drop", 
     const recipientId = randomUUID();
     const callId = randomUUID();
     const { fastify, callUpdates, emitted } = makeFastify({ users: [] });
-    seedSession({ callId, callerId, recipientId, state: "active", answeredAt: Date.now() });
+    seedSession({ callId, callerId, recipientId, state: "active", answeredAt: Date.now(), recipientSocketId: "recipient-socket" });
 
     const svc = new CallService(fastify);
-    await svc.handleDisconnect(recipientId); // recipient's socket drops
+    await svc.handleDisconnect(recipientId, "recipient-socket"); // recipient's socket drops
     assert.equal(callUpdates.length, 0, "still inside the grace window");
 
     mock.timers.tick(env.CALL_DISCONNECT_GRACE_MS);
@@ -485,11 +485,11 @@ describe("CallService.handleDisconnect — safety-net teardown on socket drop", 
     const recipientId = randomUUID();
     const callId = randomUUID();
     const { fastify, callUpdates, emitted } = makeFastify({ users: [] });
-    seedSession({ callId, callerId, recipientId, state: "active", answeredAt: Date.now() });
+    seedSession({ callId, callerId, recipientId, state: "active", answeredAt: Date.now(), recipientSocketId: "recipient-socket-1" });
 
     const svc = new CallService(fastify);
-    await svc.handleDisconnect(recipientId); // recipient's socket drops
-    svc.handleReconnect(recipientId);         // ...and reconnects before the timer fires
+    await svc.handleDisconnect(recipientId, "recipient-socket-1"); // recipient's socket drops
+    svc.handleReconnect(recipientId, "recipient-socket-2");         // ...and reconnects (new socket.id) before the timer fires
 
     mock.timers.tick(env.CALL_DISCONNECT_GRACE_MS); // let the (now-cancelled) timer's scheduled time pass
     await drain();
@@ -499,6 +499,7 @@ describe("CallService.handleDisconnect — safety-net teardown on socket drop", 
     const session = callRuntime.get(callId);
     assert.ok(session, "the session must still be alive");
     assert.equal(session!.disconnectGrace, undefined);
+    assert.equal(session!.recipientSocketId, "recipient-socket-2", "the tracked call-socket must repoint to the reconnecting socket.id, not the stale dropped one");
 
     callRuntime.destroy(callId);
   });
@@ -510,11 +511,11 @@ describe("CallService.handleDisconnect — safety-net teardown on socket drop", 
     const recipientId = randomUUID();
     const callId = randomUUID();
     const { fastify, callUpdates } = makeFastify({ users: [] });
-    seedSession({ callId, callerId, recipientId, state: "active", answeredAt: Date.now() });
+    seedSession({ callId, callerId, recipientId, state: "active", answeredAt: Date.now(), recipientSocketId: "recipient-socket", callerSocketId: "caller-socket-1" });
 
     const svc = new CallService(fastify);
-    await svc.handleDisconnect(recipientId); // recipient's socket drops
-    svc.handleReconnect(callerId);            // caller's unrelated connection event fires
+    await svc.handleDisconnect(recipientId, "recipient-socket"); // recipient's socket drops
+    svc.handleReconnect(callerId, "caller-socket-2");             // caller's unrelated connection event fires
 
     mock.timers.tick(env.CALL_DISCONNECT_GRACE_MS);
     await drain();
@@ -530,10 +531,10 @@ describe("CallService.handleDisconnect — safety-net teardown on socket drop", 
     const recipientId = randomUUID();
     const callId = randomUUID();
     const { fastify, callUpdates, emitted } = makeFastify({ users: [] });
-    seedSession({ callId, callerId, recipientId, state: "active", answeredAt: Date.now() });
+    seedSession({ callId, callerId, recipientId, state: "active", answeredAt: Date.now(), recipientSocketId: "recipient-socket" });
 
     const svc = new CallService(fastify);
-    await svc.handleDisconnect(recipientId); // recipient's socket drops, grace timer armed
+    await svc.handleDisconnect(recipientId, "recipient-socket"); // recipient's socket drops, grace timer armed
     assert.equal(callUpdates.length, 0);
 
     await svc.end(callerId, callId); // caller hangs up for real before the grace window elapses
@@ -559,7 +560,7 @@ describe("CallService.handleDisconnect — safety-net teardown on socket drop", 
 
     const svc = new CallService(fastify);
     const { pushCalls } = await withPushCapture(async () => {
-      await svc.handleDisconnect(callerId); // the CALLER drops before the recipient ever answers
+      await svc.handleDisconnect(callerId, "caller-socket"); // the CALLER drops before the recipient ever answers
       await drain();
     });
 
@@ -578,7 +579,7 @@ describe("CallService.handleDisconnect — safety-net teardown on socket drop", 
     const { fastify, callUpdates, emitted } = makeFastify({ users: [] });
     const svc = new CallService(fastify);
 
-    await assert.doesNotReject(() => svc.handleDisconnect(randomUUID()));
+    await assert.doesNotReject(() => svc.handleDisconnect(randomUUID(), "some-socket"));
     assert.equal(callUpdates.length, 0);
     assert.equal(emitted.length, 0);
   });
@@ -599,7 +600,7 @@ describe("CallService terminate() idempotency — a disconnect racing an explici
     assert.equal(emitted.length, 1);
 
     // The recipient's socket drops right after — same call, already torn down.
-    await svc.handleDisconnect(recipientId);
+    await svc.handleDisconnect(recipientId, "recipient-socket");
 
     assert.equal(callUpdates.length, 1, "handleDisconnect must not write a second terminal row for an already-ended call");
     assert.equal(emitted.length, 1, "handleDisconnect must not emit a second terminal event");

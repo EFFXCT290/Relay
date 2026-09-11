@@ -75,7 +75,7 @@ export default fp(async (fastify) => {
     // connection IS that grace period's reconnect. Both live in CallService.
     const callService = new CallService(fastify);
     callService.resyncRinging(socket.userId);
-    callService.handleReconnect(socket.userId);
+    callService.handleReconnect(socket.userId, socket.id);
 
     registerAllSocketHandlers(socket, fastify, socket.userId);
   });

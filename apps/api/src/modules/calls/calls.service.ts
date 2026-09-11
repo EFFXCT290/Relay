@@ -54,7 +54,7 @@ export class CallService {
 
   // ── Lifecycle ──────────────────────────────────────────────────────────────
 
-  async initiate(callerId: string, input: CallInitInbound): Promise<CallInitAck> {
+  async initiate(callerId: string, input: CallInitInbound, callerSocketId: string): Promise<CallInitAck> {
     const { targetUserId, type, conversationId } = input;
 
     if (targetUserId === callerId) return { ok: false, reason: "self" };
@@ -88,6 +88,7 @@ export class CallService {
       conversationId,
       callerUsername: caller?.username ?? "",
       iceCandidateCount: 0,
+      callerSocketId,
     };
     callRuntime.create(session);
 
@@ -130,7 +131,7 @@ export class CallService {
     return { ok: true, callId, iceServers: generateTurnCredentials(callerId).iceServers };
   }
 
-  async accept(userId: string, callId: string): Promise<void> {
+  async accept(userId: string, callId: string, socketId: string): Promise<void> {
     const session = callRuntime.get(callId);
     if (!session || session.recipientId !== userId || session.state !== "ringing") return;
 
@@ -141,6 +142,7 @@ export class CallService {
     await this.repo.markAnswered(callId);
     session.state = "active";
     session.answeredAt = Date.now();
+    session.recipientSocketId = socketId;
 
     this.emitTo(session.callerId, CALL_EVENTS.ACCEPTED, { callId });
     this.fastify.log.info({ callId, acceptedBy: userId, status: "ANSWERED" }, "[call] accepted");
@@ -229,12 +231,26 @@ export class CallService {
 
   // Socket dropped (refresh, crash, network loss). Resolves whatever call this
   // user was in, in whatever state.
-  async handleDisconnect(userId: string): Promise<void> {
+  async handleDisconnect(userId: string, socketId: string): Promise<void> {
     const session = callRuntime.getByUser(userId);
     if (!session) return;
     const peer = callRuntime.peerOf(session, userId);
 
     if (session.state === "active") {
+      // A userId alone doesn't identify which of this user's (possibly many)
+      // tabs/devices just dropped. Only the specific socket.id recorded on
+      // the session at initiate()/accept() — see ActiveCallSession — is the
+      // one actually part of this call; a disconnect from any other socket
+      // for this same user is a complete no-op for call state.
+      const callSocketId = session.callerId === userId ? session.callerSocketId : session.recipientSocketId;
+      if (callSocketId !== socketId) {
+        this.fastify.log.info(
+          { callId: session.callId, userId, socketId, callSocketId },
+          "[call] disconnect ignored — not the call's socket",
+        );
+        return;
+      }
+
       // Don't terminate on the spot — a Socket.IO disconnect is frequently a
       // transient reconnect (brief network blip, tab backgrounding), the same
       // class of event the client's WebRTC layer already rides out via
@@ -289,11 +305,22 @@ export class CallService {
   // peer's own unrelated connection event must never cancel a grace timer
   // that isn't theirs), cancel it: they're back before the window elapsed, so
   // the call continues uninterrupted. No-op in every other case.
-  handleReconnect(userId: string): void {
+  //
+  // Note this matches on userId, not the old socket.id — Socket.IO never
+  // preserves socket.id across a reconnect, so there's nothing to match it
+  // against. That's fine for CANCELING the timer (any new connection from the
+  // disconnected user is a reasonable signal they're back). But it means the
+  // session's tracked call-socket must be repointed to this new socket.id
+  // right here, otherwise a LATER real disconnect of this same (now
+  // reconnected) client would compare against the stale, already-dead old
+  // socket.id in handleDisconnect() and never arm a fresh grace timer.
+  handleReconnect(userId: string, socketId: string): void {
     const session = callRuntime.getByUser(userId);
     if (!session?.disconnectGrace || session.disconnectGrace.disconnectedUserId !== userId) return;
     clearTimeout(session.disconnectGrace.timer);
     session.disconnectGrace = undefined;
+    if (session.callerId === userId) session.callerSocketId = socketId;
+    else session.recipientSocketId = socketId;
     this.fastify.log.info({ callId: session.callId, userId }, "[call] disconnect grace cancelled — reconnected");
   }
 

@@ -130,7 +130,7 @@ describe("CallService push notifications — real Postgres + Redis", () => {
 
     const svc = new CallService({ ...app, io: fakeIo() } as never);
     const { result: ack, pushCalls } = await withPushCapture(async (pushCalls) => {
-      const r = await svc.initiate(caller.id, { targetUserId: recipient.id, type: "AUDIO" });
+      const r = await svc.initiate(caller.id, { targetUserId: recipient.id, type: "AUDIO" }, "caller-socket");
       await waitForPushCount(pushCalls, 1);
       return r;
     });
@@ -151,7 +151,7 @@ describe("CallService push notifications — real Postgres + Redis", () => {
 
     const svc = new CallService({ ...app, io: fakeIo() } as never);
     const { result: ack, pushCalls } = await withPushCapture(async () => {
-      const r = await svc.initiate(caller.id, { targetUserId: recipient.id, type: "AUDIO" });
+      const r = await svc.initiate(caller.id, { targetUserId: recipient.id, type: "AUDIO" }, "caller-socket");
       await sleep(300); // grace period — long enough for a real DB round trip, not an instant check
       return r;
     });
@@ -174,7 +174,7 @@ describe("CallService push notifications — real Postgres + Redis", () => {
 
     const svc = new CallService({ ...app, io: fakeIo() } as never);
     const { pushCalls } = await withPushCapture(async (pushCalls) => {
-      await svc.handleDisconnect(caller.id);
+      await svc.handleDisconnect(caller.id, "caller-socket");
       await waitForPushCount(pushCalls, 1);
     });
 
@@ -195,7 +195,7 @@ describe("CallService push notifications — real Postgres + Redis", () => {
 
     const svc = new CallService({ ...app, io: fakeIo() } as never);
     const { pushCalls } = await withPushCapture(async () => {
-      await svc.handleDisconnect(caller.id);
+      await svc.handleDisconnect(caller.id, "caller-socket");
       await sleep(300);
     });
 
@@ -255,7 +255,7 @@ describe("CallService push notifications — real Postgres + Redis", () => {
 
     const svc = new CallService({ ...app, io: fakeIo() } as never);
     const { result: ack, pushCalls } = await withPushCapture(async () => {
-      const r = await svc.initiate(caller.id, { targetUserId: recipient.id, type: "AUDIO" });
+      const r = await svc.initiate(caller.id, { targetUserId: recipient.id, type: "AUDIO" }, "caller-socket");
       await sleep(300); // grace period — long enough for a real DB round trip, not an instant check
       return r;
     });
