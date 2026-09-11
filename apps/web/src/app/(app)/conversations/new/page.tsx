@@ -7,6 +7,7 @@ import { ArrowLeft, Search } from "lucide-react";
 import { api } from "@/frontend-core/api";
 import { Avatar } from "@/shared/components/avatar";
 import { Input } from "@/shared/ui/input";
+import { SkeletonCircle, SkeletonLine } from "@/shared/ui/skeleton";
 
 type SearchHit = { userId: string; username: string; avatarUrl?: string | null };
 
@@ -126,8 +127,8 @@ export default function NewMessagePage() {
         <ul className="flex flex-col">
           {[0, 1, 2].map((i) => (
             <li key={i} className="flex items-center gap-3.5 px-6 py-3">
-              <div className="h-11 w-11 shrink-0 animate-pulse rounded-full bg-white/5" />
-              <div className="h-3.5 w-24 animate-pulse rounded bg-white/5" />
+              <SkeletonCircle size={44} />
+              <SkeletonLine />
             </li>
           ))}
         </ul>

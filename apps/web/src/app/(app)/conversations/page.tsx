@@ -9,6 +9,7 @@ import { getSocket } from "@/frontend-core/socket";
 import { Button } from "@/shared/ui/button";
 import { Avatar } from "@/shared/components/avatar";
 import { ConversationRow, type ConversationListItem } from "@/features/conversations/components/conversation-row";
+import { SkeletonCircle, SkeletonLine } from "@/shared/ui/skeleton";
 import { PRESENCE_EVENTS, TYPING_EVENTS, USER_EVENTS, type PresenceSyncResponse, type TypingSyncResponse, type UserProfileUpdatedEvent } from "@relay/contracts";
 
 const mono = "var(--font-mono)";
@@ -548,10 +549,10 @@ function LoadingState() {
     <ul className="flex flex-col">
       {[0, 1, 2, 3].map((i) => (
         <li key={i} className="flex items-center gap-3.5 px-6 py-3">
-          <div className="h-12 w-12 shrink-0 animate-pulse rounded-full bg-white/5" />
+          <SkeletonCircle size={48} />
           <div className="flex flex-1 flex-col gap-2">
-            <div className="h-3.5 w-24 animate-pulse rounded bg-white/5" />
-            <div className="h-3 w-3/5 animate-pulse rounded bg-white/5" />
+            <SkeletonLine />
+            <SkeletonLine className="h-3 w-3/5" />
           </div>
         </li>
       ))}

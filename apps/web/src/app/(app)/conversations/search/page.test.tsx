@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, fireEvent } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
 // Regression coverage for /conversations/search actually being a real page:
@@ -103,5 +103,39 @@ describe("ConversationSearchPage", () => {
     await user.type(screen.getByPlaceholderText("Search conversations…"), "a");
 
     expect(screen.getByText(/Search by username, nickname, or message content\./)).toBeInTheDocument();
+  });
+
+  it("shows 3 avatar-circle + 2-line skeleton rows while a search is in flight", async () => {
+    let resolveSearch: ((v: unknown) => void) | undefined;
+    apiImpl = (path) => {
+      if (path.startsWith("/api/conversations/search")) {
+        return new Promise((resolve) => { resolveSearch = resolve; });
+      }
+      throw new Error(`unexpected call: ${path}`);
+    };
+
+    const { container } = render(<ConversationSearchPage />);
+    // A single atomic change (not keystroke-by-keystroke typing) — the
+    // component's 220ms debounce clears on every `q` change, so simulating
+    // real per-character typing here would race multiple independent
+    // debounce fires against this test's single `resolveSearch` capture.
+    fireEvent.change(screen.getByPlaceholderText("Search conversations…"), { target: { value: "bright" } });
+
+    // The skeleton itself appears the instant `loading` flips true — before
+    // the 220ms debounce has even fired the real api() call — so wait for
+    // that call (i.e. resolveSearch being captured) before asserting shape,
+    // otherwise this races the debounce timer.
+    await waitFor(() => expect(resolveSearch).toBeDefined());
+
+    const rows = container.querySelectorAll("li");
+    expect(rows.length).toBe(3);
+    for (const row of rows) {
+      expect(row.querySelectorAll(".animate-pulse.rounded-full")).toHaveLength(1); // avatar circle
+      expect(row.querySelectorAll(".animate-pulse:not(.rounded-full)")).toHaveLength(2); // 2 text lines
+    }
+
+    // Resolve so the pending promise doesn't leak into the next test.
+    resolveSearch!({ results: [] });
+    await waitFor(() => expect(screen.getByText(/No matches for/)).toBeInTheDocument());
   });
 });
