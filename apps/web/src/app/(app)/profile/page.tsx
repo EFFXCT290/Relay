@@ -19,6 +19,7 @@ import {
 } from "lucide-react";
 import { Avatar } from "@/shared/components/avatar";
 import { Toggle } from "@/shared/components/toggle";
+import { SkeletonLine } from "@/shared/ui/skeleton";
 import { PushToggle } from "@/features/notifications/push/push-toggle";
 import { SpotifyBadge } from "@/features/spotify/spotify-badge";
 import { SpotifyConnectCard } from "@/features/spotify/spotify-connect-card";
@@ -222,12 +223,16 @@ export default function ProfilePage() {
           <div className="h-24 w-24 animate-pulse rounded-full bg-white/5" />
         )}
         <div className="flex flex-col items-center gap-1.5">
-          <h1
-            className="text-[26px] font-extrabold tracking-[-0.025em] text-[var(--color-text)]"
-            style={{ fontFamily: display }}
-          >
-            @{me?.username ?? "—"}
-          </h1>
+          {me ? (
+            <h1
+              className="text-[26px] font-extrabold tracking-[-0.025em] text-[var(--color-text)]"
+              style={{ fontFamily: display }}
+            >
+              @{me.username}
+            </h1>
+          ) : (
+            <SkeletonLine className="h-6 w-32" />
+          )}
           <div className="flex items-center gap-2">
             <span
               className="text-[11px] tracking-[0.04em] text-[var(--color-online)]"
@@ -236,12 +241,16 @@ export default function ProfilePage() {
               online now
             </span>
             <span className="h-[3px] w-[3px] rounded-full bg-[var(--color-text-muted)]" />
-            <span
-              className="text-[11px] tracking-[0.04em] text-[var(--color-text-secondary)]"
-              style={{ fontFamily: mono }}
-            >
-              joined {me ? formatJoined(me.createdAt) : "—"}
-            </span>
+            {me ? (
+              <span
+                className="text-[11px] tracking-[0.04em] text-[var(--color-text-secondary)]"
+                style={{ fontFamily: mono }}
+              >
+                joined {formatJoined(me.createdAt)}
+              </span>
+            ) : (
+              <SkeletonLine className="h-2.5 w-20" />
+            )}
           </div>
           {me && (
             <div className="pt-1">
@@ -254,11 +263,11 @@ export default function ProfilePage() {
       {/* Stats */}
       <Section noHeader>
         <div className="flex items-stretch">
-          <Stat label="Threads" value={threadCount} />
+          <Stat label="Threads" value={threadCount} loading={!me} />
           <Divider />
           <Stat label="Ephemeral" value={null} note="Phase 2" />
           <Divider />
-          <Stat label="Captures" value={captureCount} tone={captureCount && captureCount > 0 ? "alert" : "default"} />
+          <Stat label="Captures" value={captureCount} loading={!me} tone={captureCount && captureCount > 0 ? "alert" : "default"} />
         </div>
       </Section>
 
@@ -496,24 +505,30 @@ function Stat({
   value,
   note,
   tone,
+  loading,
 }: {
   label: string;
   value: number | null;
   note?: string;
   tone?: "default" | "alert";
+  loading?: boolean;
 }) {
   return (
     <div className="flex flex-1 flex-col items-center gap-1 py-4">
       <div className="flex items-baseline gap-1">
-        <span
-          className="text-[22px] font-extrabold tracking-[-0.02em]"
-          style={{
-            color: tone === "alert" ? "var(--color-alert)" : "var(--color-text)",
-            fontFamily: display,
-          }}
-        >
-          {value === null ? "—" : value}
-        </span>
+        {loading ? (
+          <SkeletonLine className="h-6 w-8" />
+        ) : (
+          <span
+            className="text-[22px] font-extrabold tracking-[-0.02em]"
+            style={{
+              color: tone === "alert" ? "var(--color-alert)" : "var(--color-text)",
+              fontFamily: display,
+            }}
+          >
+            {value === null ? "—" : value}
+          </span>
+        )}
         {note && (
           <span
             className="text-[9px] tracking-[0.04em] text-[var(--color-text-muted)]"

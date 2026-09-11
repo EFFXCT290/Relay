@@ -82,6 +82,23 @@ describe("SharedMediaGrid — loading and count", () => {
     render(<SharedMediaGrid conversationId="conv-1" onClose={vi.fn()} />);
     await waitFor(() => expect(screen.getByText("No media in this conversation yet.")).toBeInTheDocument());
   });
+
+  it("shows a 3x3 grid of 9 pulsing square skeleton tiles while the FIRST page is loading — distinct from the (3-tile) pagination skeleton", async () => {
+    let resolveFirstPage!: (v: { items: MediaGalleryItem[]; nextCursor: string | null; totalCount: number }) => void;
+    vi.mocked(mediaApi.gallery).mockImplementationOnce(() => new Promise((resolve) => { resolveFirstPage = resolve; }));
+
+    render(<SharedMediaGrid conversationId="conv-1" onClose={vi.fn()} />);
+    await waitFor(() => expect(resolveFirstPage).toBeDefined());
+
+    const tiles = document.querySelectorAll(".animate-pulse");
+    expect(tiles).toHaveLength(9);
+    for (const t of tiles) expect(t.className).toContain("h-[118px]"); // matches the real tile's fixed height
+    expect(screen.queryByText("No media in this conversation yet.")).not.toBeInTheDocument();
+
+    resolveFirstPage({ items: [], nextCursor: null, totalCount: 0 });
+    await waitFor(() => expect(screen.getByText("No media in this conversation yet.")).toBeInTheDocument());
+    expect(document.querySelectorAll(".animate-pulse")).toHaveLength(0); // skeleton fully cleared once loaded+empty
+  });
 });
 
 describe("SharedMediaGrid — video overlay", () => {

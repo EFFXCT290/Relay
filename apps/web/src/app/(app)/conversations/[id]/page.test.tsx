@@ -219,7 +219,7 @@ async function renderPage(initialMessages: Message[] = []) {
     throw new Error(`renderPage's default apiImpl doesn't handle: ${method} ${path}`);
   };
   const view = render(<ChatThreadPage />);
-  await waitFor(() => expect(screen.queryByText("loading")).not.toBeInTheDocument());
+  await waitFor(() => expect(screen.queryByTestId("messages-loading")).not.toBeInTheDocument());
   return view;
 }
 
@@ -424,7 +424,7 @@ describe("ChatThreadPage — infinite scroll-up reentrancy", () => {
     };
 
     const { container } = render(<ChatThreadPage />);
-    await waitFor(() => expect(screen.queryByText("loading")).not.toBeInTheDocument());
+    await waitFor(() => expect(screen.queryByTestId("messages-loading")).not.toBeInTheDocument());
     await screen.findByText("newer message", { selector: "div" });
 
     const scrollEl = container.querySelector(".overflow-y-auto") as HTMLElement | null;
@@ -575,7 +575,7 @@ describe("ChatThreadPage — loading-older skeleton shape", () => {
     };
 
     const { container } = render(<ChatThreadPage />);
-    await waitFor(() => expect(screen.queryByText("loading")).not.toBeInTheDocument());
+    await waitFor(() => expect(screen.queryByTestId("messages-loading")).not.toBeInTheDocument());
     await screen.findByText("newer message", { selector: "div" });
 
     const scrollEl = container.querySelector(".overflow-y-auto") as HTMLElement;
@@ -595,5 +595,26 @@ describe("ChatThreadPage — loading-older skeleton shape", () => {
       olderPageGate.resolve({ messages: [older], nextCursor: null });
       await olderPageGate.promise;
     });
+  });
+});
+
+describe("ChatThreadPage — initial message load skeleton shape", () => {
+  it("shows several bubble-shaped skeleton placeholders, alternating sides with varied widths, before the first page of messages loads", () => {
+    apiImpl = () => new Promise(() => {}); // never resolves — keeps messagesLoaded false
+    render(<ChatThreadPage />);
+
+    const loadingBlock = screen.getByTestId("messages-loading");
+    const pulses = loadingBlock.querySelectorAll(".animate-pulse");
+    expect(pulses.length).toBeGreaterThanOrEqual(4); // "several" placeholders, not just one or two
+
+    const leftSide = loadingBlock.querySelectorAll(".justify-start .animate-pulse");
+    const rightSide = loadingBlock.querySelectorAll(".justify-end .animate-pulse");
+    expect(leftSide.length).toBeGreaterThan(0);
+    expect(rightSide.length).toBeGreaterThan(0);
+
+    const widths = new Set(Array.from(pulses).map((p) => (p as HTMLElement).className.match(/\bw-\d+\b/)?.[0]));
+    expect(widths.size).toBeGreaterThan(1); // varied widths, not a uniform block
+
+    expect(screen.queryByText("loading")).not.toBeInTheDocument(); // old plain-text state is gone
   });
 });

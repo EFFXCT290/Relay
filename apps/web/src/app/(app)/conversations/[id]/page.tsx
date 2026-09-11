@@ -1926,10 +1926,21 @@ export default function ChatThreadPage() {
       {/* Message scroll — virtualized */}
       <div ref={scrollRef} className="relative flex-1 overflow-y-auto" style={{ touchAction: "pan-y" }}>
         {!messagesLoaded ? (
-          <div className="flex items-center justify-center py-12">
-            <span className="text-[11px] uppercase tracking-[0.18em] text-[var(--color-text-muted)]" style={{ fontFamily: mono }}>
-              loading
-            </span>
+          <div data-testid="messages-loading" className="flex flex-col gap-2 px-4 pt-4 lg:px-8 xl:px-12">
+            {[
+              { mine: false, w: "w-40", h: "h-9" },
+              { mine: true,  w: "w-28", h: "h-7" },
+              { mine: false, w: "w-52", h: "h-14" },
+              { mine: false, w: "w-24", h: "h-6" },
+              { mine: true,  w: "w-36", h: "h-9" },
+              { mine: true,  w: "w-20", h: "h-6" },
+            ].map((b, i) => (
+              <div key={i} className={b.mine ? "flex justify-end" : "flex justify-start"}>
+                <Skeleton
+                  className={`${b.h} ${b.w} rounded-[22px] ${b.mine ? "rounded-br-[6px]" : "rounded-bl-[6px]"}`}
+                />
+              </div>
+            ))}
           </div>
         ) : Object.keys(messagesRef.current).length === 0 && !pendingBatches.length && !partnerTyping ? (
           <div className="flex flex-col items-center gap-2 py-12 text-center">

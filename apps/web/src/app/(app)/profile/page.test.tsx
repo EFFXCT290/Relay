@@ -134,3 +134,39 @@ describe("ProfilePage — avatar optimistic upload", () => {
     expect((URL.revokeObjectURL as ReturnType<typeof vi.fn>)).toHaveBeenCalledWith("blob:mock-optimistic-preview");
   });
 });
+
+describe("ProfilePage — loading state", () => {
+  it("shows skeleton lines for username/joined-date and the Threads/Captures stats before profile data loads", async () => {
+    const meGate = deferred<{ userId: string; username: string; avatarUrl: string | null; createdAt: string }>();
+    apiImpl = async (path: string) => {
+      if (path === "/api/auth/me") return meGate.promise;
+      if (path.startsWith("/api/conversations")) return { conversations: [] };
+      if (path.startsWith("/api/notifications")) return { notifications: [] };
+      throw new Error(`unexpected api() call: ${path}`);
+    };
+
+    render(<ProfilePage />);
+
+    // Avatar's own pulse (h-24 w-24 rounded-full, untouched by this change) +
+    // username line + joined-date line + 2 stat lines (Threads, Captures) = 5.
+    // "Ephemeral" is a permanent "—" (Phase 2, not yet built) — never a pulse.
+    await waitFor(() => expect(document.querySelectorAll(".animate-pulse").length).toBe(5));
+
+    const pulses = Array.from(document.querySelectorAll(".animate-pulse"));
+    const circles = pulses.filter((p) => p.className.includes("rounded-full"));
+    expect(circles).toHaveLength(1); // just the avatar
+    // Ephemeral's "—" is a permanent Phase-2 placeholder, unrelated to loading
+    // — it must still show exactly once (not doubled by a stray dash from a
+    // field that should now be skeletoned instead of falling back to "—").
+    expect(screen.getByText("Phase 2")).toBeInTheDocument();
+    expect(screen.getAllByText("—", { exact: true })).toHaveLength(1);
+
+    await act(async () => {
+      meGate.resolve({ userId: "me-1", username: "alice", avatarUrl: null, createdAt: new Date().toISOString() });
+      await meGate.promise;
+    });
+
+    expect(await screen.findByText("@alice")).toBeInTheDocument();
+    expect(document.querySelectorAll(".animate-pulse")).toHaveLength(0);
+  });
+});

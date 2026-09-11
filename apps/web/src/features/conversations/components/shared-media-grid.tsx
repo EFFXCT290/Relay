@@ -121,7 +121,13 @@ export function SharedMediaGrid({ conversationId, onClose }: { conversationId: s
               {totalCount === null ? " " : `${totalCount} item${totalCount === 1 ? "" : "s"}`}
             </span>
 
-            {initialLoaded && items.length === 0 ? (
+            {!initialLoaded ? (
+              <div className="grid grid-cols-3 gap-1">
+                {[0, 1, 2, 3, 4, 5, 6, 7, 8].map((i) => (
+                  <Skeleton key={i} className="h-[118px] w-full rounded-[6px]" />
+                ))}
+              </div>
+            ) : items.length === 0 ? (
               <p className="px-2 py-8 text-center text-[13px] text-[var(--color-text-secondary)]">
                 No media in this conversation yet.
               </p>
@@ -156,7 +162,7 @@ export function SharedMediaGrid({ conversationId, onClose }: { conversationId: s
             )}
 
             <div ref={sentinelRef} className="h-1 w-full" />
-            {loading && (
+            {initialLoaded && loading && (
               <div className="grid grid-cols-3 gap-1">
                 {[0, 1, 2].map((i) => (
                   <Skeleton key={i} className="h-[118px] w-full rounded-[6px]" />
