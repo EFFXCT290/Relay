@@ -1022,15 +1022,18 @@ export default function ChatThreadPage() {
 
   // Auto-scroll to the bottom on initial load + on new bottom-side messages.
   // We only stick to bottom when the user was already there (within 120px),
-  // so reading older messages mid-scroll isn't yanked away.
+  // so reading older messages mid-scroll isn't yanked away. This cushion is
+  // deliberately looser than "is the last row visible" (atBottom, defined
+  // below once the virtualizer exists) — it only governs whether an
+  // incoming/own message should pull the view back down, where a little
+  // slack is the point.
   const stickToBottomRef = useRef(true);
-  // Jump-to-bottom affordance state — mirrors stickToBottomRef into actual
-  // React state (the ref alone can't drive a render), plus a count of
-  // partner messages that arrived while scrolled away from the bottom. This
-  // is deliberately separate from server-side read receipts (applyMessageNew
-  // below already marks a conversation read on arrival whenever the tab is
-  // focused, regardless of scroll position) — unseenCount is a purely local,
-  // ephemeral "have you scrolled past this yet" signal, not an unread count.
+  // Jump-to-bottom affordance state, plus a count of partner messages that
+  // arrived while scrolled away from the bottom. Deliberately separate from
+  // server-side read receipts (applyMessageNew below already marks a
+  // conversation read on arrival whenever the tab is focused, regardless of
+  // scroll position) — unseenCount is a purely local, ephemeral "have you
+  // scrolled past this yet" signal, not an unread count.
   const [atBottom, setAtBottom] = useState(true);
   const [unseenCount, setUnseenCount] = useState(0);
   useEffect(() => {
@@ -1038,10 +1041,7 @@ export default function ChatThreadPage() {
     if (!el) return;
     const onScroll = () => {
       const distFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
-      const nearBottom = distFromBottom < 120;
-      stickToBottomRef.current = nearBottom;
-      setAtBottom(nearBottom);
-      if (nearBottom) setUnseenCount(0);
+      stickToBottomRef.current = distFromBottom < 120;
     };
     el.addEventListener("scroll", onScroll, { passive: true });
     return () => el.removeEventListener("scroll", onScroll);
@@ -1049,13 +1049,35 @@ export default function ChatThreadPage() {
 
 
   // Infinite scroll up — when scrolled near the top, fetch one more page.
-  // Anchor preservation: capture scrollHeight before prepend, then shift
-  // scrollTop by the delta so the user's viewport doesn't jump.
+  // Anchor preservation: remember whichever row is currently topmost on
+  // screen BY KEY (not index — prepending shifts every existing row to a
+  // new index), then re-find that same row after the older page merges in
+  // and scroll it back to the same screen position.
+  //
+  // This intentionally does NOT use the more obvious "capture scrollHeight
+  // before, shift scrollTop by the delta after" approach. That heuristic
+  // double-counts: @tanstack/react-virtual's own measureElement ref callback
+  // fires synchronously during React's commit for every newly-mounted row,
+  // and if a row's real height differs from its estimateSize() placeholder,
+  // the library ALREADY nudges scrollTop by (real - estimate) on its own
+  // (virtual-core's resizeItem, for any row above the current scroll
+  // offset). By the time a post-commit scrollHeight read happens, it
+  // reflects the library's already-corrected total, so adding the full
+  // delta on top applies the library's own correction twice — worst when
+  // many rows are prepended at once with inaccurate estimates, e.g. the
+  // date separators here (dayLabel() gives "Today" messages a new separator
+  // per minute, so a single page can prepend a lot of them). Anchoring to a
+  // row that already existed sidesteps this: that row's cached size is
+  // untouched by the prepend, so scrollToIndex computes its new offset from
+  // the virtualizer's own (already-settled) measurements instead of trying
+  // to predict a delta in advance.
   const loadOlder = useCallback(async () => {
     if (!nextCursor || loadingOlderRef.current || !scrollRef.current) return;
     loadingOlderRef.current = true;
     setLoadingOlder(true);
-    const beforeHeight = scrollRef.current.scrollHeight;
+    const topItem = virtualizer.getVirtualItems()[0];
+    const anchorKey = topItem ? getRowKey(flatRowsRef.current[topItem.index]!) : null;
+    const anchorOffset = topItem ? scrollRef.current.scrollTop - topItem.start : 0;
     try {
       const res = await api<{ messages: Message[]; nextCursor: string | null }>(
         `/api/conversations/${conversationId}/messages?limit=${PAGE_SIZE}&cursor=${nextCursor}`,
@@ -1068,14 +1090,17 @@ export default function ChatThreadPage() {
       // Restore viewport after DOM has the new nodes.
       requestAnimationFrame(() => {
         const el = scrollRef.current;
-        if (!el) return;
-        const delta = el.scrollHeight - beforeHeight;
-        el.scrollTop += delta;
+        if (!el || anchorKey === null) return;
+        const newIndex = flatRowsRef.current.findIndex((row) => getRowKey(row) === anchorKey);
+        if (newIndex === -1) return;
+        virtualizer.scrollToIndex(newIndex, { align: "start" });
+        el.scrollTop += anchorOffset;
       });
     } finally {
       loadingOlderRef.current = false;
       setLoadingOlder(false);
     }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [conversationId, nextCursor]);
 
   useEffect(() => {
@@ -1522,6 +1547,20 @@ export default function ChatThreadPage() {
     | { kind: "pending"; batch: PendingBatch }
     | { kind: "typing" };
 
+  // Stable per-row identity, not index — shared by the virtualizer's
+  // getItemKey below and by loadOlder's scroll anchor (see there), both of
+  // which need to find "the same row" across a prepend that shifts every
+  // existing row to a new index.
+  const getRowKey = (row: VirtualRow): string => {
+    switch (row.kind) {
+      case "loader":    return "loader";
+      case "typing":    return "typing";
+      case "separator": return `separator:${row.dateKey}`;
+      case "pending":   return `pending:${row.batch.batchId}`;
+      case "message":   return `message:${row.message.messageId}`;
+    }
+  };
+
   const flatRows = useMemo((): VirtualRow[] => {
     if (!messagesLoaded) return [];
     const rows: VirtualRow[] = [];
@@ -1538,6 +1577,13 @@ export default function ChatThreadPage() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [messagesLoaded, renderTick, loadingOlder, pendingBatches, partnerTyping]);
 
+  // loadOlder is declared earlier in this component (before flatRows exists)
+  // and is memoized independently of flatRows, so it can't close over a
+  // fresh flatRows value directly — this ref gives it one on every render,
+  // the same pattern messagesRef/meIdRef/stickToBottomRef already use here.
+  const flatRowsRef = useRef<VirtualRow[]>(flatRows);
+  flatRowsRef.current = flatRows;
+
   const virtualizer = useVirtualizer({
     count:           flatRows.length,
     getScrollElement: () => scrollRef.current,
@@ -1550,14 +1596,7 @@ export default function ChatThreadPage() {
     // stutter as getTotalSize()/offsets diverge from the real DOM heights.
     getItemKey: (index) => {
       const row = flatRows[index];
-      if (!row) return index;
-      switch (row.kind) {
-        case "loader":    return "loader";
-        case "typing":    return "typing";
-        case "separator": return `separator:${row.dateKey}`;
-        case "pending":   return `pending:${row.batch.batchId}`;
-        case "message":   return `message:${row.message.messageId}`;
-      }
+      return row ? getRowKey(row) : index;
     },
     estimateSize:    (i) => {
       const row = flatRows[i];
@@ -1587,6 +1626,31 @@ export default function ChatThreadPage() {
     paddingStart: 16,
     paddingEnd:   16,
   });
+
+  // Precise "is the last row actually on screen" signal for the
+  // jump-to-bottom button + unseen badge — driven by the virtualizer's own
+  // visible range (real per-row measured/estimated heights), not a fixed
+  // pixel distance like stickToBottomRef above. virtualizer.range is the
+  // *unpadded* visible index range (no overscan), so comparing its endIndex
+  // against the last row index tells us whether that row would actually be
+  // rendered inside the viewport, regardless of how tall it is — a tall
+  // trailing row (e.g. an image grid) could leave
+  // scrollHeight - scrollTop - clientHeight comfortably under
+  // stickToBottomRef's 120px cushion while the row itself sits well outside
+  // the viewport, which used to leave the button hidden when it should show.
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const checkAtBottom = () => {
+      const lastIndex = flatRowsRef.current.length - 1;
+      const range = virtualizer.range;
+      const lastRowVisible = lastIndex < 0 || (range !== null && range.endIndex >= lastIndex);
+      setAtBottom(lastRowVisible);
+      if (lastRowVisible) setUnseenCount(0);
+    };
+    el.addEventListener("scroll", checkAtBottom, { passive: true });
+    return () => el.removeEventListener("scroll", checkAtBottom);
+  }, [virtualizer]);
 
   // Stick to bottom on new rows. Also clears the unseen badge — covers both
   // "my own send" (handleSend/handleSendImages/handleSendVoice force

@@ -451,6 +451,86 @@ describe("ChatThreadPage — infinite scroll-up reentrancy", () => {
   });
 });
 
+describe("ChatThreadPage — scroll-anchor preservation on loadOlder", () => {
+  it("keeps the same on-screen offset for the row that was topmost, after older messages are prepended", async () => {
+    // "newer" is the only row loaded initially; "older" lands on a different
+    // calendar day, so its own page prepends both a message row AND a fresh
+    // date separator — two new rows shifting everything else down, which is
+    // exactly the scenario a height-delta-based correction gets wrong (see
+    // the comment on loadOlder).
+    const newer = makeMessage({ messageId: "msg-newer", body: "newer message", createdAt: "2026-01-01T00:05:00.000Z" });
+    const older = makeMessage({ messageId: "msg-older", body: "older message", createdAt: "2025-12-25T00:00:00.000Z" });
+
+    apiImpl = async (path, opts) => {
+      const method = opts?.method ?? "GET";
+      if (path === `/api/conversations/${CONV_ID}` && method === "GET") return makeDetail();
+      if (path === `/api/conversations/${CONV_ID}/messages?limit=30` && method === "GET") {
+        return { messages: [newer], nextCursor: "cursor-1" };
+      }
+      if (path === `/api/conversations/${CONV_ID}/messages?limit=30&cursor=cursor-1` && method === "GET") {
+        return { messages: [older], nextCursor: null };
+      }
+      if (path === `/api/conversations/${CONV_ID}/read` && method === "POST") return undefined;
+      if (path === `/api/conversations/${CONV_ID}/pins` && method === "GET") return { pins: [] };
+      if (path.startsWith(`/api/conversations/${CONV_ID}/media?`) && method === "GET") {
+        return { items: [], nextCursor: null, totalCount: 0 };
+      }
+      throw new Error(`unexpected call: ${method} ${path}`);
+    };
+
+    const { container } = render(<ChatThreadPage />);
+    await waitFor(() => expect(screen.queryByTestId("messages-loading")).not.toBeInTheDocument());
+    await screen.findByText("newer message", { selector: "div" });
+
+    const scrollEl = container.querySelector(".overflow-y-auto") as HTMLElement;
+    // Row 0 is the date separator ("newer message" itself is row 1) — this
+    // is genuinely whichever row the component itself anchors to
+    // (virtualizer.getVirtualItems()[0] at this same scroll position), so
+    // tracking it by its rendered text is how we confirm loadOlder restores
+    // the SAME row it captured, not merely "a" row.
+    const topRowBefore = container.querySelector('[data-index="0"]') as HTMLElement;
+    const topRowText = topRowBefore.textContent;
+    const topStartBefore = parseFloat(topRowBefore.style.top);
+
+    // Scroll partway INTO the top row (not aligned to its top edge) and near
+    // the top of the container — which is what triggers loadOlder. scrollHeight
+    // is set comfortably large so distFromBottom stays well above the
+    // stickToBottomRef cushion; otherwise the unrelated "stick to bottom on
+    // new rows" effect (a separate, correct behavior for a genuinely-short
+    // list) would force scrollTop back to scrollHeight once the older page
+    // merges in, masking whatever loadOlder's own anchor correction does.
+    const scrollTopBefore = topStartBefore + 10;
+    const anchorOffset = scrollTopBefore - topStartBefore; // = 10, preserved below
+
+    act(() => {
+      setScrollMetrics(scrollEl, { scrollHeight: 5000, clientHeight: 600, scrollTop: scrollTopBefore });
+      fireEvent.scroll(scrollEl);
+    });
+
+    await waitFor(() => expect(screen.queryByText("older message", { selector: "div" })).toBeInTheDocument());
+    // Let loadOlder's requestAnimationFrame-scheduled correction run.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    });
+
+    // Something was actually prepended above the original top row (it's no
+    // longer at index 0 — the older page's separator + message now are).
+    const topRowAfter = container.querySelector('[data-index="0"]') as HTMLElement;
+    expect(topRowAfter.textContent).not.toBe(topRowText);
+
+    // The SAME row that was topmost before ("newer message"'s date
+    // separator) should still be on screen, scrolled into by exactly the
+    // same sub-row offset — not shifted by whatever gap exists between the
+    // prepended rows' estimateSize() placeholders and their real measured
+    // heights.
+    const rows = Array.from(container.querySelectorAll("[data-index]"));
+    const anchorRowAfter = rows.find((el) => el.textContent === topRowText) as HTMLElement;
+    expect(anchorRowAfter).toBeTruthy();
+    const anchorStartAfter = parseFloat(anchorRowAfter.style.top);
+    expect(scrollEl.scrollTop).toBeCloseTo(anchorStartAfter + anchorOffset, 0);
+  });
+});
+
 describe("ChatThreadPage — jump-to-bottom affordance", () => {
   it("shows the button once scrolled away from the bottom, and hides it again once scrolled back", async () => {
     const msg = makeMessage({ messageId: "msg-1", body: "hello", createdAt: "2026-01-01T00:00:00.000Z" });
@@ -470,6 +550,36 @@ describe("ChatThreadPage — jump-to-bottom affordance", () => {
       fireEvent.scroll(scrollEl);
     });
     expect(screen.queryByRole("button", { name: "Jump to latest messages" })).not.toBeInTheDocument();
+    await flushVirtualizerDebounce();
+  });
+
+  it("shows the button whenever the last row is actually outside the virtualizer's visible range, even if scrollHeight/scrollTop alone would read as 'near the bottom'", async () => {
+    // Enough real rows that, sitting at the very top of the list (scrollTop
+    // 0), the last one is nowhere near the viewport — regardless of what
+    // scrollHeight says. This is the case the old fixed-120px-cushion check
+    // couldn't tell apart from actually being at the bottom: it only ever
+    // looked at raw scroll distance, never at which row was on screen.
+    const messages = Array.from({ length: 15 }, (_, i) =>
+      makeMessage({
+        messageId: `msg-${i}`,
+        body: `message ${i}`,
+        createdAt: `2026-01-01T00:${String(i).padStart(2, "0")}:00.000Z`,
+      }),
+    );
+    const { container } = await renderPage(messages);
+    const scrollEl = container.querySelector(".overflow-y-auto") as HTMLElement;
+
+    // scrollTop is 0 — genuinely at the top of a long list. scrollHeight and
+    // clientHeight are chosen so the OLD formula
+    // (scrollHeight - scrollTop - clientHeight < 120) alone would call this
+    // "near the bottom" (700 - 0 - 600 = 100 < 120), which is exactly the
+    // proxy this test exists to catch.
+    act(() => {
+      setScrollMetrics(scrollEl, { scrollHeight: 700, clientHeight: 600, scrollTop: 0 });
+      fireEvent.scroll(scrollEl);
+    });
+
+    expect(screen.getByRole("button", { name: "Jump to latest messages" })).toBeInTheDocument();
     await flushVirtualizerDebounce();
   });
 
