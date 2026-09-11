@@ -1,8 +1,9 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { AlertTriangle, Loader2, Music2 } from "lucide-react";
+import { AlertTriangle, Music2 } from "lucide-react";
 import { Toggle } from "@/shared/components/toggle";
+import { Skeleton, SkeletonLine } from "@/shared/ui/skeleton";
 import {
   readSpotifyRedirectResult,
   useSpotifyConnection,
@@ -25,10 +26,11 @@ export function SpotifyConnectCard() {
     return (
       <Card>
         <div className="flex items-center gap-3.5 px-4 py-3.5">
-          <Loader2 className="h-3.5 w-3.5 animate-spin text-[var(--color-text-muted)]" />
-          <span className="text-[12px] text-[var(--color-text-muted)]" style={{ fontFamily: mono }}>
-            loading spotify status…
-          </span>
+          <Skeleton className="h-8 w-8 shrink-0 rounded-[10px]" />
+          <div className="flex flex-1 flex-col gap-1.5">
+            <SkeletonLine className="h-3.5 w-20" />
+            <SkeletonLine className="h-3 w-40" />
+          </div>
         </div>
       </Card>
     );

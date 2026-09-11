@@ -4,6 +4,7 @@ import { useState } from "react";
 import { cn } from "@/frontend-core/utils";
 import type { ImageAttachment } from "@relay/contracts";
 import { useInViewport } from "@/shared/hooks/use-in-viewport";
+import { Skeleton } from "@/shared/ui/skeleton";
 import { ImageBubble } from "./image-bubble";
 import { LssBadge } from "./lss-badge";
 
@@ -131,7 +132,7 @@ function GridTile({ attachment, width, height, onClick, overlayCount = 0 }: Tile
             className="absolute inset-0 h-full w-full scale-110 object-cover blur-md"
           />
         ) : (
-          <div className="absolute inset-0 animate-pulse" style={{ background: "var(--color-raised)" }} />
+          <Skeleton className="absolute inset-0 rounded-none bg-[var(--color-raised)]" />
         )
       )}
 

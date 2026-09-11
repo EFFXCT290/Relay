@@ -138,6 +138,36 @@ describe("SharedMediaGrid — pagination", () => {
     await waitFor(() => expect(mediaApi.gallery).toHaveBeenCalledWith("conv-1", "cursor-1", 30));
     await waitFor(() => expect(mediaApi.gallery).toHaveBeenCalledTimes(2));
   });
+
+  it("shows a row of 3 pulsing square tiles (not text) while fetching the next page", async () => {
+    let resolveNextPage!: (v: { items: MediaGalleryItem[]; nextCursor: string | null; totalCount: number }) => void;
+    vi.mocked(mediaApi.gallery)
+      .mockResolvedValueOnce({ items: [image({ id: "img-1" })], nextCursor: "cursor-1", totalCount: 2 })
+      .mockImplementationOnce(() => new Promise((resolve) => { resolveNextPage = resolve; }));
+
+    // Portaled to document.body, not RTL's own `container` wrapper — query
+    // document directly, same as the other tests in this file.
+    render(<SharedMediaGrid conversationId="conv-1" onClose={vi.fn()} />);
+    await waitFor(() => expect(screen.getByText("2 items")).toBeInTheDocument());
+    await waitFor(() => expect(lastObserverCallback).toBeDefined());
+
+    act(() => {
+      lastObserverCallback!([{ isIntersecting: true } as IntersectionObserverEntry], {} as IntersectionObserver);
+    });
+
+    await waitFor(() => expect(resolveNextPage).toBeDefined());
+
+    const tiles = document.querySelectorAll(".animate-pulse");
+    expect(tiles).toHaveLength(3);
+    for (const t of tiles) {
+      expect(t.className).toContain("h-[118px]"); // matches the real tile's fixed height
+      expect(t.className).not.toContain("rounded-full");
+    }
+    expect(screen.queryByText("Loading…")).not.toBeInTheDocument();
+
+    resolveNextPage({ items: [image({ id: "img-2" })], nextCursor: null, totalCount: 2 });
+    await waitFor(() => expect(mediaApi.gallery).toHaveBeenCalledTimes(2));
+  });
 });
 
 describe("SharedMediaGrid — responsive shell and close", () => {

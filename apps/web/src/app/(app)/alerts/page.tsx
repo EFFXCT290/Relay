@@ -9,6 +9,7 @@ import {
 } from "@/features/notifications/components/notification-card";
 import { useNotifications } from "@/providers/notifications-provider";
 import { groupByBucket } from "./group-by-bucket";
+import { Skeleton, SkeletonLine } from "@/shared/ui/skeleton";
 
 const mono = "var(--font-mono)";
 const display = "var(--font-display)";
@@ -112,10 +113,10 @@ function LoadingState() {
     <ul className="flex flex-col">
       {[0, 1, 2].map((i) => (
         <li key={i} className="flex items-center gap-3.5 px-6 py-3.5">
-          <div className="h-9 w-9 shrink-0 animate-pulse rounded-xl bg-white/5" />
+          <Skeleton className="h-9 w-9 shrink-0 rounded-xl" />
           <div className="flex flex-1 flex-col gap-2">
-            <div className="h-3 w-4/5 animate-pulse rounded bg-white/5" />
-            <div className="h-2.5 w-16 animate-pulse rounded bg-white/5" />
+            <SkeletonLine className="h-3 w-4/5" />
+            <SkeletonLine className="h-2.5 w-16" />
           </div>
         </li>
       ))}

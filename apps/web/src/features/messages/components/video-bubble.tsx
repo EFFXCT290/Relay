@@ -11,6 +11,7 @@ import { useState } from "react";
 import { Play, Loader2 } from "lucide-react";
 import { cn } from "@/frontend-core/utils";
 import type { VideoAttachment } from "@relay/contracts";
+import { Skeleton } from "@/shared/ui/skeleton";
 import { LssBadge } from "./lss-badge";
 
 const W     = 280;   // long-edge cap
@@ -73,7 +74,7 @@ export function VideoBubble({ attachment, isMine }: { attachment: VideoAttachmen
               }}
             />
           ) : (
-            <div className="absolute inset-0 animate-pulse" style={{ background: "var(--color-raised)" }} />
+            <Skeleton className="absolute inset-0 rounded-none bg-[var(--color-raised)]" />
           )}
 
           {/* Center control: play when ready, spinner while processing */}

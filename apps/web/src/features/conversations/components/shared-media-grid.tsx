@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { ArrowLeft, CirclePlay, X } from "lucide-react";
 import { mediaApi } from "@/frontend-core/api-client/media";
+import { Skeleton } from "@/shared/ui/skeleton";
 import { ImageLightbox, type LightboxState } from "@/features/messages/components/lightbox/image-lightbox";
 import type { MediaGalleryItem, ImageAttachment } from "@relay/contracts";
 
@@ -156,9 +157,11 @@ export function SharedMediaGrid({ conversationId, onClose }: { conversationId: s
 
             <div ref={sentinelRef} className="h-1 w-full" />
             {loading && (
-              <p className="py-2 text-center text-[11px] text-[var(--color-text-muted)]" style={{ fontFamily: mono }}>
-                Loading…
-              </p>
+              <div className="grid grid-cols-3 gap-1">
+                {[0, 1, 2].map((i) => (
+                  <Skeleton key={i} className="h-[118px] w-full rounded-[6px]" />
+                ))}
+              </div>
             )}
           </div>
         </div>

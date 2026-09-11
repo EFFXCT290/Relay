@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { PhoneIncoming, PhoneOutgoing, PhoneMissed, Video, Phone } from "lucide-react";
 import { api } from "@/frontend-core/api";
 import { Avatar } from "@/shared/components/avatar";
+import { SkeletonCircle, SkeletonLine } from "@/shared/ui/skeleton";
 import type { CallHistoryItem } from "@relay/contracts";
 import { callOutcome, RED } from "./call-outcome";
 
@@ -64,11 +65,21 @@ export default function CallsPage() {
       </header>
 
       {calls === null ? (
-        <div className="flex items-center justify-center py-16">
-          <span className="text-[11px] uppercase tracking-[0.18em] text-[var(--color-text-muted)]" style={{ fontFamily: mono }}>
-            loading
-          </span>
-        </div>
+        <ul>
+          {[0, 1, 2, 3].map((i) => (
+            <li
+              key={i}
+              className="flex items-center gap-3 border-b px-4 py-3"
+              style={{ borderColor: "var(--color-hairline)" }}
+            >
+              <SkeletonCircle size={40} />
+              <div className="flex flex-1 flex-col gap-2">
+                <SkeletonLine />
+                <SkeletonLine className="h-3 w-2/5" />
+              </div>
+            </li>
+          ))}
+        </ul>
       ) : error ? (
         <div className="px-4 py-8 text-center text-[13px] text-[var(--color-text-muted)]">{error}</div>
       ) : calls.length === 0 ? (

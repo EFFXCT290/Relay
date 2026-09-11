@@ -538,3 +538,62 @@ describe("ChatThreadPage — jump-to-bottom affordance", () => {
     await flushVirtualizerDebounce();
   });
 });
+
+describe("ChatThreadPage — header identity block loading shape", () => {
+  it("shows an avatar-circle + 2-line skeleton in the header before conversation detail loads", () => {
+    apiImpl = () => new Promise(() => {}); // never resolves — keeps `detail` null
+    const { container } = render(<ChatThreadPage />);
+
+    const header = container.querySelector("header")!;
+    expect(header).toBeTruthy();
+    expect(header.querySelectorAll(".animate-pulse.rounded-full")).toHaveLength(1); // avatar circle
+    expect(header.querySelectorAll(".animate-pulse:not(.rounded-full)")).toHaveLength(2); // 2 text lines
+  });
+});
+
+describe("ChatThreadPage — loading-older skeleton shape", () => {
+  it("shows 2 stacked bubble-shaped skeleton placeholders (not text) while fetching an older page", async () => {
+    const newer = makeMessage({ messageId: "msg-newer", body: "newer message", createdAt: "2026-01-01T00:05:00.000Z" });
+    const older = makeMessage({ messageId: "msg-older", body: "older message", createdAt: "2026-01-01T00:00:00.000Z" });
+
+    const olderPageGate = deferred<{ messages: Message[]; nextCursor: string | null }>();
+    apiImpl = async (path, opts) => {
+      const method = opts?.method ?? "GET";
+      if (path === `/api/conversations/${CONV_ID}` && method === "GET") return makeDetail();
+      if (path === `/api/conversations/${CONV_ID}/messages?limit=30` && method === "GET") {
+        return { messages: [newer], nextCursor: "cursor-1" };
+      }
+      if (path === `/api/conversations/${CONV_ID}/messages?limit=30&cursor=cursor-1` && method === "GET") {
+        return olderPageGate.promise;
+      }
+      if (path === `/api/conversations/${CONV_ID}/read` && method === "POST") return undefined;
+      if (path === `/api/conversations/${CONV_ID}/pins` && method === "GET") return { pins: [] };
+      if (path.startsWith(`/api/conversations/${CONV_ID}/media?`) && method === "GET") {
+        return { items: [], nextCursor: null, totalCount: 0 };
+      }
+      throw new Error(`unexpected call: ${method} ${path}`);
+    };
+
+    const { container } = render(<ChatThreadPage />);
+    await waitFor(() => expect(screen.queryByText("loading")).not.toBeInTheDocument());
+    await screen.findByText("newer message", { selector: "div" });
+
+    const scrollEl = container.querySelector(".overflow-y-auto") as HTMLElement;
+    act(() => {
+      Object.defineProperty(scrollEl, "scrollTop", { configurable: true, writable: true, value: 10 });
+      fireEvent.scroll(scrollEl);
+    });
+
+    await waitFor(() => expect(container.querySelectorAll(".animate-pulse").length).toBeGreaterThan(0));
+
+    const pulses = container.querySelectorAll(".animate-pulse");
+    expect(pulses).toHaveLength(2); // exactly 2 bubble placeholders
+    for (const p of pulses) expect(p.className).not.toContain("rounded-full"); // bubble shapes, not avatars
+    expect(screen.queryByText("loading older")).not.toBeInTheDocument();
+
+    await act(async () => {
+      olderPageGate.resolve({ messages: [older], nextCursor: null });
+      await olderPageGate.promise;
+    });
+  });
+});

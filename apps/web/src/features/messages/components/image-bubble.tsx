@@ -4,6 +4,7 @@ import { useState } from "react";
 import { cn } from "@/frontend-core/utils";
 import type { ImageAttachment } from "@relay/contracts";
 import { useInViewport } from "@/shared/hooks/use-in-viewport";
+import { Skeleton } from "@/shared/ui/skeleton";
 import { LssBadge } from "./lss-badge";
 
 const MAX_W = 280;
@@ -61,9 +62,9 @@ export function ImageBubble({ attachment, isMine, onOpenLightbox }: Props) {
             style={{ width, height }}
           />
         ) : (
-          <div
-            className="absolute inset-0 animate-pulse"
-            style={{ background: "var(--color-raised)", width, height }}
+          <Skeleton
+            className="absolute inset-0 rounded-none bg-[var(--color-raised)]"
+            style={{ width, height }}
           />
         )
       )}

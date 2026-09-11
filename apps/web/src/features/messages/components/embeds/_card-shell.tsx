@@ -1,9 +1,12 @@
+"use client";
+
 // Internal shared primitives — not exported from the package index.
 // Each provider component imports CardShell, ImageBanner, and AccentStrip
 // and plugs in its own header as children.
 
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import type { MessageEmbed } from "@relay/contracts";
+import { Skeleton } from "@/shared/ui/skeleton";
 
 type ShellProps = {
   embed: MessageEmbed;
@@ -63,18 +66,23 @@ export function ImageBanner({
   alt: string;
   overlay?: ReactNode;
 }) {
+  const [loaded, setLoaded] = useState(false);
+  const [errored, setErrored] = useState(false);
+
   return (
     <div className="relative w-full overflow-hidden" style={{ maxHeight: 180 }}>
+      {!loaded && !errored && (
+        <Skeleton className="absolute inset-0 rounded-none bg-[var(--color-raised)]" style={{ height: 180 }} />
+      )}
       {/* eslint-disable-next-line @next/next/no-img-element */}
       <img
         src={src}
         alt={alt}
-        className="w-full object-cover"
-        style={{ maxHeight: 180, display: "block" }}
+        className="w-full object-cover transition-opacity duration-300"
+        style={{ maxHeight: 180, display: errored ? "none" : "block", opacity: loaded ? 1 : 0 }}
         loading="lazy"
-        onError={(e) => {
-          (e.currentTarget as HTMLImageElement).style.display = "none";
-        }}
+        onLoad={() => setLoaded(true)}
+        onError={() => setErrored(true)}
       />
       {overlay}
     </div>

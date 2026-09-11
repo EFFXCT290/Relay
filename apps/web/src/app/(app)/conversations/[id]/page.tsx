@@ -10,6 +10,7 @@ import imageCompression from "browser-image-compression";
 import { ApiError, api } from "@/frontend-core/api";
 import { getSocket, getReconnectEpoch } from "@/frontend-core/socket";
 import { Avatar } from "@/shared/components/avatar";
+import { Skeleton, SkeletonCircle, SkeletonLine } from "@/shared/ui/skeleton";
 import {
   DaySeparator,
   MessageBubble,
@@ -1562,7 +1563,7 @@ export default function ChatThreadPage() {
       const row = flatRows[i];
       if (!row) return 68;
       switch (row.kind) {
-        case "loader":    return 48;
+        case "loader":    return 56; // 2 stacked bubble placeholders, taller than the old single centered text line
         case "separator": return 48;
         case "typing":    return 68;
         case "pending": {
@@ -1785,7 +1786,13 @@ export default function ChatThreadPage() {
               </div>
             </div>
           ) : (
-            <div className="h-9 w-32 animate-pulse rounded bg-white/5" />
+            <>
+              <SkeletonCircle size={36} />
+              <div className="flex min-w-0 flex-col gap-1.5">
+                <SkeletonLine className="h-3.5 w-28" />
+                <SkeletonLine className="h-2.5 w-16" />
+              </div>
+            </>
           )}
         </div>
         <button
@@ -1947,10 +1954,13 @@ export default function ChatThreadPage() {
                   className="px-4 pt-2 lg:px-8 xl:px-12"
                 >
                   {row.kind === "loader" && (
-                    <div className="flex items-center justify-center py-3">
-                      <span className="text-[10px] uppercase tracking-[0.18em] text-[var(--color-text-muted)]" style={{ fontFamily: mono }}>
-                        loading older
-                      </span>
+                    <div className="flex flex-col gap-1.5 py-2">
+                      <div className="flex justify-start">
+                        <Skeleton className="h-5 w-32 rounded-[16px_16px_16px_4px]" />
+                      </div>
+                      <div className="flex justify-end">
+                        <Skeleton className="h-5 w-24 rounded-[16px_16px_4px_16px]" />
+                      </div>
                     </div>
                   )}
                   {row.kind === "separator" && <DaySeparator date={row.label} />}
